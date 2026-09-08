@@ -12,6 +12,7 @@
  *   ./scripts/slice-run.ts --review        # review each slice before landing (implied by --auto)
  *   ./scripts/slice-run.ts --auto --no-review   # opt out of the review --auto implies
  *   ./scripts/slice-run.ts --gates 12      # run the landing gates on slice 12, land nothing
+ *   ./scripts/slice-run.ts --sync-edges    # write the edges the bodies claim, then stop
  *
  * Inside a finished slice, run ./scripts/slice-done.sh — this then re-runs the
  * gates, lands it, closes the ticket, and starts whatever that unblocked.
@@ -98,6 +99,7 @@ import { type Launcher, type Session, manual } from "./slice-launcher";
 import {
   type Epic,
   type TicketId,
+  bodyOnlyBlockers,
   compareIds,
   findEpics,
   openBlockers,
@@ -189,6 +191,16 @@ type Ticket = {
 };
 
 /**
+ * A ticket whose body names blockers the tracker has no edge for.
+ *
+ * Kept apart from `Ticket.blockedBy` on purpose: these are NOT scheduled on.
+ * The plan runs on the tracker's edges, and a body is prose that was true when
+ * someone wrote it. Promoting a claim to an edge is a decision with a flag
+ * attached (`--sync-edges`), never a side effect of reading the plan.
+ */
+type MissingEdge = { id: TicketId; blockers: TicketId[] };
+
+/**
  * Blockers whose ticket is already closed are dropped: the tracker clears a
  * blocking edge on close, and so must the plan, or a finished wave keeps
  * blocking the next one forever.
@@ -200,24 +212,53 @@ type Ticket = {
 function loadTickets(explicit: TicketId[]): {
   tickets: Ticket[];
   epics: Epic[];
+  missingEdges: MissingEdge[];
 } {
   const ids = explicit.length ? explicit : tracker.listReady(config.readyLabel);
 
-  if (ids.length === 0) return { tickets: [], epics: [] };
+  if (ids.length === 0) return { tickets: [], epics: [], missingEdges: [] };
+
+  // One fetch per ticket, however many readers want the text: findEpics reads
+  // every body for `## Parent` and the edge check below reads the same bodies
+  // for `## Blocked by`. Uncached that is two round trips per ticket to ask two
+  // questions about one string, and plan time is already two calls a ticket.
+  const bodies = new Map<TicketId, string>();
+  const body = (id: TicketId): string => {
+    const hit = bodies.get(id);
+    if (hit !== undefined) return hit;
+    const text = tracker.body(id);
+    bodies.set(id, text);
+    return text;
+  };
 
   // Explicit ids are the user's own answer and override the plan, here as
   // everywhere else — so the hierarchy is neither consulted nor paid for. That
   // is also what makes the exclusion below recoverable rather than a dead end:
   // `azelf run 17` runs #17.
-  const epics = explicit.length ? [] : findEpics(ids, tracker);
+  const epics = explicit.length
+    ? []
+    : findEpics(ids, {
+        idPattern: tracker.idPattern,
+        body,
+        children: tracker.children?.bind(tracker),
+      });
   const excluded = new Set(epics.map((e) => e.id));
   const runnable = ids.filter((id) => !excluded.has(id));
   const inSet = new Set(runnable);
 
   const tickets: Ticket[] = [];
+  const missingEdges: MissingEdge[] = [];
   for (const id of runnable) {
     const meta = tracker.get(id);
-    const stillBlocking = openBlockers(tracker.blockers(id));
+    const declared = tracker.blockers(id);
+    const stillBlocking = openBlockers(declared);
+    // Against the FULL blocker list, closed ones included — an edge the plan
+    // has already worked through is recorded, not missing. Unlike the epic
+    // check this runs for explicit ids too: naming ids says which tickets to
+    // run, not which edges exist, and the waves below are built from edges
+    // either way.
+    const claimed = bodyOnlyBlockers(body(id), declared, tracker.idPattern, id);
+    if (claimed.length > 0) missingEdges.push({ id, blockers: claimed });
     tickets.push({
       id,
       title: meta.title,
@@ -229,7 +270,7 @@ function loadTickets(explicit: TicketId[]): {
       wave: 0,
     });
   }
-  return { tickets, epics };
+  return { tickets, epics, missingEdges };
 }
 
 /**
@@ -253,6 +294,114 @@ function printEpics(epics: Epic[]): void {
     );
     console.log(`     Run it anyway with: azelf run ${e.id}`);
   }
+}
+
+/**
+ * What the bodies claim and the tracker does not know, as a note rather than a
+ * correction.
+ *
+ * Deliberately not a warning and deliberately not acted on. Most of these are
+ * not mistakes: a body saying "blocked by #19" often means "read #19 first",
+ * and the ticket that prompted all of this said in so many words that it
+ * "reads best after #19 … but does not depend on it". Turning that sentence
+ * into an edge would delay a slice by a whole wave for a reading order. So the
+ * tool says what it noticed and leaves the judgement where it belongs.
+ */
+function printMissingEdges(missing: MissingEdge[]): void {
+  if (missing.length === 0) return;
+  console.log("");
+  for (const m of missing) {
+    console.log(
+      `  ℹ ${ref(m.id)}'s body names ${
+        m.blockers.length === 1 ? "a blocker" : "blockers"
+      } ${tracker.name} has no edge for: ${m.blockers.map(ref).join(" ")}`,
+    );
+  }
+  console.log(
+    "     The plan above ignores them — it schedules on edges, not prose.",
+  );
+  console.log("     Record them with: azelf run --sync-edges");
+}
+
+/**
+ * Write the claimed edges the tracker is missing, one confirmation for the lot.
+ *
+ * This is the only write azelf makes to a tracker that is not a close-on-land,
+ * and it is the only one that changes what future runs schedule — so it is
+ * opt-in, it prints every edge before writing any, and it stops afterwards
+ * rather than running the plan it just invalidated.
+ */
+function syncEdges(missing: MissingEdge[], assumeYes: boolean): void {
+  if (missing.length === 0) {
+    console.log(
+      `\nevery blocker named in a body is already an edge on ${tracker.name} — nothing to sync.`,
+    );
+    return;
+  }
+  // Bound once: the contract makes this optional, and a tracker without it can
+  // still do everything else, so this is a refusal and not a crash.
+  const addBlocker = tracker.addBlocker?.bind(tracker);
+  if (!addBlocker) {
+    console.error(
+      `\n${tracker.name}'s adapter implements no addBlocker — azelf cannot write edges to it.`,
+    );
+    console.error(
+      "       The discrepancies above are still real; record them in the tracker by hand.",
+    );
+    process.exit(1);
+  }
+
+  const total = missing.reduce((n, m) => n + m.blockers.length, 0);
+  console.log("");
+  console.log(
+    `  ${total} edge${
+      total === 1 ? "" : "s"
+    } claimed by a body and missing from ${tracker.name}:`,
+  );
+  for (const m of missing) {
+    for (const b of m.blockers)
+      console.log(`    ${ref(m.id)} blocked by ${ref(b)}`);
+  }
+  console.log("");
+  console.log(
+    "  Writing these changes what every future run schedules: a blocked ticket",
+  );
+  console.log(
+    "  drops a wave, and it stops being runnable until its blocker closes.",
+  );
+  if (!assumeYes) {
+    const answer = prompt("\nwrite them? [y/N]") ?? "";
+    if (!/^y(es)?$/i.test(answer.trim())) {
+      console.log("stopped. Nothing was written.");
+      return;
+    }
+  }
+
+  console.log("");
+  let wrote = 0;
+  for (const m of missing) {
+    for (const b of m.blockers) {
+      try {
+        addBlocker(m.id, b);
+        wrote += 1;
+        console.log(`  ✓ ${ref(m.id)} blocked by ${ref(b)}`);
+      } catch (e) {
+        // One bad edge must not cost the others. A body naming a ticket that
+        // was renumbered or deleted is the ordinary case here, and failing the
+        // whole sync on it would mean fixing the prose before any real edge
+        // could be drawn.
+        console.log(
+          `  ✗ ${ref(m.id)} blocked by ${ref(b)}: ${
+            e instanceof Error ? e.message : String(e)
+          }`,
+        );
+      }
+    }
+  }
+  console.log("");
+  console.log(
+    `${wrote} of ${total} written. Run again to plan against the new graph.`,
+  );
 }
 
 /**
@@ -1099,7 +1248,7 @@ if (flag("--gates")) {
 }
 
 console.log(`── reading the plan from ${tracker.name} ──────────────────────`);
-const { tickets, epics } = loadTickets(explicit);
+const { tickets, epics, missingEdges } = loadTickets(explicit);
 // Before the empty check, not after: if every ready ticket turned out to be a
 // heading over the others, "nothing to run" is true and useless. The reason has
 // to come first or the run looks broken.
@@ -1112,8 +1261,18 @@ if (tickets.length === 0) {
   );
   process.exit(0);
 }
+
+// Acts on the discrepancies instead of reporting them, and then stops: the
+// edges it writes are the input to the plan, so a tree printed after this
+// would be the one computed before the change.
+if (flag("--sync-edges")) {
+  syncEdges(missingEdges, assumeYes);
+  process.exit(0);
+}
+
 assignWaves(tickets);
 const width = printTree(tickets);
+printMissingEdges(missingEdges);
 const maxParallel = Number(value("--max") ?? width);
 
 if (planOnly) process.exit(0);

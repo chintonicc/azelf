@@ -29,6 +29,7 @@ const usage = (): never => {
       "        --codex   also install /azelf into ~/.codex/prompts",
       "  azelf run [args…]",
       "        dispatch slices: --plan, --auto, or explicit ticket ids",
+      "        --sync-edges  record the blockers ticket bodies claim, then stop",
       "  azelf hook",
       "        print the shell autostart block, for pasting by hand",
     ].join("\n"),

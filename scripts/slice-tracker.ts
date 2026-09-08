@@ -116,6 +116,18 @@ export type Tracker = {
    * parent means there is no slice here at all.
    */
   children?(id: TicketId): TicketId[];
+  /**
+   * Record that `id` is blocked by `blockerId`. Optional, and NOTHING calls it
+   * unless the human asked for it in so many words (`--sync-edges`): every
+   * other write azelf makes to a tracker is a close-on-land, which is a fact
+   * about work that already happened. This one asserts a relationship, and a
+   * wrong assertion here reshapes the plan.
+   *
+   * Must be idempotent-ish: an edge that already exists is the outcome asked
+   * for, so re-recording it succeeds rather than throwing. Throws only when the
+   * edge could not be made.
+   */
+  addBlocker?(id: TicketId, blockerId: TicketId): void;
   /** Put the ticket in the state `blockers` reports as `closed`. Throws on failure. */
   close(id: TicketId, comment: string): void;
 };
@@ -246,6 +258,38 @@ export function parentFromBody(
  */
 export function blockersFromBody(body: string, idPattern: string): TicketId[] {
   return idsIn(section(body, "blocked by"), idPattern);
+}
+
+/**
+ * The blockers a ticket's BODY claims that the tracker has no edge for.
+ *
+ * This is a DISAGREEMENT, not a defect, and the two sides fail differently: a
+ * body is written once by whoever sliced the work and is never updated, while
+ * the tracker's edges are what the dispatcher actually schedules on. So the
+ * body is a claim about intent and the edge is the operative fact, and where
+ * they differ the honest move is to say so and let a human decide — which is
+ * why this returns a list rather than writing anything.
+ *
+ * `known` is the tracker's FULL blocker list, closed ones included. A claimed
+ * edge whose blocker is already closed is not missing: the tracker recorded it
+ * and then cleared it by closing, which is the normal end of an edge's life.
+ * Passing only the open blockers here would re-report every edge the plan has
+ * already worked through, and `--sync-edges` would then rewrite them.
+ *
+ * `self` drops a ticket that names itself, which is a typo rather than a cycle
+ * — `addBlocker` would be rejected by any tracker, but reporting it as a
+ * missing edge invites someone to try.
+ */
+export function bodyOnlyBlockers(
+  body: string,
+  known: Blocker[],
+  idPattern: string,
+  self?: TicketId,
+): TicketId[] {
+  const have = new Set(known.map((b) => b.id));
+  return blockersFromBody(body, idPattern).filter(
+    (id) => id !== self && !have.has(id),
+  );
 }
 
 /** A ticket that other tickets in the same set hang under. */
@@ -447,6 +491,50 @@ export function github(opts: GithubOptions = {}): Tracker {
         "--jq",
         "[.[] | {number}]",
       ]).map((c) => String(c.number));
+    },
+
+    addBlocker(id, blockerId) {
+      // THE PAYLOAD TAKES AN INTERNAL DATABASE ID, NOT AN ISSUE NUMBER, and
+      // getting that wrong does not fail — it silently records the WRONG EDGE.
+      //
+      // The endpoint's one required key is `issue_id`, and every other id in
+      // this adapter is an issue number, so `issue_id: 20` is the obvious
+      // reading. It is also accepted: probing this on a repo where #19 was the
+      // intended blocker returned 201, and the edge it created pointed at
+      // `sparklemotion/nokogiri#2` — a stranger's issue from 2008, which is
+      // simply what internal id 19 happens to be. Ids are global to GitHub and
+      // the endpoint does not require the blocker to be in this repo, so a
+      // small number always resolves to SOMETHING, and never to the ticket
+      // meant. There is no error to notice, only a dependency on a repository
+      // nobody involved has heard of.
+      //
+      // So the number is resolved through the API first, always. The extra
+      // call is the price of the write being the one asked for.
+      const internal = call<{ id: number }>([
+        "api",
+        `repos/{owner}/{repo}/issues/${blockerId}`,
+        "--jq",
+        "{id}",
+      ]).id;
+
+      const r = gh([
+        "api",
+        "--method",
+        "POST",
+        `repos/{owner}/{repo}/issues/${id}/dependencies/blocked_by`,
+        "-F",
+        `issue_id=${internal}`,
+      ]);
+      if (r.ok) return;
+      // An edge that is already there is the state this was asked to produce.
+      // GitHub reports it as a 422 rather than a no-op; the contract above
+      // says that is success, so that two runs of --sync-edges do not differ.
+      if (/already been taken/i.test(r.stderr || r.stdout)) return;
+      throw new Error(
+        `could not record #${id} as blocked by #${blockerId}:\n${(
+          r.stderr || r.stdout
+        ).trim()}`,
+      );
     },
 
     close(id, comment) {

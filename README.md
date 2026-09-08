@@ -202,6 +202,7 @@ Installs into the repo you are standing in.
 | `--auto` | dispatch, wait, land, release the next wave, repeat until done |
 | `--once` | one round only: land what is ready, then stop |
 | `--gates <ids…>` | run only the landing gates against existing worktrees, and exit |
+| `--sync-edges` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
 | `--max <n>` | cap concurrent slices (default: the widest wave in the plan) |
 | `--interval <s>` | seconds between polls under `--auto` (default 30) |
 | `--no-start` | prep the worktree but do not open a session |
@@ -361,6 +362,39 @@ giving context. Only ids under the heading count.
 
 Explicit ids override all of it: `azelf run 17` runs #17, and when you name ids on
 the command line the hierarchy is neither consulted nor paid for.
+
+#### Claimed blockers are reported, never assumed
+
+The same read applies to `## Blocked by`. Where a body names a blocker the tracker
+has no edge for, azelf prints it under the tree and carries on planning:
+
+```
+  ℹ #22's body names a blocker GitHub has no edge for: #19
+     The plan above ignores them — it schedules on edges, not prose.
+     Record them with: azelf run --sync-edges
+```
+
+It is a note and not a warning, because most of these are not mistakes. "Blocked
+by #19" in a body very often means "read #19 first", and promoting that to an edge
+would delay a slice by a whole wave for a reading order. The plan schedules on the
+tracker's edges; the body is a claim about intent that nobody updated.
+
+`azelf run --sync-edges` is the opt-in that acts on it. It lists every claimed
+edge, asks once, writes the confirmed ones through the tracker's optional
+`addBlocker`, and then **stops** — the edges it just wrote are the input to the
+plan, so anything printed after them would be the plan from before. Run it again to
+see the new graph. A tracker whose adapter implements no `addBlocker` refuses
+cleanly rather than crashing.
+
+> **If you implement `addBlocker` for another tracker, read this.** GitHub's
+> endpoint takes `issue_id` — the *internal database id*, not the issue number.
+> Passing the number does not fail. It returns 201 and links whatever issue in all
+> of GitHub happens to carry that id: probing it with `issue_id=19` on a repo whose
+> #19 was the intended blocker produced a dependency on `sparklemotion/nokogiri#2`,
+> a stranger's issue from 2008. Ids are global and the endpoint does not require
+> the blocker to be in your repo, so a small number always resolves to *something*
+> and never to the ticket you meant. `github()` resolves the number through the API
+> before every write for exactly this reason.
 
 ### Launcher
 

@@ -1,6 +1,7 @@
 import {
   type GhRunner,
   blockersFromBody,
+  bodyOnlyBlockers,
   compareIds,
   findEpics,
   github,
@@ -135,6 +136,67 @@ describe("github() — the adapter that ships", () => {
       "Landed on master via slice-land.sh.",
     ]);
     expect(() => t.close("9", "c")).toThrow(/Could not resolve to an Issue/);
+  });
+
+  it("addBlocker resolves the issue NUMBER to its internal id before posting", () => {
+    // The endpoint's `issue_id` is the internal database id. Posting the issue
+    // number instead does not fail — it links whatever issue in all of GitHub
+    // carries that id, which is how a probe with issue_id=19 produced an edge
+    // to nokogiri#2. So the resolution below is the whole point of the method.
+    const { gh, calls } = fakeGh({
+      "api repos/{owner}/{repo}/issues/19 --jq {id}": {
+        stdout: '{"id":5385303756}',
+      },
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=5385303756":
+        { stdout: '{"number":20}' },
+    });
+    expect(() => github({ gh }).addBlocker?.("20", "19")).not.toThrow();
+    expect(calls).toHaveLength(2);
+    expect(calls[0]).toEqual([
+      "api",
+      "repos/{owner}/{repo}/issues/19",
+      "--jq",
+      "{id}",
+    ]);
+    // The number never reaches the payload.
+    expect(calls[1]?.at(-1)).toBe("issue_id=5385303756");
+  });
+
+  it("addBlocker treats an edge that already exists as the outcome asked for", () => {
+    const { gh } = fakeGh({
+      "api repos/{owner}/{repo}/issues/19 --jq {id}": { stdout: '{"id":42}' },
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=42":
+        {
+          ok: false,
+          stderr:
+            "Validation failed: Target issue has already been taken (HTTP 422)",
+        },
+    });
+    // Two syncs in a row must not differ.
+    expect(() => github({ gh }).addBlocker?.("20", "19")).not.toThrow();
+  });
+
+  it("addBlocker throws with gh's output on any other failure", () => {
+    const { gh } = fakeGh({
+      "api repos/{owner}/{repo}/issues/19 --jq {id}": { stdout: '{"id":42}' },
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=42":
+        { ok: false, stderr: "HTTP 403: Resource not accessible" },
+    });
+    expect(() => github({ gh }).addBlocker?.("20", "19")).toThrow(
+      /could not record #20 as blocked by #19[\s\S]*403/,
+    );
+  });
+
+  it("addBlocker writes nothing when the blocker cannot be resolved", () => {
+    const { gh, calls } = fakeGh({
+      "api repos/{owner}/{repo}/issues/999 --jq {id}": {
+        ok: false,
+        stderr: "HTTP 404: Not Found",
+      },
+    });
+    expect(() => github({ gh }).addBlocker?.("20", "999")).toThrow(/404/);
+    // The POST never happened — a failed lookup must not fall through to one.
+    expect(calls).toHaveLength(1);
   });
 
   it("a failed gh call throws with gh's output — never an empty list", () => {
@@ -399,5 +461,58 @@ describe("findEpics — which tickets are headings, not work", () => {
       { id: "1", children: ["20"] },
       { id: "2", children: ["10"] },
     ]);
+  });
+});
+
+describe("bodyOnlyBlockers — what the prose claims and the tracker has not got", () => {
+  const B = (body: string, known: { id: string; state: "open" | "closed" }[]) =>
+    bodyOnlyBlockers(body, known, N);
+
+  it("reports a claimed blocker the tracker has no edge for", () => {
+    expect(B("## Blocked by\n\n#19\n", [])).toEqual(["19"]);
+  });
+
+  it("is empty when the tracker already has the edge", () => {
+    expect(B("## Blocked by\n\n#19\n", [{ id: "19", state: "open" }])).toEqual(
+      [],
+    );
+  });
+
+  it("counts a CLOSED edge as recorded, not missing", () => {
+    // The tracker drew this edge and then cleared it by closing #19. Reporting
+    // it would ask --sync-edges to redraw every edge the plan has worked
+    // through, which would block the ticket on work that is already done.
+    expect(
+      B("## Blocked by\n\n#19\n", [{ id: "19", state: "closed" }]),
+    ).toEqual([]);
+  });
+
+  it("is empty for 'None (can start immediately)' — the common case", () => {
+    expect(B("## Blocked by\n\nNone (can start immediately).\n", [])).toEqual(
+      [],
+    );
+  });
+
+  it("does not read a mention outside the section as a claim", () => {
+    // The live case: #20 said it "reads best after #19" but declared no
+    // blocker. That sentence must not become an edge.
+    const body =
+      "## Blocked by\n\nNone (can start immediately). Reads best after #19, but does not depend on it.\n";
+    // The #19 here IS under the heading, so it is claimed — the guard that
+    // matters is the one below, where the mention sits in another section.
+    expect(B(body, [])).toEqual(["19"]);
+    expect(
+      B("## Notes\n\nSupersedes #4.\n\n## Blocked by\n\nNone.\n", []),
+    ).toEqual([]);
+  });
+
+  it("drops a ticket that names itself", () => {
+    expect(bodyOnlyBlockers("## Blocked by\n\n#20\n", [], N, "20")).toEqual([]);
+  });
+
+  it("reports only the missing half of a mixed list", () => {
+    expect(
+      B("## Blocked by\n\n#18, #19 and #20\n", [{ id: "19", state: "open" }]),
+    ).toEqual(["18", "20"]);
   });
 });
