@@ -95,7 +95,13 @@ import { type Launcher, type Session, manual } from "./slice-launcher";
 // `tracker`, never through gh directly. Ids are strings the tracker defines
 // (`ref` writes one the way that tracker does — `#3`, or `ENG-3`); see
 // slice-tracker.ts for the contract, and for why closing is what unblocks.
-import { type TicketId, compareIds, openBlockers } from "./slice-tracker";
+import {
+  type Epic,
+  type TicketId,
+  compareIds,
+  findEpics,
+  openBlockers,
+} from "./slice-tracker";
 
 // NOT named `base`: reviewPlan already takes a `base` parameter — the commit
 // the run started from — and a module const of the same name would be shadowed
@@ -191,14 +197,25 @@ type Ticket = {
  * are derived from them by assignWaves and printTree — that is the one
  * direction every tracker can answer; see slice-tracker.ts.
  */
-function loadTickets(explicit: TicketId[]): Ticket[] {
+function loadTickets(explicit: TicketId[]): {
+  tickets: Ticket[];
+  epics: Epic[];
+} {
   const ids = explicit.length ? explicit : tracker.listReady(config.readyLabel);
 
-  if (ids.length === 0) return [];
-  const inSet = new Set(ids);
+  if (ids.length === 0) return { tickets: [], epics: [] };
+
+  // Explicit ids are the user's own answer and override the plan, here as
+  // everywhere else — so the hierarchy is neither consulted nor paid for. That
+  // is also what makes the exclusion below recoverable rather than a dead end:
+  // `azelf run 17` runs #17.
+  const epics = explicit.length ? [] : findEpics(ids, tracker);
+  const excluded = new Set(epics.map((e) => e.id));
+  const runnable = ids.filter((id) => !excluded.has(id));
+  const inSet = new Set(runnable);
 
   const tickets: Ticket[] = [];
-  for (const id of ids) {
+  for (const id of runnable) {
     const meta = tracker.get(id);
     const stillBlocking = openBlockers(tracker.blockers(id));
     tickets.push({
@@ -212,7 +229,30 @@ function loadTickets(explicit: TicketId[]): Ticket[] {
       wave: 0,
     });
   }
-  return tickets;
+  return { tickets, epics };
+}
+
+/**
+ * Why a ticket was left out, and how to overrule it.
+ *
+ * The override line is load-bearing. An exclusion the tool will not explain and
+ * cannot be argued with is worse than the collision it prevents: the ticket
+ * simply vanishes from the plan and the next question is "why is nothing
+ * running for #17".
+ */
+function printEpics(epics: Epic[]): void {
+  for (const e of epics) {
+    console.log("");
+    console.log(
+      `  ⚠ ${ref(e.id)} excluded — named as Parent by ${e.children
+        .map(ref)
+        .join(" ")}`,
+    );
+    console.log(
+      "     An epic closes when its children close; it is not a slice.",
+    );
+    console.log(`     Run it anyway with: azelf run ${e.id}`);
+  }
 }
 
 /**
@@ -1059,9 +1099,17 @@ if (flag("--gates")) {
 }
 
 console.log(`── reading the plan from ${tracker.name} ──────────────────────`);
-const tickets = loadTickets(explicit);
+const { tickets, epics } = loadTickets(explicit);
+// Before the empty check, not after: if every ready ticket turned out to be a
+// heading over the others, "nothing to run" is true and useless. The reason has
+// to come first or the run looks broken.
+printEpics(epics);
 if (tickets.length === 0) {
-  console.log(`no open ${config.readyLabel} tickets — nothing to run.`);
+  console.log(
+    epics.length
+      ? `\nevery ready ticket is an epic — label a child ${config.readyLabel}, or run one by id.`
+      : `no open ${config.readyLabel} tickets — nothing to run.`,
+  );
   process.exit(0);
 }
 assignWaves(tickets);

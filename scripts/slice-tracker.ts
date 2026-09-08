@@ -97,6 +97,25 @@ export type Tracker = {
   blockers(id: TicketId): Blocker[];
   /** The ticket text; empty string when it has none. */
   body(id: TicketId): string;
+  /**
+   * The tickets hanging UNDER this one, if the tracker models hierarchy
+   * natively; `[]` when it has none. Optional — most trackers do not model it
+   * at all, and an adapter that omits this stays valid: the dispatcher falls
+   * back to the `## Parent` convention through `parentFromBody`.
+   *
+   * Children and not parent, for the same reason `blockers` is blocked-by and
+   * not blocks (point 1 in the header): this is the direction GitHub can
+   * actually answer. `/issues/{n}/sub_issues` lists children; nothing returns a
+   * parent, and deriving one would mean scanning every candidate. A tracker
+   * that natively knows the parent instead — Jira's epic link, Linear's parent
+   * — answers this by querying its children, which both support.
+   *
+   * A parent is not a blocker and must never be reported as one. A blocker says
+   * "do that first"; a parent says "this is not work, it is a heading over
+   * work". They schedule differently: a blocker delays a slice by a wave, a
+   * parent means there is no slice here at all.
+   */
+  children?(id: TicketId): TicketId[];
   /** Put the ticket in the state `blockers` reports as `closed`. Throws on failure. */
   close(id: TicketId, comment: string): void;
 };
@@ -166,6 +185,119 @@ export function idFromBranch(
     new RegExp(`^${escapeRegExp(pre)}(${inner})${escapeRegExp(suf)}$`),
   );
   return m?.[1] ?? null;
+}
+
+/**
+ * The lines under a `## <name>` heading, up to the next heading of the same
+ * level or deeper. Shared by the two body readers below.
+ *
+ * Section-scoped on purpose, and that scope is the whole point: a bare `#17`
+ * somewhere in a paragraph is a MENTION, not a hierarchy. Ticket bodies
+ * cross-reference each other constantly — "reads best after #19", "supersedes
+ * #4" — and a parser that read those as structure would exclude tickets that
+ * are merely being polite about context. Only what sits under the heading
+ * counts.
+ */
+function section(body: string, name: string): string {
+  const lines = body.split("\n");
+  const start = lines.findIndex((l) =>
+    new RegExp(`^#{1,6}\\s+${name}\\s*$`, "i").test(l.trim()),
+  );
+  if (start < 0) return "";
+  const rest = lines.slice(start + 1);
+  const end = rest.findIndex((l) => /^#{1,6}\s/.test(l.trim()));
+  return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+}
+
+/** Every id matching `idPattern` in `text`, in order, without duplicates. */
+function idsIn(text: string, idPattern: string): TicketId[] {
+  // The tracker's refTemplate is `#{n}` on GitHub, so the marker is the `#`.
+  // Anchors are stripped: this searches within a line rather than matching one.
+  const inner = idPattern.slice(1, -1);
+  const found = text.match(new RegExp(`#(${inner})\\b`, "g")) ?? [];
+  return [...new Set(found.map((s) => s.slice(1)))];
+}
+
+/**
+ * The ticket this one names as its parent, or `null`.
+ *
+ * Reads the `## Parent` convention that ticket-writing skills emit. This is a
+ * FALLBACK: a tracker that models hierarchy natively should answer through
+ * `Tracker.parent`, and the dispatcher prefers that. It exists because the
+ * convention is real and the native edge frequently is not — a body can assert
+ * a parent that GitHub has no record of, which is exactly the case that made
+ * five overlapping slices look like five independent ones.
+ */
+export function parentFromBody(
+  body: string,
+  idPattern: string,
+): TicketId | null {
+  return idsIn(section(body, "parent"), idPattern)[0] ?? null;
+}
+
+/**
+ * Ticket ids named under a `## Blocked by` heading.
+ *
+ * `[]` covers both "the section is absent" and "the section says None", which
+ * are the same fact for scheduling. Note what this does NOT do: it reports what
+ * the body CLAIMS, which may disagree with the tracker's own edges. Reconciling
+ * the two is the caller's business, and azelf only ever reports the difference
+ * unless asked in so many words to write it.
+ */
+export function blockersFromBody(body: string, idPattern: string): TicketId[] {
+  return idsIn(section(body, "blocked by"), idPattern);
+}
+
+/** A ticket that other tickets in the same set hang under. */
+export type Epic = { id: TicketId; children: TicketId[] };
+
+/**
+ * The tickets in `ids` that other tickets in `ids` hang under.
+ *
+ * Two sources, and the cheap one is not the trusted one. The `## Parent`
+ * convention is read from bodies the dispatcher fetches anyway; a tracker that
+ * models hierarchy natively answers `children()` and OVERRIDES the prose,
+ * because structured data beats a heading someone typed. The prose path cannot
+ * simply be dropped in its favour, though: the case this was written for had
+ * four tickets naming `#17` as their parent while GitHub's sub-issue graph was
+ * empty, so the native answer alone would have found nothing at all.
+ *
+ * Only parents INSIDE the set count. A parent outside it is context, not a
+ * scheduling fact — it is not competing for a worktree, and excluding on it
+ * would drop a runnable ticket because of a heading somewhere else entirely.
+ *
+ * Pure and injectable rather than reaching for the module's `tracker`, so the
+ * inversion can be tested without a network or a config: `slice-run.ts` does
+ * its work at import time and cannot host a testable function.
+ */
+export function findEpics(
+  ids: TicketId[],
+  from: Pick<Tracker, "idPattern" | "body"> &
+    Partial<Pick<Tracker, "children">>,
+): Epic[] {
+  const inSet = new Set(ids);
+  const parentOf = new Map<TicketId, TicketId>();
+
+  for (const id of ids) {
+    const named = parentFromBody(from.body(id), from.idPattern);
+    if (named && inSet.has(named) && named !== id) parentOf.set(id, named);
+  }
+  // Applied second so the tracker's own answer wins where it has one.
+  if (from.children) {
+    for (const id of ids) {
+      for (const kid of from.children(id)) {
+        if (inSet.has(kid) && kid !== id) parentOf.set(kid, id);
+      }
+    }
+  }
+
+  const byParent = new Map<TicketId, TicketId[]>();
+  for (const [child, parent] of parentOf) {
+    byParent.set(parent, [...(byParent.get(parent) ?? []), child]);
+  }
+  return [...byParent.entries()]
+    .map(([id, children]) => ({ id, children: children.sort(compareIds) }))
+    .sort((a, b) => compareIds(a.id, b.id));
 }
 
 // ─── the GitHub adapter ───────────────────────────────────────────────────
@@ -295,6 +427,26 @@ export function github(opts: GithubOptions = {}): Tracker {
         call<{ body: string | null }>(["issue", "view", id, "--json", "body"])
           .body ?? ""
       );
+    },
+
+    children(id) {
+      // `sub_issues_summary` rides along on the issue object, so the count is
+      // free and the listing call only happens for issues that HAVE children.
+      // On a repo that uses no sub-issues — most of them — this costs one API
+      // call per ticket and never the second.
+      const summary = call<{ sub_issues_summary?: { total?: number } }>([
+        "api",
+        `repos/{owner}/{repo}/issues/${id}`,
+        "--jq",
+        "{sub_issues_summary}",
+      ]).sub_issues_summary;
+      if (!summary?.total) return [];
+      return call<{ number: number }[]>([
+        "api",
+        `repos/{owner}/{repo}/issues/${id}/sub_issues`,
+        "--jq",
+        "[.[] | {number}]",
+      ]).map((c) => String(c.number));
     },
 
     close(id, comment) {

@@ -1,10 +1,13 @@
 import {
   type GhRunner,
+  blockersFromBody,
   compareIds,
+  findEpics,
   github,
   idFromBranch,
   idPatternProblem,
   openBlockers,
+  parentFromBody,
   refFor,
 } from "@/scripts/slice-tracker";
 import { describe, expect, it } from "vitest";
@@ -233,6 +236,168 @@ describe("compareIds — the tree's sort order", () => {
       "ENG-9",
       "ENG-12",
       "ENG-100",
+    ]);
+  });
+});
+
+/**
+ * The body readers exist because a ticket can assert a hierarchy the tracker
+ * has no record of. That is not hypothetical: the case they were written for
+ * had four tickets naming `## Parent — #17` while GitHub's own sub-issue and
+ * dependency graphs were completely empty, so a dispatcher trusting only the
+ * native edges scheduled the parent and its four children as five peers.
+ *
+ * The risk runs the other way too, which is what most of these cases guard:
+ * ticket bodies cross-reference each other constantly, and a parser that read
+ * every `#17` as structure would exclude tickets that were only being polite
+ * about context. Hence section scoping, and hence the false-positive tests.
+ */
+const N = "^[0-9]+$";
+
+describe("parentFromBody — the `## Parent` convention", () => {
+  it("reads the id under the heading", () => {
+    const body =
+      "## Parent\n\n#17 — The time-boxed category\n\n## What to build";
+    expect(parentFromBody(body, N)).toBe("17");
+  });
+
+  it("is null when there is no Parent section", () => {
+    expect(parentFromBody("## What to build\n\nA thing.", N)).toBeNull();
+  });
+
+  it("is null when the section names nothing", () => {
+    expect(parentFromBody("## Parent\n\nNone.\n\n## Next", N)).toBeNull();
+  });
+
+  it("ignores ids OUTSIDE the section — a mention is not a hierarchy", () => {
+    const body = "## Blocked by\n\nNone. Reads best after #19.\n";
+    expect(parentFromBody(body, N)).toBeNull();
+  });
+
+  it("stops at the next heading, so a later section cannot leak in", () => {
+    const body = "## Parent\n\nNone.\n\n## Blocked by\n\n#19\n";
+    expect(parentFromBody(body, N)).toBeNull();
+  });
+
+  it("takes the first id when the section names several", () => {
+    expect(parentFromBody("## Parent\n\n#17, see also #4\n", N)).toBe("17");
+  });
+
+  it("accepts any heading level and any case", () => {
+    expect(parentFromBody("### parent\n\n#17\n", N)).toBe("17");
+    expect(parentFromBody("# PARENT\n\n#17\n", N)).toBe("17");
+  });
+
+  it("respects the tracker's idPattern rather than assuming digits", () => {
+    const body = "## Parent\n\n#ENG-17 — a thing\n";
+    expect(parentFromBody(body, "^ENG-[0-9]+$")).toBe("ENG-17");
+    expect(parentFromBody(body, N)).toBeNull();
+  });
+
+  it("survives an empty body", () => {
+    expect(parentFromBody("", N)).toBeNull();
+  });
+});
+
+describe("blockersFromBody — the `## Blocked by` convention", () => {
+  it("reads every id under the heading, without duplicates", () => {
+    const body = "## Blocked by\n\n#19 and #20, plus #19 again\n\n## Next";
+    expect(blockersFromBody(body, N)).toEqual(["19", "20"]);
+  });
+
+  it("reads 'None (can start immediately)' as no blockers", () => {
+    const body = "## Blocked by\n\nNone (can start immediately).\n";
+    expect(blockersFromBody(body, N)).toEqual([]);
+  });
+
+  it("is empty when the section is absent", () => {
+    expect(blockersFromBody("## Parent\n\n#17\n", N)).toEqual([]);
+  });
+
+  it("does not pick up the parent from its own section", () => {
+    const body = "## Parent\n\n#17\n\n## Blocked by\n\nNone.\n";
+    expect(blockersFromBody(body, N)).toEqual([]);
+  });
+});
+
+describe("findEpics — which tickets are headings, not work", () => {
+  /** A tracker stub: bodies by id, and optionally a native child map. */
+  const from = (
+    bodies: Record<string, string>,
+    children?: Record<string, string[]>,
+  ) => ({
+    idPattern: N,
+    body: (id: string) => bodies[id] ?? "",
+    ...(children ? { children: (id: string) => children[id] ?? [] } : {}),
+  });
+
+  const child = (parent: string) => `## Parent\n\n#${parent} — a thing\n`;
+
+  it("finds the parent named by every other ticket in the set", () => {
+    const epics = findEpics(
+      ["17", "18", "19", "20", "21"],
+      from({
+        "17": "## Problem Statement\n\nA feature.",
+        "18": child("17"),
+        "19": child("17"),
+        "20": child("17"),
+        "21": child("17"),
+      }),
+    );
+    expect(epics).toEqual([{ id: "17", children: ["18", "19", "20", "21"] }]);
+  });
+
+  it("is empty when no ticket names a parent — the common case", () => {
+    const epics = findEpics(
+      ["18", "19"],
+      from({ "18": "## Blocked by\n\nNone.", "19": "## Blocked by\n\nNone." }),
+    );
+    expect(epics).toEqual([]);
+  });
+
+  it("ignores a parent OUTSIDE the set — it is context, not a competitor", () => {
+    // #17 is not being run, so nothing it is a heading over needs excluding.
+    expect(
+      findEpics(["18", "19"], from({ "18": child("17"), "19": child("17") })),
+    ).toEqual([]);
+  });
+
+  it("lets the tracker's native hierarchy override the prose", () => {
+    // The body of #19 claims #17; the tracker says #19 hangs under #18.
+    const epics = findEpics(
+      ["17", "18", "19"],
+      from({ "17": "", "18": "", "19": child("17") }, { "18": ["19"] }),
+    );
+    expect(epics).toEqual([{ id: "18", children: ["19"] }]);
+  });
+
+  it("still reads the prose when the tracker knows no hierarchy at all", () => {
+    // The case this was written for: GitHub's sub-issue graph was empty while
+    // four bodies named a parent. A native-only reading finds nothing.
+    const epics = findEpics(
+      ["17", "18"],
+      from({ "17": "", "18": child("17") }, {}),
+    );
+    expect(epics).toEqual([{ id: "17", children: ["18"] }]);
+  });
+
+  it("ignores a ticket naming itself", () => {
+    expect(findEpics(["17"], from({ "17": child("17") }))).toEqual([]);
+  });
+
+  it("reports several epics, and sorts them and their children numerically", () => {
+    const epics = findEpics(
+      ["1", "2", "10", "20"],
+      from({
+        "1": "",
+        "2": "",
+        "10": child("2"),
+        "20": child("1"),
+      }),
+    );
+    expect(epics).toEqual([
+      { id: "1", children: ["20"] },
+      { id: "2", children: ["10"] },
     ]);
   });
 });

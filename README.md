@@ -332,6 +332,36 @@ GitHub's native issue dependencies satisfy this. A tracker where "done" and
 "closed" are different states needs its own implementation of the five-method
 `Tracker` contract.
 
+#### Epics are excluded from the plan
+
+A ticket that other ready tickets name as their **parent** is a heading over work,
+not work. azelf drops it from the plan and says so:
+
+```
+  ⚠ #17 excluded — named as Parent by #18 #19 #20 #21
+     An epic closes when its children close; it is not a slice.
+     Run it anyway with: azelf run 17
+```
+
+Two sources, in that order of trust. If your tracker models hierarchy natively it
+is asked (`children()`, implemented for GitHub sub-issues). Otherwise the ticket
+body is read for a `## Parent` section naming an id.
+
+The prose fallback is not a nicety. The case this was built for had four tickets
+each declaring `## Parent — #17` while GitHub's sub-issue *and* dependency graphs
+were completely empty — so the hierarchy was real, written down, and invisible to
+every structured query. Without the fallback azelf would have opened five sessions:
+one building the epic and four each building a quarter of it, all landing onto the
+same base branch.
+
+Parsing is section-scoped on purpose. A bare `#17` in a paragraph is a mention, not
+a hierarchy — ticket bodies cross-reference each other constantly ("reads best
+after #19"), and treating those as structure would exclude tickets that were only
+giving context. Only ids under the heading count.
+
+Explicit ids override all of it: `azelf run 17` runs #17, and when you name ids on
+the command line the hierarchy is neither consulted nor paid for.
+
 ### Launcher
 
 **azelf is not Warp-only.** It runs in any terminal, on any platform. The launcher
