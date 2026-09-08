@@ -74,6 +74,20 @@ export type SliceConfig = {
   /** Gitignored files copied into each new worktree. */
   provisionCopy: string[];
   /**
+   * Paths the overlap report leaves out. Optional; `[]` and omitted are the
+   * same. `*` stays inside one path segment, `**` crosses them, a trailing
+   * `/` means everything beneath a directory.
+   *
+   * For paths where two slices touching one file tells you nothing because
+   * their edits cannot interact — a lockfile, generated output, a locale
+   * catalogue each slice adds its own keys to.
+   *
+   * NOT for a file every slice APPENDS to. See `ignores()` in
+   * scripts/slice-overlap.ts for why that is the exact opposite case, and for
+   * the wave that made the distinction concrete.
+   */
+  overlapIgnore?: string[];
+  /**
    * What a slice must pass before it lands, in order. Built from the shapes
    * in `slice-gates.ts`; every one must be read-only (see the contract there).
    * TypeScript-only — functions, so the shell bridge cannot carry them and no
@@ -195,6 +209,23 @@ function validate(c: SliceConfig): SliceConfig {
     bad("branchPattern must contain {n} exactly once, or it cannot round-trip");
   }
   if (!c.readyLabel) bad("readyLabel must be a non-empty label name");
+  if (c.overlapIgnore !== undefined) {
+    if (!Array.isArray(c.overlapIgnore)) {
+      bad("overlapIgnore must be an array of path patterns, or left out");
+    }
+    for (const [i, p] of c.overlapIgnore.entries()) {
+      if (typeof p !== "string" || !p) {
+        bad(`overlapIgnore[${i}] must be a non-empty path pattern`);
+      }
+      // A leading `./` or `/` never matches: git prints repo-relative paths
+      // with neither, so such a pattern would silently ignore nothing.
+      if (p.startsWith("/") || p.startsWith("./")) {
+        bad(
+          `overlapIgnore[${i}] ("${p}") must be repo-relative — no leading / or ./`,
+        );
+      }
+    }
+  }
   if (!Array.isArray(c.gates)) bad("gates must be an array of gates");
   for (const [i, g] of c.gates.entries()) {
     if (!g || typeof g.name !== "string" || typeof g.run !== "function") {

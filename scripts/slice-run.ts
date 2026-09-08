@@ -94,7 +94,7 @@ import { runGates } from "./slice-gates";
 import { type Launcher, type Session, manual } from "./slice-launcher";
 // The pure half of the overlap report; the git that feeds it is below, in the
 // overlap section, because only this file knows where a slice's branch is.
-import { findOverlaps } from "./slice-overlap";
+import { findOverlaps, ignores } from "./slice-overlap";
 // And the tracker: every ticket and every blocking edge below is read through
 // `tracker`, never through gh directly. Ids are strings the tracker defines
 // (`ref` writes one the way that tracker does — `#3`, or `ENG-3`); see
@@ -1172,6 +1172,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     return park(t, "the spec review says BLOCK");
   }
   console.log(`  landing ${ref(t.id)} …`);
+  // Read the file set BEFORE landing, because afterwards there is nothing to
+  // read it from: `slice-land.sh` deletes the branch, and even before that the
+  // fast-forward makes `base...branch` empty by definition. Taken here rather
+  // than at the top of the function so it is the REBASED diff — what actually
+  // reaches the base branch — and so a slice that never got past the gates
+  // contributes nothing.
+  const landing = changedFiles(t.id);
   const { ok } = run(["./scripts/slice-land.sh", t.id], {
     inherit: true,
     allowFail: true,
@@ -1182,6 +1189,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       "slice-land.sh refused — the branch is not fast-forwardable, or a hook rejected it",
     );
   }
+  landedFiles.set(t.id, landing);
   parked.delete(t.id);
   t.open = false;
   return true;
@@ -1231,9 +1239,12 @@ const changedCache = new Map<TicketId, { head: string; files: string[] }>();
  *
  * Three dots, not two: `A...B` diffs from the MERGE BASE, so a base branch
  * that has moved on — and every land moves it — does not read as this slice
- * having reverted whatever somebody else landed. It also means a slice that
- * has already landed reports nothing, which is how landed work drops out of
- * the overlap report without anything having to remember it.
+ * having reverted whatever somebody else landed.
+ *
+ * It also means a landed slice reports nothing here, which is why `tryLand`
+ * snapshots the answer into `landedFiles` on its way past. This used to be
+ * described as landed work dropping out of the report for free; it is the
+ * opposite, and see slice-overlap.ts for the wave that demonstrated it.
  *
  * Empty for a branch that does not exist yet, or a diff that fails. No commits
  * is not an error here; it is a slice that has not written anything down yet.
@@ -1257,11 +1268,25 @@ function changedFiles(id: TicketId): string[] {
   return files;
 }
 
+/**
+ * What each landed slice put on the base branch, kept for the rest of the run.
+ *
+ * A land is the thing that MOVES the base branch, which is what forces every
+ * still-open slice to rebase over the landed files — so this is the moment the
+ * overlap matters most, and the moment `changedFiles` can no longer see it.
+ * Written by `tryLand`; never cleared, because the base branch does not
+ * un-move.
+ */
+const landedFiles = new Map<TicketId, string[]>();
+
 /** The last report printed, so an unchanged one is not printed again. */
 let lastOverlaps = "";
 
 /** Files listed per collision before the rest are counted instead. */
 const OVERLAP_FILES_SHOWN = 4;
+
+/** Paths the report leaves out, from slice.config.ts. Matches nothing by default. */
+const overlapIgnored = ignores(config.overlapIgnore ?? []);
 
 /**
  * Say which open slices are editing the same files — once per change, not
@@ -1280,13 +1305,21 @@ const OVERLAP_FILES_SHOWN = 4;
  */
 function reportOverlaps(all: Ticket[]): void {
   const changed = new Map<TicketId, string[]>();
+  const open = new Set<TicketId>();
   for (const t of all) {
-    if (!t.open) continue;
-    const files = changedFiles(t.id);
-    if (files.length) changed.set(t.id, files);
+    if (t.open) {
+      open.add(t.id);
+      const files = changedFiles(t.id);
+      if (files.length) changed.set(t.id, files);
+      continue;
+    }
+    // Closed here means landed this run, and its files are still ahead of
+    // every open slice. A ticket closed some other way never got a snapshot.
+    const landed = landedFiles.get(t.id);
+    if (landed?.length) changed.set(t.id, landed);
   }
 
-  const overlaps = findOverlaps(changed);
+  const overlaps = findOverlaps(changed, { open, ignore: overlapIgnored });
   const key = overlaps
     .map((o) => `${o.tickets.join(",")}:${o.files.join(",")}`)
     .join("|");
@@ -1294,14 +1327,16 @@ function reportOverlaps(all: Ticket[]): void {
   lastOverlaps = key;
   if (overlaps.length === 0) return;
 
-  console.log("\n  ⚠ open slices are editing the same files");
+  const anyLanded = overlaps.some((o) => o.tickets.some((id) => !open.has(id)));
+  console.log("\n  ⚠ slices are editing the same files");
   for (const o of overlaps) {
     const shown = o.files.slice(0, OVERLAP_FILES_SHOWN).join("  ");
     const rest = o.files.length - OVERLAP_FILES_SHOWN;
     const more = rest > 0 ? `  +${rest} more` : "";
-    console.log(
-      `     ${o.tickets.map((id) => ref(id)).join(" ")}  ${shown}${more}`,
-    );
+    const ids = o.tickets
+      .map((id) => (open.has(id) ? ref(id) : `${ref(id)}✓`))
+      .join(" ");
+    console.log(`     ${ids}  ${shown}${more}`);
   }
   console.log(
     "     A land rebases, so edits that CLASH are already caught. These are",
@@ -1310,6 +1345,11 @@ function reportOverlaps(all: Ticket[]): void {
     "     the ones that apply cleanly and still disagree — worth a look while",
   );
   console.log("     both are open. Uncommitted work is not visible here.");
+  if (anyLanded) {
+    console.log(
+      "     ✓ = already landed, so the open one has to rebase over it.",
+    );
+  }
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────

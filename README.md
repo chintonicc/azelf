@@ -35,6 +35,7 @@ session in each, and lands the finished ones — re-running the gates itself, be
 - [Where tickets come from](#where-tickets-come-from)
 - [The exclusive lock](#the-exclusive-lock)
 - [When two slices touch the same file](#when-two-slices-touch-the-same-file)
+  - [Quieting the paths that never matter](#quieting-the-paths-that-never-matter)
 - [When a slice will not land](#when-a-slice-will-not-land)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
@@ -260,6 +261,7 @@ export default {
 | `readyLabel` | `string` | issue label marking a ticket runnable |
 | `exclusiveLockPaths` | `string[]` | paths only one worktree may hold changes to; `[]` disables |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
+| `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
 | `gates` | `Gate[]` | what a slice must pass before landing, in order |
 | `tracker` | `Tracker` | where tickets and blocking edges live |
 | `launcher` | `Launcher?` | how a prepped worktree becomes an open session (default `manual()`) |
@@ -396,6 +398,40 @@ cleanly rather than crashing.
 > the blocker to be in your repo, so a small number always resolves to *something*
 > and never to the ticket you meant. `github()` resolves the number through the API
 > before every write for exactly this reason.
+
+#### A landed ticket carries its leftover checks
+
+Closing a ticket already posts a comment. It used to be one fixed sentence; it now
+also carries the **unticked checkboxes the slice added**, read from its diff:
+
+```
+Landed on master via slice-land.sh.
+
+Still to check by hand — boxes this slice added and left unticked:
+
+- [ ] A and B in the same group, both on the new path — B's device renders it
+- [ ] Settings → language → deutsch, repeat: the chip reads "für <group>"
+```
+
+This exists because of what `--auto` costs you. A finished session closes its own
+tab, and everything the agent said in that tab goes with it. Most of that is
+recoverable from the diff — but not the checks a human still has to run, on a
+device, with two accounts, in a language nobody on the team reads. That is real
+work handed back to you, and it was arriving as scrollback in a window that closes.
+
+Three things make it cheap rather than clever:
+
+- **The durable half was already committed.** Agents write those checks into the
+  repo as markdown checkboxes, so this reads what is in the diff instead of
+  inventing a channel. No new convention, no model call, nothing to configure.
+- **`- [x]` is left alone.** A box the slice ticked on its way past is not
+  outstanding. Both `-` and `*` bullets count.
+- **It is read before the fast-forward**, because afterwards there is nothing to
+  read: `base...branch` is empty by definition once the branch has landed, and the
+  cleanup deletes the branch outright.
+
+Long lists are capped at 20 with a count of the rest, and a slice whose diff has no
+checkboxes gets the plain sentence exactly as before.
 
 ### Launcher
 
@@ -534,12 +570,13 @@ While a run is polling, the dispatcher compares what each open slice has committ
 and says so when more than one of them has changed the same file:
 
 ```
-  ⚠ open slices are editing the same files
+  ⚠ slices are editing the same files
      #18 #20  app/category/[id].tsx
-     #18 #21  package.json  bun.lock
+     #19✓ #21  lib/categoryWindow.ts  tests/lib/categoryWindow.test.ts
      A land rebases, so edits that CLASH are already caught. These are
      the ones that apply cleanly and still disagree — worth a look while
      both are open. Uncommitted work is not visible here.
+     ✓ = already landed, so the open one has to rebase over it.
 ```
 
 **This is warn-only, and it is about the soft case.** Landing rebases the slice
@@ -560,10 +597,42 @@ Three properties worth knowing:
   without a commit contributes nothing to the report.
 - **It prints once per change, not once per round.** A warning reprinted every 30
   seconds teaches you to skip it by the third time.
+- **A landed slice stays in the report.** Its files are kept for the rest of the
+  run and marked `✓`. This was originally the other way round — a landed slice
+  dropped out for free, because `base...branch` is empty once it has landed — and
+  that was exactly backwards. A land is what MOVES the base branch, which is what
+  forces every open slice to rebase over the landed files. In `consumer-a`'s first
+  wave the report named `#19 #20 app/CreateCategory.tsx`, `#20` landed, the line
+  vanished, and the very next thing that happened was `#19` failing to rebase onto
+  that file. The report went quiet at the moment it became useful. A group whose
+  members have *all* landed is dropped, though — the base branch reconciled those.
 
 It never blocks a land. Two slices touching one file is often correct — a barrel
 file, a lockfile, the same test helper — and the dispatcher cannot tell which of
 those it is looking at. Deciding is yours; noticing is its job.
+
+### Quieting the paths that never matter
+
+`overlapIgnore` in `slice.config.ts` takes path patterns the report should skip —
+`*` inside one segment, `**` across them, a trailing `/` for everything under a
+directory:
+
+```ts
+overlapIgnore: ["bun.lock", "lib/i18n/locales/*.json"],
+```
+
+Use it for paths where two slices touching one file tells you nothing because
+their edits cannot interact: a lockfile, generated output, a locale catalogue each
+slice adds its own keys to.
+
+**Do not use it for a file every slice appends to** — a changelog, a manual-test
+document, anything where each slice adds a numbered entry at the end. Those look
+like the noisiest possible entry (every slice, every wave, the same path) and they
+are the one file that collides *by construction*, because two appends at one anchor
+conflict every time. `consumer-a`'s first wave reported four shared files: three
+were locale catalogues that merged cleanly, and the fourth was `TESTING.md`, which
+was the only real conflict of the four. Ignoring by how often a path shows up would
+have hidden precisely the one worth reading.
 
 ## When a slice will not land
 
@@ -697,7 +766,7 @@ scripts/
   slice-preset.ts       stack detection for init
   slice-init.ts         markers, shims, generated files, the rc hook
   *.sh                  the shell half: session, land, done, commit, lock, format
-tests/scripts/          162 unit tests across the seam modules
+tests/scripts/          178 unit tests across the seam modules
 docs/extraction-plan.md how this became a package, and what each seam cost
 ```
 

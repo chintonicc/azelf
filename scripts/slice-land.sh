@@ -71,6 +71,50 @@ if ! git show-ref --verify --quiet "refs/heads/$branch"; then
   exit 1
 fi
 
+# ─── What this slice left for a human to check ─────────────────────────────
+#
+# READ IT NOW, not at close time. Two things below destroy the evidence: the
+# fast-forward makes `$base...$branch` empty by definition, and the cleanup
+# deletes the branch outright.
+#
+# WHY THIS EXISTS. Under --auto a finished session closes its own tab, and
+# everything the agent said in it goes with the tab. Most of that is
+# reconstructible from the diff; one part is not — the checks a human still has
+# to run, on a device, with two accounts, in a language nobody here reads. That
+# is real work handed back to you, and it was arriving as scrollback in a
+# window that closes.
+#
+# The durable half is already committed: the agent writes those checks into the
+# repo as unticked markdown boxes. So this needs no new convention and no
+# model call — it reads the lines the slice ADDED that are still unticked, and
+# puts them where the ticket is. `- [x]` is left alone; a box the slice ticked
+# on its way past is not outstanding.
+#
+# Grep can find nothing without that being an error, hence `|| true`: a slice
+# whose diff has no checkboxes is the ordinary case, not a failure.
+LAND_NOTES_MAX=20
+land_notes="$(
+  git diff "$SLICE_BASE_BRANCH...$branch" 2>/dev/null \
+    | grep -E '^\+[[:space:]]*[-*] \[ \] ' \
+    | sed 's/^+//' \
+    || true
+)"
+
+close_comment="Landed on $SLICE_BASE_BRANCH via slice-land.sh."
+if [[ -n "$land_notes" ]]; then
+  land_notes_total="$(printf '%s\n' "$land_notes" | wc -l | tr -d ' ')"
+  close_comment="$close_comment
+
+Still to check by hand — boxes this slice added and left unticked:
+
+$(printf '%s\n' "$land_notes" | head -n "$LAND_NOTES_MAX")"
+  if [[ "$land_notes_total" -gt "$LAND_NOTES_MAX" ]]; then
+    close_comment="$close_comment
+
+… and $((land_notes_total - LAND_NOTES_MAX)) more in the files this slice changed."
+  fi
+fi
+
 echo "── fast-forwarding $SLICE_BASE_BRANCH onto $branch ──────────────"
 if ! git merge --ff-only "$branch"; then
   echo "error: $SLICE_BASE_BRANCH can't fast-forward onto $branch — it has diverged." >&2
@@ -138,8 +182,11 @@ fi
 # Never fatal: the code is on master and pushed by this point, which is the
 # part that can't be redone by hand.
 echo "── closing $ticket_ref ───────────────────────────────────"
-if close_err=$(slice_tracker_close "$ticket" "Landed on $SLICE_BASE_BRANCH via slice-land.sh." 2>&1); then
+if close_err=$(slice_tracker_close "$ticket" "$close_comment" 2>&1); then
   echo "✓ closed $ticket_ref"
+  if [[ -n "$land_notes" ]]; then
+    echo "  ↳ carried $land_notes_total unticked check(s) into the ticket"
+  fi
 else
   echo "warning: couldn't close $ticket_ref — close it by hand or its dependents stay blocked:" >&2
   echo "$close_err" >&2
