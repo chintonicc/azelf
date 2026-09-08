@@ -484,6 +484,23 @@ one case where the tab holds the only copy of what went wrong, and a tab that
 vanished on failure would turn a legible error into a slice that silently never
 started.
 
+**When the agent does not exit, and it often does not.** Exit 86 needs the agent
+process to end, and a Claude session that has finished its work commonly sits at
+its REPL instead. On one three-slice `--auto` wave, none of the three exited: all
+three ran `slice-done.sh`, all three landed, and all three tabs were still open an
+hour later, rooted in worktrees that had been deleted underneath them. So the tab
+closing is best-effort, and nothing depends on it: `slice-done.sh` clears the
+`.slice-live` marker itself, which is what frees the slot, and `slice-land.sh`
+names the still-running session by pid when it removes its directory —
+
+```
+✓ removed worktree /…/consumer-a-ticket-18
+⚠️  the session for #18 is still running (pid 53049),
+    and the directory it is sitting in has just been removed.
+    It finished and marked itself done; it just never left its REPL.
+    Nothing is lost — close that tab.
+```
+
 This changed the hook, so it is `v3`. If your rc file carries `v2`, `azelf init`
 says so and `azelf init --hook` replaces it.
 

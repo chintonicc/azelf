@@ -80,9 +80,13 @@ while [[ $# -gt 0 ]]; do
     # Ask the slice to mark ITSELF done and exit when it finishes. Passed by
     # slice-run.ts only under --auto, because it is the same judgement call
     # --auto already makes: without it, --auto cannot progress unattended at
-    # all. A finished agent leaves the REPL open, the .slice-live marker never
-    # clears, and the dispatcher waits forever on a session that has nothing
-    # left to do. See the ADR for why this is off by default.
+    # all. Nothing else runs slice-done.sh, so the dispatcher waits forever on
+    # a session that has nothing left to do. See the ADR for why this is off
+    # by default.
+    #
+    # The "and exit" half is a request, not a mechanism — agents routinely
+    # ignore it and leave the REPL open. That is why slice-done.sh clears the
+    # liveness marker itself rather than relying on this script's EXIT trap.
     --self-land) self_land=true; shift ;;
     -h|--help) usage ;;
     -*) echo "unknown option: $1" >&2; usage ;;
@@ -334,11 +338,35 @@ fi
 # cost is one lingering bash frame per session; the gain is that the dangerous
 # failure mode of --auto cannot happen.
 #
+# TWO THINGS CLEAR IT, AND THE TRAP IS THE WEAKER ONE
+# ---------------------------------------------------
+# The trap only fires when `launch` RETURNS, and an agent that finishes its
+# work without leaving its REPL never lets it. That is not a corner case: it
+# is what happened on every slice of one three-slice --auto wave. All three
+# ran slice-done.sh, all three were landed, all three worktrees were removed —
+# and an hour later all three shells were still sitting here with a deleted
+# working directory, because the REPL was still open, so `launch` had not
+# returned, so no trap, no `exit 86`, no closed tab.
+#
+# The marker did not protect anything during that, either. It is listed in
+# .git/info/exclude, so `git worktree remove` sees an IGNORED file and removes
+# the worktree happily, and nothing on the landing path read it.
+#
+# So slice-done.sh now clears this file itself: declaring the slice done ends
+# the session's claim on the worktree whether or not the REPL lingers. The
+# trap stays for the sessions that never declare done — the ones you exit by
+# hand.
+#
+# The file holds this shell's PID rather than being empty, so slice-done.sh
+# can carry it into .slice-ready-to-land and slice-land.sh can say WHICH
+# process is about to have its working directory deleted. An empty marker
+# left "close that tab" as advice nobody could act on without `ps`.
+#
 # A hard-killed tab (SIGKILL, force-quitting Warp) skips the trap and strands
 # the marker — slice-run.ts reports a slice that looks live but has no session,
 # and deleting .slice-live in that worktree clears it.
 live_marker="$worktree_path/.slice-live"
-: >"$live_marker"
+echo "$$" >"$live_marker"
 trap 'rm -f "$live_marker"' EXIT
 
 # The opening instruction, so a slice starts working when its tab opens

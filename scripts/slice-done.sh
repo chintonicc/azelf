@@ -63,7 +63,43 @@ if [[ -z "$(git log --oneline "$SLICE_BASE_BRANCH..HEAD")" ]]; then
   exit 1
 fi
 
-touch "$worktree_root/.slice-ready-to-land"
+# ─── Handing the worktree back ─────────────────────────────────────────────
+#
+# Two markers, written in this order on purpose.
+#
+# .slice-ready-to-land is the one slice-run.ts lands on. .slice-live is the one
+# that says "a session is still open in here", and clearing it HERE rather than
+# leaving it to slice-session.sh's EXIT trap is the point of this block.
+#
+# The trap only runs when the agent leaves its REPL, and a finished agent
+# routinely does not. On one three-slice --auto wave, none of the three did:
+# every slice ran this script, every slice was landed, every worktree was
+# removed, and an hour later all three shells were still sitting in a directory
+# that no longer existed. The marker whose whole job is "do not delete this
+# worktree out from under someone" was present the entire time and stopped
+# nothing, because it is in .git/info/exclude and `git worktree remove` reads
+# an ignored file as no reason to refuse.
+#
+# Declaring the slice done ends the session's claim on the worktree, whether or
+# not the REPL lingers. So the two markers are now mutually exclusive by
+# construction, and the dispatcher can free the slot the moment you say done
+# instead of waiting on a shell that will never exit.
+#
+# The PID is carried across rather than dropped: slice-land.sh reads it back to
+# warn you by number when it is about to delete the working directory of a
+# session that is still running. Empty when this is run outside a slice-session
+# tab, which is fine — the warning simply has nothing to report.
+live_marker="$worktree_root/.slice-live"
+session_pid=""
+# An `if`, not `[[ … ]] && session_pid=…`: under `set -e` an and-list whose
+# left side is false exits 1 and takes the script with it, and "no marker" is
+# the ordinary case when this is run outside a session tab.
+if [[ -f "$live_marker" ]]; then
+  session_pid="$(head -n 1 "$live_marker" | tr -d '[:space:]')"
+fi
+
+printf '%s\n' "$session_pid" >"$worktree_root/.slice-ready-to-land"
+rm -f "$live_marker"
 
 echo "✓ $(slice_ref "$ticket") marked done ($(git log --oneline "$SLICE_BASE_BRANCH..HEAD" | wc -l | tr -d ' ') commit(s) to land)"
 echo

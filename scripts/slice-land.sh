@@ -156,10 +156,53 @@ echo "✓ pushed"
 # or what to do about it. Written as an `if` instead, the non-fatality is the
 # stated intent rather than a property of where the command happens to sit, and
 # there is somewhere to put the explanation.
+#
+# ─── The session that may still be sitting in there ────────────────────────
+#
+# Read BEFORE the removal, because both markers live inside the worktree.
+#
+# slice-session.sh writes its own PID into .slice-live; slice-done.sh carries
+# that PID into .slice-ready-to-land and clears .slice-live, so whichever of
+# the two is present names the shell that owns this worktree. Preferring the
+# done marker also distinguishes the two cases: a session that declared itself
+# finished and simply never left its REPL, versus one that never declared
+# anything and is being landed by hand.
+#
+# WHY THIS IS WORTH A LINE OF OUTPUT. On one three-slice --auto wave all three
+# sessions were in the first case, and the only symptom was three tabs that
+# would not close, an hour later, rooted in directories that no longer existed.
+# Nothing said so. Finding out took `ps`. The removal itself is not wrong —
+# the work is landed and pushed by this point, and there is nothing left in
+# there to lose — but the shell holding the tab open cannot know that, and
+# neither could you.
 echo "── cleaning up ────────────────────────────────────────"
+session_pid=""
+session_declared_done=true
+if [[ -f "$worktree_path/.slice-ready-to-land" ]]; then
+  session_pid="$(head -n 1 "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
+elif [[ -f "$worktree_path/.slice-live" ]]; then
+  session_pid="$(head -n 1 "$worktree_path/.slice-live" | tr -d '[:space:]')"
+  session_declared_done=false
+fi
 if [[ -d "$worktree_path" ]]; then
   if git worktree remove "$worktree_path" 2>/dev/null; then
     echo "✓ removed worktree $worktree_path"
+    # Digits only, and the command line has to still look like a slice session:
+    # PIDs are reused, and "process 53049 exists" a day later says nothing.
+    # `|| true` because ps exits non-zero on a dead pid, which is the good case.
+    if [[ "$session_pid" =~ ^[0-9]+$ ]] &&
+       ps -o command= -p "$session_pid" 2>/dev/null | grep -q "slice-session"; then
+      echo
+      echo "⚠️  the session for $ticket_ref is still running (pid $session_pid),"
+      echo "    and the directory it is sitting in has just been removed."
+      if $session_declared_done; then
+        echo "    It finished and marked itself done; it just never left its REPL."
+        echo "    Nothing is lost — close that tab."
+      else
+        echo "    It never ran slice-done.sh, so this land did not come from it."
+        echo "    Check that tab before closing it: kill $session_pid"
+      fi
+    fi
   else
     echo "⚠️  left $worktree_path in place — it has modified or untracked files,"
     echo "    most likely from something still running in that session."

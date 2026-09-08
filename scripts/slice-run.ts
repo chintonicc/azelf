@@ -130,10 +130,14 @@ const value = (name: string) => {
 const sessionFlags = [
   ...(flag("--no-start") ? ["--no-start"] : []),
   // --auto is a promise that the loop progresses without a human, and it
-  // cannot keep that promise on its own: a finished agent leaves its REPL
-  // open, so .slice-live never clears and the slot never frees. --self-land
-  // asks the slice to mark itself done and exit. Only under --auto, which is
-  // where that judgement was already made.
+  // cannot keep that promise on its own: nothing else tells the agent to run
+  // slice-done.sh, and without that marker there is nothing to land against.
+  // --self-land asks the slice to mark itself done and exit. Only under
+  // --auto, which is where that judgement was already made.
+  //
+  // The "and exit" half is a request an agent is free to ignore, and usually
+  // does. That is slice-done.sh's problem, not this flag's: it clears the
+  // liveness marker itself, so the slot frees whether or not the REPL closes.
   ...(flag("--auto") ? ["--self-land"] : []),
 ];
 
@@ -500,18 +504,27 @@ const READY_MARKER = ".slice-ready-to-land";
  * as running filled every slot with nothing and the dispatcher reported
  * "3 running" while launching nothing and opening no sessions.
  *
- *  - hasWorktree — prepped. Decides whether a slice can be LANDED.
- *  - hasSession  — a session is actually open, via the `.slice-live` marker
- *                  slice-session.sh writes at launch and clears on exit.
- *                  Decides whether a SLOT is taken.
- *  - occupied    — hasSession, plus a grace window after we launched it but
- *                  before its shell has got as far as writing the marker.
- *                  Without it the next round would open a second session for
- *                  the same ticket.
+ *  - hasWorktree   — prepped. Decides whether a slice can be LANDED.
+ *  - hasSession    — a session is actually open, via the `.slice-live` marker
+ *                    slice-session.sh writes at launch. Decides whether a SLOT
+ *                    is taken.
+ *  - isReadyToLand — the slice said it is finished, via `.slice-ready-to-land`.
+ *  - occupied      — hasSession, plus a grace window after we launched it but
+ *                    before its shell has got as far as writing the marker.
+ *                    Without it the next round would open a second session for
+ *                    the same ticket.
+ *
+ * The first two markers are mutually exclusive by construction: slice-done.sh
+ * writes the done marker and clears the live one in the same breath, because
+ * an agent that has finished routinely leaves its REPL open and the session
+ * shell's EXIT trap therefore never runs. Declaring done is what ends a
+ * session's claim on its worktree; leaving the REPL is not.
  */
 const hasWorktree = (n: TicketId) => existsSync(worktreeFor(n));
 const hasSession = (n: TicketId) =>
   existsSync(join(worktreeFor(n), LIVE_MARKER));
+const isReadyToLand = (n: TicketId) =>
+  existsSync(join(worktreeFor(n), READY_MARKER));
 
 /** When we launched a ticket, so a slow start isn't launched twice. */
 const launchedAt = new Map<TicketId, number>();
@@ -528,9 +541,19 @@ function occupied(n: TicketId): boolean {
   return t !== undefined && Date.now() - t < launcher.startingGraceMs;
 }
 
-/** Prepped, open, but with nobody working in it — worth saying out loud. */
+/**
+ * Prepped, open, but with nobody working in it — worth saying out loud.
+ *
+ * A slice that has declared itself done is excluded: it is unoccupied for the
+ * best possible reason, and the caller's phrasing for this set is "never came
+ * up … it will be relaunched", which would be two false statements about a
+ * slice that came up, did the work, and is waiting on a land.
+ */
 const idleWorktrees = (tickets: Ticket[]) =>
-  tickets.filter((t) => t.open && hasWorktree(t.id) && !occupied(t.id));
+  tickets.filter(
+    (t) =>
+      t.open && hasWorktree(t.id) && !occupied(t.id) && !isReadyToLand(t.id),
+  );
 
 /** Empty when free; otherwise the holder, as db-lock-check.sh describes it. */
 function dbLockHolder(): string {
@@ -549,13 +572,25 @@ function refreshOpenState(tickets: Ticket[]): void {
   for (const t of tickets) t.open = tracker.get(t.id).state === "open";
 }
 
-/** Open, every blocker closed, nothing outside the set holding it, not already up. */
+/**
+ * Open, every blocker closed, nothing outside the set holding it, not already
+ * up, and not already finished.
+ *
+ * That last clause is not redundant with `occupied`. A slice that has run
+ * slice-done.sh has no live marker — that is the point of clearing it — so it
+ * reads as unoccupied from here, and until it lands it is still open. Without
+ * the check, a slice whose land is PARKED (red gates, a BLOCK verdict) would
+ * be relaunched next round: a second session opened into a worktree the first
+ * one may still be sitting in, to redo work that is already committed. The
+ * ticket is finished; what it is waiting for is a land, not an agent.
+ */
 function runnable(tickets: Ticket[]): Ticket[] {
   const closed = new Set(tickets.filter((t) => !t.open).map((t) => t.id));
   return tickets.filter(
     (t) =>
       t.open &&
       !occupied(t.id) &&
+      !isReadyToLand(t.id) &&
       t.foreignBlockers.length === 0 &&
       t.blockedBy.every((b) => closed.has(b)),
   );
@@ -904,9 +939,6 @@ ${diff}`,
 }
 
 // ─── landing ──────────────────────────────────────────────────────────────
-
-const isReadyToLand = (n: TicketId) =>
-  existsSync(join(worktreeFor(n), READY_MARKER));
 
 const commitsAhead = (n: TicketId) =>
   run(["git", "log", "--oneline", `${baseBranch}..HEAD`], {
