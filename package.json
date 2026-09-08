@@ -1,0 +1,35 @@
+{
+  "name": "@chintonicc/azelf",
+  "version": "0.1.0",
+  "description": "Parallel agent slices: one ticket, one worktree, one session, gated landing.",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "azelf": "./bin/azelf.ts"
+  },
+  "files": [
+    "index.ts",
+    "bin/",
+    "scripts/",
+    "agent/",
+    "docs/"
+  ],
+  "engines": {
+    "bun": ">=1.2.0"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "1.5.3",
+    "@types/bun": "^1.4.2",
+    "@types/node": "^26.5.0",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}
