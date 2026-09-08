@@ -101,6 +101,7 @@ Two invariants hold the whole thing together:
 | **`gh`**, authenticated | only if you use the `github()` tracker |
 | a coding agent on PATH | `claude`, `codex`, or whatever you point `custom()` at |
 | macOS or Linux | the shell half is POSIX sh / bash 3.2 compatible |
+| **any terminal** | no PARTICULAR terminal is needed; `warp()` and `tmux()` are optional conveniences |
 
 ## Install
 
@@ -234,7 +235,7 @@ TypeScript rather than JSON because half of what makes these values correct is a
 incident and JSON has nowhere to put that.
 
 ```ts
-import { type SliceConfig, exitCode, github, warp } from "@chintonicc/azelf";
+import { type SliceConfig, exitCode, github } from "@chintonicc/azelf";
 
 export default {
   tracker: github(),
@@ -332,6 +333,20 @@ GitHub's native issue dependencies satisfy this. A tracker where "done" and
 `Tracker` contract.
 
 ### Launcher
+
+**azelf is not Warp-only.** It runs in any terminal, on any platform. The launcher
+decides one narrow thing — whether azelf *opens the terminal windows for you*, or
+prints the commands for you to open yourself. Everything else (planning, prepping
+worktrees, gates, landing, escalation) is identical either way.
+
+| your terminal | what to set | what happens |
+| --- | --- | --- |
+| anything at all | `manual()` — **the default** | prints one ready-to-paste command per slice |
+| Warp | `warp()` | opens a tab per slice in the current window |
+| any, with tmux | `tmux()` | a tmux session per slice — *never run end to end, see gaps* |
+
+If you leave `launcher` out of your config entirely you get `manual()`, and azelf
+works. `warp()` is an optimisation for one terminal, not a requirement.
 
 ```ts
 launcher: manual()   // print one command per slice for you to paste — the default
