@@ -92,6 +92,9 @@ import { runGates } from "./slice-gates";
 // The launcher is picked below, in the launching section; `manual` is
 // imported here because it is the fallback as well as the default.
 import { type Launcher, type Session, manual } from "./slice-launcher";
+// The pure half of the overlap report; the git that feeds it is below, in the
+// overlap section, because only this file knows where a slice's branch is.
+import { findOverlaps } from "./slice-overlap";
 // And the tracker: every ticket and every blocking edge below is read through
 // `tracker`, never through gh directly. Ids are strings the tracker defines
 // (`ref` writes one the way that tracker does — `#3`, or `ENG-3`); see
@@ -1211,6 +1214,104 @@ function park(t: Ticket, reason: string): boolean {
   }
 }
 
+// ─── overlap ──────────────────────────────────────────────────────────────
+
+/**
+ * Changed files per slice, cached against the branch head they were read at.
+ *
+ * The poll loop asks every round, and a whole-branch `git diff` is not free at
+ * four slices a round for an hour. A slice's answer can only change when its
+ * branch moves, and `branchHead` is one `rev-parse` — so the diff fires on a
+ * commit and never on a heartbeat.
+ */
+const changedCache = new Map<TicketId, { head: string; files: string[] }>();
+
+/**
+ * What this slice has changed relative to where it forked.
+ *
+ * Three dots, not two: `A...B` diffs from the MERGE BASE, so a base branch
+ * that has moved on — and every land moves it — does not read as this slice
+ * having reverted whatever somebody else landed. It also means a slice that
+ * has already landed reports nothing, which is how landed work drops out of
+ * the overlap report without anything having to remember it.
+ *
+ * Empty for a branch that does not exist yet, or a diff that fails. No commits
+ * is not an error here; it is a slice that has not written anything down yet.
+ */
+function changedFiles(id: TicketId): string[] {
+  const head = branchHead(id);
+  if (!head) return [];
+  const hit = changedCache.get(id);
+  if (hit?.head === head) return hit.files;
+  const { ok, out } = run(
+    ["git", "diff", "--name-only", `${baseBranch}...${branchFor(id)}`],
+    { allowFail: true },
+  );
+  const files = ok
+    ? out
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+    : [];
+  changedCache.set(id, { head, files });
+  return files;
+}
+
+/** The last report printed, so an unchanged one is not printed again. */
+let lastOverlaps = "";
+
+/** Files listed per collision before the rest are counted instead. */
+const OVERLAP_FILES_SHOWN = 4;
+
+/**
+ * Say which open slices are editing the same files — once per change, not
+ * once per round. A poll loop that reprints the same warning every 30s for an
+ * hour has taught you to skip it by the third time.
+ *
+ * Printed BEFORE the land, so on the round where one of a colliding pair
+ * lands, you read the collision and then read which half of it went to the
+ * base branch, in that order.
+ *
+ * Warn-only, and deliberately: two slices touching one file is often correct
+ * — a barrel file, a lockfile, the same test helper. The dispatcher cannot
+ * tell which of those it is looking at, and a gate that guessed would block
+ * the common case to catch the rare one. See slice-overlap.ts for the half of
+ * the problem a rebase already covers.
+ */
+function reportOverlaps(all: Ticket[]): void {
+  const changed = new Map<TicketId, string[]>();
+  for (const t of all) {
+    if (!t.open) continue;
+    const files = changedFiles(t.id);
+    if (files.length) changed.set(t.id, files);
+  }
+
+  const overlaps = findOverlaps(changed);
+  const key = overlaps
+    .map((o) => `${o.tickets.join(",")}:${o.files.join(",")}`)
+    .join("|");
+  if (key === lastOverlaps) return;
+  lastOverlaps = key;
+  if (overlaps.length === 0) return;
+
+  console.log("\n  ⚠ open slices are editing the same files");
+  for (const o of overlaps) {
+    const shown = o.files.slice(0, OVERLAP_FILES_SHOWN).join("  ");
+    const rest = o.files.length - OVERLAP_FILES_SHOWN;
+    const more = rest > 0 ? `  +${rest} more` : "";
+    console.log(
+      `     ${o.tickets.map((id) => ref(id)).join(" ")}  ${shown}${more}`,
+    );
+  }
+  console.log(
+    "     A land rebases, so edits that CLASH are already caught. These are",
+  );
+  console.log(
+    "     the ones that apply cleanly and still disagree — worth a look while",
+  );
+  console.log("     both are open. Uncommitted work is not visible here.");
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────
 
 // A ticket id is whatever the tracker says one is — `^[0-9]+$` on GitHub, so
@@ -1378,6 +1479,8 @@ for (;;) {
     reviewPlan(tickets, planBase);
     break;
   }
+
+  reportOverlaps(tickets);
 
   // Land before launching, so a slot freed this round is refilled this round.
   // One per round: every land fast-forwards the same master in the same main

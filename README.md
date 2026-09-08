@@ -34,6 +34,7 @@ session in each, and lands the finished ones — re-running the gates itself, be
   - [Gates](#gates) · [Tracker](#tracker) · [Launcher](#launcher) · [Agent](#agent) · [wrapCommand](#wrapcommand)
 - [Where tickets come from](#where-tickets-come-from)
 - [The exclusive lock](#the-exclusive-lock)
+- [When two slices touch the same file](#when-two-slices-touch-the-same-file)
 - [When a slice will not land](#when-a-slice-will-not-land)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
@@ -505,6 +506,43 @@ It earns its place only when you have one live shared resource with no
 point-in-time recovery, so that two concurrent migrations mean two agents mutating
 production. That is the exception, not the pattern.
 
+## When two slices touch the same file
+
+While a run is polling, the dispatcher compares what each open slice has committed
+and says so when more than one of them has changed the same file:
+
+```
+  ⚠ open slices are editing the same files
+     #18 #20  app/category/[id].tsx
+     #18 #21  package.json  bun.lock
+     A land rebases, so edits that CLASH are already caught. These are
+     the ones that apply cleanly and still disagree — worth a look while
+     both are open. Uncommitted work is not visible here.
+```
+
+**This is warn-only, and it is about the soft case.** Landing rebases the slice
+onto the base branch, so two slices whose edits to one file textually conflict
+already fail loudly, at land time, with the slice parked and the reason on screen.
+What nothing caught before is the pair that both apply cleanly and still disagree —
+two agents restyling the same component, or adding the same helper twice under
+different names. A rebase is happy with that; a reviewer six commits later is not.
+
+Three properties worth knowing:
+
+- **It cannot run at plan time.** Nothing knows which files a ticket will touch
+  before its agent writes the code — the ticket names an outcome, not a file list.
+  Once a slice has commits the question is a `git diff --name-only`, and that is
+  why the check lives in the poll loop.
+- **Uncommitted work is invisible.** Silence means "no overlap in what has been
+  committed", never "no overlap". A slice that has been running for twenty minutes
+  without a commit contributes nothing to the report.
+- **It prints once per change, not once per round.** A warning reprinted every 30
+  seconds teaches you to skip it by the third time.
+
+It never blocks a land. Two slices touching one file is often correct — a barrel
+file, a lockfile, the same test helper — and the dispatcher cannot tell which of
+those it is looking at. Deciding is yours; noticing is its job.
+
 ## When a slice will not land
 
 The dispatcher's promise is that you do not have to watch it. The moment that
@@ -631,12 +669,13 @@ scripts/
   slice-config.ts       the loader: finds and validates slice.config.ts
   slice-gates.ts        the gate contract and its three shapes
   slice-tracker.ts      the tracker contract and github()
+  slice-overlap.ts      which live slices are editing the same files
   slice-launcher.ts     the launcher contract, manual/warp/tmux, autostart probe
   slice-agent.ts        the agent contract, claude/codex/custom
   slice-preset.ts       stack detection for init
   slice-init.ts         markers, shims, generated files, the rc hook
   *.sh                  the shell half: session, land, done, commit, lock, format
-tests/scripts/          122 unit tests across the six seam modules
+tests/scripts/          162 unit tests across the seam modules
 docs/extraction-plan.md how this became a package, and what each seam cost
 ```
 
