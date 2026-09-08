@@ -429,6 +429,28 @@ start. That is what `azelf init --hook` installs, and why the launcher contract
 carries a `starts: "command" | "marker"` field — `slice-session.sh` parks its flags
 for the hook only when the launcher starts sessions that way.
 
+#### A finished `--auto` slice closes its own tab
+
+Under `--auto` the tab is the one thing nobody is reading. azelf already tells that
+agent *"run ./scripts/slice-done.sh and then exit — nobody is watching this tab"*,
+and moments later the dispatcher lands the branch and deletes the worktree the tab
+is sitting in. So `slice-session.sh` exits **86** when the session ran under
+`--self-land` *and* the agent exited cleanly, and the autostart hook (v3 and later)
+ends the shell on that status, which is what the terminal closes the tab on. Under
+`tmux()` the pane's command has ended anyway; under `manual()` you get 86 at your
+own prompt with a line saying why.
+
+**It is deliberately narrow, in both conditions.** Without `--auto` a human is the
+one reading that tab — you read the agent's report there and run `slice-done.sh`
+there — so the tab stays. And an agent that exited non-zero (no API key, a wrapper
+that blocked the network, an interrupted run) leaves the tab open too: that is the
+one case where the tab holds the only copy of what went wrong, and a tab that
+vanished on failure would turn a legible error into a slice that silently never
+started.
+
+This changed the hook, so it is `v3`. If your rc file carries `v2`, `azelf init`
+says so and `azelf init --hook` replaces it.
+
 ### Agent
 
 ```ts

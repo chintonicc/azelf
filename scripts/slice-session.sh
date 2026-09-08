@@ -386,5 +386,40 @@ if [[ ${#SLICE_WRAP_COMMAND[@]} -gt 0 ]]; then
 else
   echo "── launching $SLICE_AGENT_NAME ─────────────────────────────────────"
 fi
+agent_status=0
 launch ${SLICE_WRAP_COMMAND[@]+"${SLICE_WRAP_COMMAND[@]}"} \
-  "${SLICE_AGENT_SESSION_CMD[@]}"
+  "${SLICE_AGENT_SESSION_CMD[@]}" || agent_status=$?
+
+# ─── Closing the tab ────────────────────────────────────────────────────
+#
+# Exit 86 means "this session is over and nobody was watching — close the tab".
+# The autostart hook (scripts/slice-autostart.sh, v3 and later) exits the shell
+# on it, which is what makes Warp close the tab; under tmux the pane's command
+# has ended anyway; under `manual` you get 86 at your own prompt and the line
+# above says why.
+#
+# TWO CONDITIONS, AND BOTH MATTER.
+#
+#  - `--self-land` only. That flag is set only under `--auto`, which is exactly
+#    where this script already tells the agent "nobody is watching this tab".
+#    WITHOUT it a human is the one reading the session: they read the agent's
+#    report in this tab and run ./scripts/slice-done.sh in this tab. Closing it
+#    would throw away the report before it had been read, which is the whole
+#    reason a non-auto run has a tab at all.
+#  - The agent exited CLEANLY. A crashed agent — no API key, a wrapper that
+#    blocked the network, an interrupted run — is the one case where the tab
+#    holds the only copy of what went wrong, and a tab that vanishes on failure
+#    turns a legible error into a slice that silently never started.
+#
+# Why a status and not a marker file: the dispatcher deletes this worktree
+# seconds after it lands the branch, so anything written here is racing that
+# cleanup. A status is handed to the caller synchronously and cannot be lost.
+#
+# Why 86 in particular: clear of 0/1/2 (what agents actually return), clear of
+# the 64-78 sysexits range this script already uses for its usage error, and
+# clear of 128+, which is a signal.
+if $self_land && [[ $agent_status -eq 0 ]]; then
+  echo "── session over — closing this tab ────────────────────"
+  exit 86
+fi
+exit $agent_status

@@ -1,5 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -106,6 +112,54 @@ describe("the hook block", () => {
     writeFileSync(f, hookBlock());
     expect(() => execFileSync("sh", ["-n", f])).not.toThrow();
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  /**
+   * The tab-closing half, run for real rather than grepped for: the block is
+   * sourced by an INTERACTIVE sh (it guards on `$-`, so a non-interactive one
+   * would skip the whole thing and every case below would pass vacuously) in a
+   * directory carrying a marker and a stub session script of a chosen exit
+   * status. Whether the shell survives is the entire contract — that is what
+   * the terminal closes the tab on.
+   */
+  const sourceHookWithSession = (status: number): string => {
+    const dir = mkdtempSync(join(tmpdir(), "azelf-hook-run-"));
+    const wt = join(dir, "wt");
+    mkdirSync(join(wt, "scripts"), { recursive: true });
+    writeFileSync(join(dir, "hook.sh"), hookBlock());
+    writeFileSync(
+      join(wt, "scripts", "slice-session.sh"),
+      `#!/bin/sh\necho "SESSION RAN $1"\nexit ${status}\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(wt, ".slice-autostart"), "21\n");
+    const out = execFileSync("sh", ["-i"], {
+      cwd: wt,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+      input: `. ${join(dir, "hook.sh")}\necho STILL_AT_PROMPT\n`,
+    });
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  it("runs the session script named by the marker", () => {
+    expect(sourceHookWithSession(0)).toContain("SESSION RAN 21");
+  });
+
+  /** 86 is slice-session.sh saying "--self-land, agent clean — close the tab". */
+  it("ends the shell on 86, which is what closes the tab", () => {
+    expect(sourceHookWithSession(86)).not.toContain("STILL_AT_PROMPT");
+  });
+
+  /**
+   * A human is reading this tab, or the agent died in it. Either way the tab
+   * holds the only copy of what happened, so it stays.
+   */
+  it("leaves the shell alive on every other status", () => {
+    expect(sourceHookWithSession(0)).toContain("STILL_AT_PROMPT");
+    expect(sourceHookWithSession(1)).toContain("STILL_AT_PROMPT");
+    expect(sourceHookWithSession(130)).toContain("STILL_AT_PROMPT");
   });
 });
 

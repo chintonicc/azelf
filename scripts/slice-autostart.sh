@@ -1,4 +1,4 @@
-# ─── slice autostart v2 ───────────────────────────────────────────────────
+# ─── slice autostart v3 ───────────────────────────────────────────────────
 # Paste this block into the rc file of the shell your terminal starts —
 # ~/.zshrc, or ~/.bashrc / ~/.bash_profile. It is sh syntax on purpose and
 # runs unchanged under bash 3.2 and zsh; there is no fish version yet.
@@ -19,6 +19,13 @@
 # Delete this block and nothing breaks: slice-run.ts looks for it in your rc
 # file before choosing the tab path and falls back to a Warp launch
 # configuration, which opens a new window instead.
+#
+# EXIT 86 CLOSES THIS TAB. slice-session.sh returns it only when the session ran
+# under --self-land (so --auto, where nobody is watching the tab) AND the agent
+# exited cleanly. Every other status leaves you at a prompt with the output
+# still on screen — a session a human is reading, and a session that crashed,
+# are the two cases where the tab is the point. `exit` here ends the shell the
+# terminal started, which is what the terminal closes the tab on.
 case "$-" in *i*)
   if [ -f "$PWD/.slice-autostart" ]; then
     _slice_n=$(cat "$PWD/.slice-autostart")
@@ -28,7 +35,15 @@ case "$-" in *i*)
     else
       case "$_slice_n" in
         "" | *[!A-Za-z0-9._-]*) echo "slice autostart: ignoring malformed .slice-autostart marker" >&2 ;;
-        *) "$PWD/scripts/slice-session.sh" "$_slice_n" ;;
+        *)
+          "$PWD/scripts/slice-session.sh" "$_slice_n"
+          _slice_rc=$?
+          if [ "$_slice_rc" -eq 86 ]; then
+            unset _slice_n _slice_rc
+            exit 0
+          fi
+          unset _slice_rc
+          ;;
       esac
     fi
     unset _slice_n
