@@ -92,9 +92,35 @@ fi
 git push origin "$SLICE_BASE_BRANCH"
 echo "✓ pushed"
 
+# CLEANUP MUST NOT BE ABLE TO FAIL THE LAND, and must say what it skipped.
+#
+# By this line the base branch has already been fast-forwarded AND pushed — the
+# work is public — so what remains is housekeeping, and the ticket close below
+# is what unblocks the next wave.
+#
+# `git worktree remove` refuses a worktree containing modified or untracked
+# files, and a session that left something RUNNING — a dev server writing a log,
+# a watcher, a test run — is producing exactly those files, seconds after the
+# agent exited. That refusal is correct and --force is not the answer: it would
+# delete work the refusal exists to protect.
+#
+# This was written as `git worktree remove "$path" && echo "✓ removed"`, which
+# survived the refusal only by accident: bash exempts the left-hand side of an
+# `&&` from errexit, so the failure passed unnoticed under `set -e`. What you
+# actually got was git's bare `fatal: … contains modified or untracked files` on
+# stderr, no "✓ removed" line, and no hint that a worktree had been left behind
+# or what to do about it. Written as an `if` instead, the non-fatality is the
+# stated intent rather than a property of where the command happens to sit, and
+# there is somewhere to put the explanation.
 echo "── cleaning up ────────────────────────────────────────"
 if [[ -d "$worktree_path" ]]; then
-  git worktree remove "$worktree_path" && echo "✓ removed worktree $worktree_path"
+  if git worktree remove "$worktree_path" 2>/dev/null; then
+    echo "✓ removed worktree $worktree_path"
+  else
+    echo "⚠️  left $worktree_path in place — it has modified or untracked files,"
+    echo "    most likely from something still running in that session."
+    echo "    Check it, then: git worktree remove --force $worktree_path"
+  fi
 fi
 git branch -d "$branch" >/dev/null 2>&1 && echo "✓ deleted local branch $branch" || true
 if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then

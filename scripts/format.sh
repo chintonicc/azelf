@@ -46,17 +46,36 @@ set -euo pipefail
 # worktree in there. It fails silently in the worst way: every path is valid,
 # just wrong.
 #
-# git answers it instead, from the working directory, and `--git-common-dir`
-# means a slice worktree resolves to the MAIN checkout rather than to itself.
-# That is the same rule the TypeScript loader uses; see its findRepoRoot.
+# git answers it instead, from the working directory — and `--show-toplevel`,
+# NOT `--git-common-dir`. This script operates on the checkout you are STANDING
+# IN, and inside a slice worktree those two are different directories.
+#
+# THAT DISTINCTION IS A BUG THIS LINE ONCE HAD, and it failed silently in the
+# worst way: every path was valid, just somebody else's. `--git-common-dir`
+# resolves a linked worktree to the MAIN checkout, which is correct for
+# slice-land.sh (it fast-forwards the base branch there), for slice-session.sh
+# (it manages worktrees from there) and for the TypeScript loader's findRepoRoot
+# (it must recognise a worktree of a repo it already has). It is wrong for the
+# two scripts a SLICE AGENT runs inside its own worktree — this one and
+# session-commit.sh. consumer-a's ticket #21 hit it on 2026-09-08:
+# session-commit.sh died with "pathspec did not match", and format.sh quietly
+# reformatted the main checkout's copies of the slice's files while the slice's
+# own copies stayed unformatted and its format gate never ran. slice-done.sh had
+# used --show-toplevel all along and was right.
+#
+# A side effect worth naming: session-commit.sh's lock lives in `--git-dir`,
+# which now resolves to the worktree's own `.git/worktrees/<name>` rather than
+# to the shared one. That is the correct scope — the lock guards ONE index
+# against interleaved staging, and every worktree has its own.
+#
 # -P to match git's own canonicalized worktree paths, which
 # `git worktree list --porcelain` always prints resolved.
-_slice_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-if [[ -z "$_slice_common" ]]; then
+_slice_root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [[ -z "$_slice_root" ]]; then
   echo "error: not inside a git repository — run this from a checkout." >&2
   exit 1
 fi
-cd "$(cd "$(dirname "$_slice_common")" && pwd -P)"
+cd "$(cd "$_slice_root" && pwd -P)"
 
 # macOS ships bash 3.2, so: no `mapfile`, and no bare "${arr[@]}" on a
 # possibly-empty array under `set -u` — both are bash-4-isms that would fail
