@@ -598,6 +598,6 @@ config is code because the seams are code.
 
 ## License
 
-Not yet licensed. Until a `LICENSE` file lands, default copyright applies and this
-is published for reading rather than reuse — open an issue if you want to use it
-and that will get sorted.
+[MIT](LICENSE). Use it, change it, ship it in something closed — keep the copyright
+notice and it is yours to do as you like with. Provided as is: `--auto` rebases and
+fast-forward-merges real branches unattended, and that is your call to make.

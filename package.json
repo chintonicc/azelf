@@ -2,6 +2,7 @@
   "name": "@chintonicc/azelf",
   "version": "0.1.0",
   "description": "Parallel agent slices: one ticket, one worktree, one session, gated landing.",
+  "license": "MIT",
   "type": "module",
   "main": "./index.ts",
   "exports": {
