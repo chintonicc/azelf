@@ -11,6 +11,7 @@
  *   ./scripts/slice-run.ts --no-start      # land at a bare prompt instead of starting work
  *   ./scripts/slice-run.ts --review        # review each slice before landing (implied by --auto)
  *   ./scripts/slice-run.ts --auto --no-review   # opt out of the review --auto implies
+ *   ./scripts/slice-run.ts --no-auto-resolve    # never let an agent resolve a rebase conflict
  *   ./scripts/slice-run.ts --gates 12      # run the landing gates on slice 12, land nothing
  *   ./scripts/slice-run.ts --sync-edges    # write the edges the bodies claim, then stop
  *
@@ -69,8 +70,8 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
 // file; nothing below should grow a literal back.
@@ -95,6 +96,14 @@ import { type Launcher, type Session, manual } from "./slice-launcher";
 // The pure half of the overlap report; the git that feeds it is below, in the
 // overlap section, because only this file knows where a slice's branch is.
 import { findOverlaps, ignores } from "./slice-overlap";
+// Same split again: whether a conflict resolution may proceed is a decision
+// over facts and lives there; reading those facts out of a worktree is here.
+import {
+  type ResolutionState,
+  droppedFiles,
+  hasConflictMarkers,
+  resolutionProblem,
+} from "./slice-resolve";
 // And the tracker: every ticket and every blocking edge below is read through
 // `tracker`, never through gh directly. Ids are strings the tracker defines
 // (`ref` writes one the way that tracker does — `#3`, or `ENG-3`); see
@@ -1059,9 +1068,19 @@ function gatesPass(n: TicketId): boolean {
  * passing slices lands a broken master.
  *
  * A conflict is left entirely alone — aborted, reported, and the slice stays
- * exactly as its agent left it for a human to resolve.
+ * exactly as its agent left it. This function ABORTS EVEN WHEN A RESOLVER IS
+ * AVAILABLE, and that is deliberate: `resolveConflict` re-runs `git rebase`
+ * itself and hits the same conflicts deterministically, which costs one extra
+ * rebase and keeps "leaves nothing behind" an unconditional property of this
+ * function. The alternative — handing the resolver a mid-rebase worktree —
+ * makes that contract depend on what the caller does next, and leaves a parked
+ * worktree sitting in a half-finished rebase for whoever opens it.
+ *
+ * The conflicted paths come back rather than being printed here, because who
+ * prints them depends on what happens next: the escalation prompt shows them
+ * next to the `[a]` option, and the resolver puts them in its prompt.
  */
-function rebaseOntoBase(t: Ticket): boolean {
+function rebaseOntoBase(t: Ticket): { ok: boolean; conflicted: string[] } {
   const wt = worktreeFor(t.id);
   if (
     run(["git", "merge-base", "--is-ancestor", baseBranch, "HEAD"], {
@@ -1069,14 +1088,14 @@ function rebaseOntoBase(t: Ticket): boolean {
       allowFail: true,
     }).ok
   ) {
-    return true;
+    return { ok: true, conflicted: [] };
   }
 
   console.log(
     `  ${ref(t.id)} is behind ${baseBranch} — rebasing before the gates …`,
   );
   if (run(["git", "rebase", baseBranch], { cwd: wt, allowFail: true }).ok) {
-    return true;
+    return { ok: true, conflicted: [] };
   }
 
   // Name the files BEFORE aborting — after the abort there is nothing left to
@@ -1087,22 +1106,235 @@ function rebaseOntoBase(t: Ticket): boolean {
   const conflicted = run(["git", "diff", "--name-only", "--diff-filter=U"], {
     cwd: wt,
     allowFail: true,
-  }).out.trim();
+  })
+    .out.split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
   run(["git", "rebase", "--abort"], { cwd: wt, allowFail: true });
+  return { ok: false, conflicted };
+}
+
+/**
+ * Longer than the review's ten minutes, because this one has tools: it reads
+ * files, edits them, and runs git several times over however many commits the
+ * rebase stops on. A review that times out costs a review; this one times out
+ * into a half-rebased worktree, which is exactly what the verification below
+ * exists to catch — so the budget is generous and the check is strict.
+ */
+const RESOLVE_TIMEOUT_MS = 20 * 60 * 1000;
+
+/** A path inside a worktree's git dir — `rebase-merge` and friends. */
+function gitPath(wt: string, name: string): string {
+  const { ok, out } = run(["git", "rev-parse", "--git-path", name], {
+    cwd: wt,
+    allowFail: true,
+  });
+  const p = out.trim();
+  // Asked rather than assumed: a slice lives in a linked worktree, so its git
+  // dir is `.git/worktrees/<name>` in the main checkout and `<wt>/.git` is a
+  // file pointing there. `join(wt, ".git", "rebase-merge")` would be a path
+  // that never exists, which reads as "no rebase in progress" — the exact
+  // wrong answer, and one that fails open.
+  if (!ok || !p) return join(wt, name);
+  return isAbsolute(p) ? p : join(wt, p);
+}
+
+const changedIn = (wt: string, range: string): string[] =>
+  run(["git", "diff", "--name-only", range], { cwd: wt, allowFail: true })
+    .out.split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+/**
+ * The instruction the resolver is given. Every rule in it is here because
+ * something went wrong without it in consumer-a's first three-slice wave.
+ */
+function resolvePrompt(
+  t: Ticket,
+  conflicted: string[],
+  landedCommits: string,
+): string {
+  return `You are finishing a git rebase in this worktree. That is the whole job.
+
+Branch \`${branchFor(t.id)}\` is being rebased onto \`${baseBranch}\`. The rebase is IN PROGRESS in this directory and has stopped on conflicts:
+
+${conflicted.map((f) => `  ${f}`).join("\n")}
+
+WHAT THIS BRANCH IS FOR — ticket ${ref(t.id)}, ${t.title}:
+
+${ticketBody(t.id)}
+
+WHAT IT IS REBASING OVER — commits already on ${baseBranch} that it does not have:
+
+${landedCommits || "(none listed)"}
+
+RULES. These are not advice; a resolution that breaks one of them is thrown away.
+
+1. "Keep both sides" is only valid when git's \`=======\` falls on a BLOCK
+   BOUNDARY. It is wrong for import lists, JSON objects, union types, and any
+   conflict whose split runs through a brace, a bracket or a call. Concatenating
+   the two sides of a conflict that split a \`describe(...)\` body is how this
+   rule got written: it produced \`error TS1005: '}' expected\` in ten files.
+   Read what the braces actually do before you keep both halves.
+2. Never resolve by discarding one side. Both sides are work somebody meant. If
+   the two genuinely cannot coexist, STOP: run \`git rebase --abort\` and say in
+   one line what the irreconcilable disagreement is. Stopping is a correct
+   outcome and it is much better than a plausible-looking wrong merge.
+3. Both intents matter. The ticket above says what this branch is trying to do;
+   the commit list says what it is landing on top of. The resolved file has to
+   still do both.
+4. Verify before you say you are done: no \`<<<<<<<\`, \`=======\` or \`>>>>>>>\`
+   left anywhere, the files you touched still parse, and the project's checks
+   pass.
+5. Resolve the conflict and NOTHING ELSE. Do not amend earlier commits, do not
+   rename anything, do not take the opportunity to improve the code you are
+   looking at. The diff you produce should be explicable as "this is what the
+   two sides together mean".
+
+HOW TO FINISH: edit the conflicted files, \`git add\` them, then
+\`git -c core.editor=true rebase --continue\` — with \`core.editor\` set that way,
+so it never opens an editor and waits for input that is not coming. Repeat for
+every commit the rebase stops on, until \`git status\` says no rebase is in
+progress and the tree is clean.`;
+}
+
+/**
+ * Let the agent resolve a rebase conflict, then check its work.
+ *
+ * Returns true ONLY if the branch is now rebased, clean and free of conflict
+ * markers — the gates are check 5 and `tryLand` runs them immediately after
+ * this returns, which is why they are not repeated here.
+ *
+ * Nothing here trusts the resolver's own report. It gets read into the
+ * transcript and that is all it is for; the decision is made from the state of
+ * the worktree.
+ */
+function resolveConflict(t: Ticket, conflicted: string[]): boolean {
+  const argvFor = agent.resolve;
+  if (!argvFor) return false;
+  const wt = worktreeFor(t.id);
+  const branch = branchFor(t.id);
+
+  // Read BEFORE the rebase starts, because both of these are about the branch
+  // as its author left it: the file set is what check 6 compares against, and
+  // the commit list is the other slices' work, which the merge-base stops being
+  // able to name once the rebase has moved the branch.
+  const before = changedIn(wt, `${baseBranch}...${branch}`);
+  const head = run(["git", "rev-parse", "HEAD"], {
+    cwd: wt,
+    allowFail: true,
+  }).out.trim();
+  const mergeBase = run(["git", "merge-base", baseBranch, branch], {
+    cwd: wt,
+    allowFail: true,
+  }).out.trim();
+  const landedCommits = run(
+    ["git", "log", "--oneline", baseBranch, "--not", mergeBase || baseBranch],
+    { cwd: wt, allowFail: true },
+  ).out;
+
   console.log(
-    `  ✗ ${ref(
-      t.id,
-    )} not landed — it conflicts with ${baseBranch}, and a conflict is not something to resolve unsupervised. Rebase it by hand.`,
+    `\n  resolving ${ref(t.id)}'s conflict with ${baseBranch} (${
+      conflicted.length
+    } file${conflicted.length === 1 ? "" : "s"}) …`,
   );
-  if (conflicted) {
+
+  // `rebaseOntoBase` aborted, on purpose — see its comment. Re-run it here to
+  // stop on the same conflicts, in this function, where the abort on failure is
+  // ours to make.
+  if (run(["git", "rebase", baseBranch], { cwd: wt, allowFail: true }).ok) {
+    // Not impossible: a land in the same round can move the base branch between
+    // the two attempts, and the second one is the one that counts.
     console.log(
-      conflicted
-        .split("\n")
-        .map((f) => `      conflict: ${f}`)
-        .join("\n"),
+      `     ✓ the rebase applied cleanly this time — nothing for the resolver to do.`,
     );
+    return true;
   }
-  return false;
+
+  const give = (why: string, transcript: string): boolean => {
+    run(["git", "rebase", "--abort"], { cwd: wt, allowFail: true });
+    // An abort is not enough on its own, and this is the case that makes the
+    // difference: a resolver can FINISH the rebase and still fail check 4 —
+    // markers committed, ten files that do not parse. There is no rebase left
+    // to abort by then, so without this the branch keeps the bad resolution and
+    // "the branch is as it was" would be a lie. `head` is this branch's own
+    // commit from a moment ago, so the reset discards exactly the resolution
+    // and nothing else.
+    const now = run(["git", "rev-parse", "HEAD"], {
+      cwd: wt,
+      allowFail: true,
+    }).out.trim();
+    if (head && now && now !== head) {
+      run(["git", "reset", "--hard", head], { cwd: wt, allowFail: true });
+    }
+    const path = saveReport(
+      `conflict-${t.id}.md`,
+      `# Conflict resolution — ${ref(t.id)} ${
+        t.title
+      }\n\nREJECTED: ${why}\n\n## Conflicted files\n\n${conflicted
+        .map((f) => `- ${f}`)
+        .join("\n")}\n\n## Agent transcript\n\n${transcript}\n`,
+    );
+    console.log(`     ✗ resolution rejected — ${why}`);
+    console.log(`     the rebase was aborted; the branch is as it was.`);
+    console.log(`     transcript: ${path}`);
+    return false;
+  };
+
+  const argv = argvFor(resolvePrompt(t, conflicted, landedCommits));
+  if (!argv) return give("the agent declined the headless run", "(none)");
+  const { out } = run(argv, {
+    cwd: wt,
+    allowFail: true,
+    timeoutMs: RESOLVE_TIMEOUT_MS,
+  });
+  const transcript = out.trim() || "(the agent printed nothing)";
+
+  const after = changedIn(wt, `${baseBranch}...HEAD`);
+  const state: ResolutionState = {
+    base: baseBranch,
+    rebaseInProgress:
+      existsSync(gitPath(wt, "rebase-merge")) ||
+      existsSync(gitPath(wt, "rebase-apply")),
+    dirty: run(["git", "status", "--porcelain"], { cwd: wt, allowFail: true })
+      .out.split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean),
+    rebased: run(["git", "merge-base", "--is-ancestor", baseBranch, "HEAD"], {
+      cwd: wt,
+      allowFail: true,
+    }).ok,
+    markerFiles: after.filter((f) => {
+      try {
+        return hasConflictMarkers(readFileSync(join(wt, f), "utf8"));
+      } catch {
+        // Deleted by the resolution, or not text. Neither can hold a marker.
+        return false;
+      }
+    }),
+  };
+
+  const problem = resolutionProblem(state);
+  if (problem) return give(problem, transcript);
+
+  const path = saveReport(
+    `conflict-${t.id}.md`,
+    `# Conflict resolution — ${ref(t.id)} ${
+      t.title
+    }\n\nACCEPTED: rebased onto ${baseBranch}, clean, no conflict markers. The gates run next.\n\n## Conflicted files\n\n${conflicted
+      .map((f) => `- ${f}`)
+      .join("\n")}\n\n## Agent transcript\n\n${transcript}\n`,
+  );
+  console.log(
+    `     ✓ rebased onto ${baseBranch}, clean, no markers left — the gates run next`,
+  );
+  // Check 6: reported, never gated. See droppedFiles in slice-resolve.ts for
+  // why a legitimate resolution is allowed to drop a file.
+  for (const f of droppedFiles(before, after)) {
+    console.log(`     ⚠ ${f} was in the diff before and is not now`);
+  }
+  console.log(`     transcript: ${path}`);
+  return true;
 }
 
 /**
@@ -1147,7 +1379,7 @@ function isParked(id: TicketId): boolean {
   return true;
 }
 
-export type Escalation = "retry" | "force" | "park" | "quit";
+export type Escalation = "resolve" | "retry" | "force" | "park" | "quit";
 
 /**
  * What to do about a slice that will not land.
@@ -1162,22 +1394,40 @@ export type Escalation = "retry" | "force" | "park" | "quit";
  * slices, and the summary at the end names every parked ticket. Nothing is
  * lost and nothing is landed unreviewed.
  */
-function askAboutBlocked(t: Ticket, reason: string): Escalation {
+function askAboutBlocked(
+  t: Ticket,
+  reason: string,
+  conflicted?: string[],
+): Escalation {
   console.log(`
   ✗ ${ref(t.id)} did not land — ${reason}`);
   console.log(`     worktree: ${worktreeFor(t.id)}`);
+  // Only a rebase conflict passes a file list, and only a rebase conflict is
+  // something an agent can be asked to resolve — so this one value answers both
+  // "what conflicted" and "is [a] on the menu".
+  if (conflicted?.length) {
+    console.log(`     conflict: ${conflicted.join("  ")}`);
+  }
   if (assumeYes || !process.stdin.isTTY) {
     console.log(
       "     parked (non-interactive). It will be retried automatically if you commit to that branch.",
     );
     return "park";
   }
-  console.log(
-    "     [r] retry now   [f] land anyway   [p] park it   [q] stop the run",
+  const canResolve = Boolean(
+    conflicted?.length && agent.resolve && autoResolve,
   );
-  const answer = (prompt("     what now? [r/f/p/q]") ?? "")
+  console.log(
+    `     ${
+      canResolve ? "[a] let an agent resolve it   " : ""
+    }[r] retry now   [f] land anyway   [p] park it   [q] stop the run`,
+  );
+  const answer = (
+    prompt(`     what now? [${canResolve ? "a/" : ""}r/f/p/q]`) ?? ""
+  )
     .trim()
     .toLowerCase();
+  if (canResolve && answer.startsWith("a")) return "resolve";
   if (answer.startsWith("r")) return "retry";
   if (answer.startsWith("f")) return "force";
   if (answer.startsWith("q")) return "quit";
@@ -1188,11 +1438,27 @@ function askAboutBlocked(t: Ticket, reason: string): Escalation {
 let stopRequested = false;
 
 function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
-  if (!rebaseOntoBase(t)) {
-    return park(
-      t,
-      "the rebase onto the base branch failed — resolve it in the worktree",
-    );
+  const rebase = rebaseOntoBase(t);
+  if (!rebase.ok) {
+    // Under --auto there is nobody at the prompt to press [a], so the decision
+    // is made here instead of being offered. The argument: --auto already lets
+    // an unwatched agent write code that reaches the base branch gated only by
+    // the gates and the spec review, and a resolution passes through the SAME
+    // gates and the same review of the rebased diff. It is strictly less
+    // exposure than the slice it is fixing. --no-auto-resolve opts out, and an
+    // interactive run is asked rather than told.
+    const decide = autoLand && autoResolve && agent.resolve;
+    if (!decide || !resolveConflict(t, rebase.conflicted)) {
+      return park(
+        t,
+        decide
+          ? "the rebase failed and the agent could not resolve it"
+          : "the rebase onto the base branch failed",
+        // No second [a] after an attempt that already failed: one attempt per
+        // branch head, which is the rule `Parked` already encodes for reviews.
+        decide ? undefined : rebase.conflicted,
+      );
+    }
   }
   if (!gatesPass(t.id)) {
     return park(t, "the gates are red");
@@ -1234,9 +1500,16 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
  * question. Before this, three of the four returned false with a different
  * message and identical behaviour — retry next round, indefinitely.
  */
-function park(t: Ticket, reason: string): boolean {
+function park(t: Ticket, reason: string, conflicted?: string[]): boolean {
   const head = branchHead(t.id);
-  switch (askAboutBlocked(t, reason)) {
+  switch (askAboutBlocked(t, reason, conflicted)) {
+    case "resolve":
+      // A successful resolution leaves the branch rebased, so the tryLand it
+      // re-enters finds the base branch already an ancestor and goes straight
+      // to the gates. A failed one falls through to the same question without
+      // the [a] — the resolver has had its attempt at this branch head.
+      if (resolveConflict(t, conflicted ?? [])) return tryLand(t);
+      return park(t, "the agent could not resolve the conflict");
     case "retry":
       return tryLand(t);
     case "force":
@@ -1397,6 +1670,17 @@ const planOnly = flag("--plan");
 const once = flag("--once");
 const assumeYes = flag("-y") || flag("--yes");
 const autoLand = flag("--auto");
+// The `[a]` option, and whether --auto takes it without asking. On by default
+// wherever the agent has a resolver at all, because the failure it addresses —
+// a rebase conflict between two slices of one wave — is the normal course of a
+// wave finishing, and the four existing options do not resolve anything.
+//
+// The argument against, stated here rather than discovered later: a bad
+// resolution is harder to spot in review than bad new code, because the diff
+// reads as somebody else's work. If that proves true in practice the honest
+// response is to make --auto offer rather than act — not to add a confidence
+// heuristic on top of it.
+const autoResolve = !flag("--no-auto-resolve");
 const intervalMs = Number(value("--interval") ?? 30) * 1000;
 
 // `--gates <n…>`: the landing gates, and nothing else — no GitHub, no rebase,
@@ -1526,6 +1810,15 @@ console.log(
           : " — advisory only, a human already said done"
       }; plan-level review when the graph empties.`
     : "  review: OFF — nothing reads the diff before it lands. --review to enable.",
+);
+console.log(
+  !agent.resolve
+    ? `  conflicts: ${agent.name} declares no resolver — a rebase conflict parks, as before.`
+    : !autoResolve
+      ? "  conflicts: --no-auto-resolve — a rebase conflict parks without offering [a]."
+      : autoLand
+        ? "  conflicts: a failed rebase is handed to the agent, then re-verified (rebased, clean, no markers) and gated. --no-auto-resolve to opt out."
+        : "  conflicts: a failed rebase offers [a] — the agent resolves it, and the result is re-verified and gated.",
 );
 
 if (!assumeYes) {

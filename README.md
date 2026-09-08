@@ -37,6 +37,7 @@ session in each, and lands the finished ones — re-running the gates itself, be
 - [When two slices touch the same file](#when-two-slices-touch-the-same-file)
   - [Quieting the paths that never matter](#quieting-the-paths-that-never-matter)
 - [When a slice will not land](#when-a-slice-will-not-land)
+  - [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
 - [Runtime and limitations](#runtime-and-limitations)
@@ -210,6 +211,7 @@ Installs into the repo you are standing in.
 | `--no-start` | prep the worktree but do not open a session |
 | `--review` | ask the agent to review the diff before landing (implied by `--auto`) |
 | `--no-review` | never review, even under `--auto` |
+| `--no-auto-resolve` | never let an agent resolve a rebase conflict — park it, as before |
 | `-y`, `--yes` | non-interactive: park on any failure instead of asking |
 
 `--gates` is how you check a slice by hand — no tracker call, no rebase, no land.
@@ -516,18 +518,32 @@ agent: custom({ name: "aider", sessionCommand: ["aider", "--message"] })
 | --- | --- |
 | `claude` | `bin`, `sessionFlags`, `which` |
 | `codex` | `bin`, `sessionFlags`, `headless`, `which` |
-| `custom` | `name`, `sessionCommand`, `review`, `which` |
+| `custom` | `name`, `sessionCommand`, `review`, `resolve`, `which` |
 
-An agent has two capabilities and they are not the same one. A **session** is
+An agent has three capabilities and they are not the same one. A **session** is
 interactive: a terminal, an opening instruction, running until it is done. A
 **review** is headless: one prompt in, text out, bounded time, used to check a diff
-against its ticket before landing.
+against its ticket before landing. A **resolve** is headless *with tools*: it edits
+files and runs git inside one slice's worktree, and it is the only one of the three
+that writes.
 
-An agent can have the first without the second. `codex()` declares no headless mode
+Review and resolve are kept apart on purpose. A reviewer that can edit the tree is a
+reviewer that can make its own findings go away — so the review argv carries no write
+permission, and `claude()` spends `--permission-mode acceptEdits` only on the
+resolver.
+
+An agent can have the first without the others. `codex()` declares no headless mode
 unless you pass `headless: true`, because its non-interactive invocation has not been
 run against these review prompts — and a review that returns prose with no parseable
 `VERDICT:` line is read as BLOCK, which stalls every land. Skipping the review loudly
 is the honest failure: the dispatcher says so on the run and lands on the gates alone.
+
+`codex()` declares no resolver at all, and `headless: true` does not grant one: which
+flag makes `codex exec` write without stopping to ask has not been run here against a
+real conflicted worktree, and an unverified resolver fails worse than an unverified
+reviewer — with a half-rebased worktree rather than a missing paragraph. `custom({
+resolve })` is the escape hatch once you have verified it. No resolver simply means
+the `[a]` option below is never offered.
 
 A missing agent binary is fatal **before** anything is prepped. The alternative is N
 worktrees each opening a terminal that prints "command not found", which reads as
@@ -667,6 +683,58 @@ All four failure paths go through that question: a failed rebase, red gates, a
 blocking review, or `slice-land.sh` refusing a branch that is not fast-forwardable.
 Non-interactive runs (`-y`, or no TTY) park automatically, which loses nothing and
 lands nothing unreviewed.
+
+### Letting an agent resolve a rebase conflict
+
+One of those four is mechanical, and it is the one a wave produces by construction:
+two slices in one feature area both edited one file, the first landed, and the second
+now cannot rebase. The overlap report predicts this correctly and there is nothing to
+do with the prediction — retry re-fails, land-anyway is dangerous, park defers. So a
+rebase conflict gets a fifth option:
+
+```
+  ✗ #19 did not land — the rebase onto the base branch failed
+     worktree: /…/repo-ticket-19
+     conflict: lib/categoryWindow.ts  tests/lib/categoryWindow.test.ts
+     [a] let an agent resolve it   [r] retry now   [f] land anyway   [p] park it   [q] stop the run
+     what now? [a/r/f/p/q] a
+
+  resolving #19's conflict with master (2 files) …
+     ✓ rebased onto master, clean, no markers left — the gates run next
+     ⚠ lib/i18n/locales/es.json was in the diff before and is not now
+     transcript: /…/.slice-reviews/conflict-19.md
+```
+
+The agent is given the conflicted files, **this slice's ticket body**, and the commits
+it is rebasing over — both intents, so it can tell what the two sides were each trying
+to do — plus rules that are not advice: "keep both sides" is valid only when git's
+`=======` falls on a block boundary, never resolve by discarding a side, and stop and
+say so if the two genuinely cannot coexist. That first rule is there because a blind
+union resolution of exactly this conflict put `=======` inside a `describe(...)` body
+and produced `error TS1005: '}' expected` across ten files.
+
+**Nothing takes the resolver's word for it.** When it returns, the dispatcher checks
+the worktree itself: no rebase still in progress, `git status` clean, the base branch
+actually an ancestor of `HEAD`, and no conflict markers left in any changed file. Then
+the ordinary gates and the spec review run, unchanged — a resolution is held to
+exactly the standard the code it is fixing was. Any of those failing means the resolution is thrown
+away — `git rebase --abort`, and a `reset --hard` back to the commit the branch was
+on if the resolver had already finished the rebase, so "the branch is as it was" is
+true even when there was no rebase left to abort — plus a saved transcript and the
+same `[r/f/p/q]` question with the reason named. One attempt per branch head: a failed resolution parks, and only a new
+commit makes the slice eligible again.
+
+Files that were in the slice's diff before and are not after are **reported, never
+gated**. A legitimate resolution can drop a file — the base branch may already have
+made the same change — but so can a resolver that quietly deleted the slice's work,
+and telling those apart is a human reading one line.
+
+Under `--auto` this happens without asking, because `--auto` already lets an unwatched
+agent write code that reaches the base branch gated only by the gates and the review,
+and a resolution passes through the same gates and the same review of the rebased
+diff. It is strictly less exposure than the slice it is fixing. `--no-auto-resolve`
+opts out, and the honest counter-argument is worth knowing: a bad resolution is harder
+to spot in review than bad new code, because the diff reads as somebody else's work.
 
 **A parked slice is retried when, and only when, its branch moves.** That condition
 is the whole mechanism: it is exactly when the answer could be different, and exactly

@@ -303,6 +303,15 @@ function validate(c: SliceConfig): SliceConfig {
         "agent.review must be a function returning argv, or null when the agent has no headless mode",
       );
     }
+    // Optional in a way `review` is not: absent means the dispatcher never
+    // offers to resolve a conflict, which is the behaviour every agent had
+    // before this capability existed. Present and not a function is still a
+    // typo worth naming.
+    if (a.resolve !== undefined && typeof a.resolve !== "function") {
+      bad(
+        "agent.resolve must be a function returning argv for a headless run WITH TOOLS, or null — leave it out entirely if the agent cannot edit files headlessly",
+      );
+    }
     if (
       !Array.isArray(a.sessionCommand) ||
       a.sessionCommand.length === 0 ||

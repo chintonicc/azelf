@@ -26,6 +26,27 @@ describe("claude", () => {
     ]);
   });
 
+  it("resolves with tools, and says so with the permission flag", () => {
+    expect(claude({ which: present }).resolve?.("fix it")).toEqual([
+      "claude",
+      "-p",
+      "--permission-mode",
+      "acceptEdits",
+      "fix it",
+    ]);
+  });
+
+  /**
+   * The two headless capabilities are not one capability. A reviewer that can
+   * edit the tree is a reviewer that can make its own findings go away, so the
+   * review argv must stay the one without write permission.
+   */
+  it("keeps the review argv free of the write permission", () => {
+    expect(claude({ which: present }).review("why")).not.toContain(
+      "--permission-mode",
+    );
+  });
+
   it("names the missing binary rather than saying 'not found'", () => {
     const p = claude({ which: absent, bin: "claude-next" }).problem();
     expect(p).toContain("claude-next");
@@ -57,6 +78,16 @@ describe("codex", () => {
       "exec",
       "why",
     ]);
+  });
+
+  /**
+   * And `headless: true` does not grant it either: an unverified resolver does
+   * not fail the way an unverified reviewer does — it fails with a half-rebased
+   * worktree.
+   */
+  it("declares no resolver at all, headless or not", () => {
+    expect(codex({ which: present }).resolve).toBeUndefined();
+    expect(codex({ which: present, headless: true }).resolve).toBeUndefined();
   });
 
   it("reports a missing binary", () => {
@@ -98,6 +129,20 @@ describe("custom", () => {
         which: present,
       }).review("x"),
     ).toEqual(["a", "--headless", "x"]);
+  });
+
+  it("passes a resolver through, and stays valid without one", () => {
+    expect(
+      custom({ name: "a", sessionCommand: ["a"], which: present }).resolve,
+    ).toBeUndefined();
+    expect(
+      custom({
+        name: "a",
+        sessionCommand: ["a"],
+        resolve: (p) => ["a", "--write", p],
+        which: present,
+      }).resolve?.("x"),
+    ).toEqual(["a", "--write", "x"]);
   });
 
   it("refuses an empty sessionCommand rather than building a broken agent", () => {

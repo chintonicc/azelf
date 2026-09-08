@@ -55,6 +55,13 @@ failure paths — a failed rebase, red gates, a `VERDICT: BLOCK` spec review, or
 `slice-land.sh` refusing — all stop and offer: retry now, land anyway without the
 review, park it, or stop the run. Non-interactive runs park automatically.
 
+A failed rebase also offers `[a] let an agent resolve it`, and takes it by itself
+under `--auto` unless you pass `--no-auto-resolve`. The resolution is verified before
+anything lands — no rebase in progress, clean tree, the base actually an ancestor, no
+conflict markers left — and then goes through the ordinary gates and spec review. A
+failed resolution aborts the rebase, saves a transcript to `.slice-reviews/`, and
+parks; the branch is left exactly as its author committed it.
+
 A parked slice is retried when, and only when, its branch moves. That is the point:
 a review verdict on an unchanged diff cannot change, so re-running it is a paid loop
 rather than optimism. Go commit a fix in the worktree and the next round picks it up

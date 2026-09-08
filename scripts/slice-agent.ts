@@ -13,8 +13,8 @@
  * shell told only what it can carry. See slice-launcher.ts for the fullest
  * statement of why these are contracts rather than name strings.
  *
- * TWO CAPABILITIES, AND THEY ARE NOT THE SAME ONE
- * -----------------------------------------------
+ * THREE CAPABILITIES, AND THEY ARE NOT THE SAME ONE
+ * -------------------------------------------------
  * `session` is interactive: a terminal, a human-shaped conversation, an opening
  * instruction, and it runs until someone (or the self-land instruction) ends it.
  * `review` is headless: one prompt in, text out, no tools, bounded time. An
@@ -24,6 +24,16 @@
  *
  * That is why `review` returns `null` rather than throwing: `slice-run.ts` skips
  * the review step and says so, instead of refusing to land.
+ *
+ * `resolve` is the third, and it is separate from `review` on purpose rather
+ * than as a convenience. Review is text-in/text-out and needs no permissions;
+ * resolve edits files and runs git inside a worktree. Folding the two into one
+ * headless capability would hand the reviewer a writable tree, and a reviewer
+ * that can edit the tree is a reviewer that can make its own findings go away.
+ * They also fail differently: a review that does not return costs a review, a
+ * resolution that does not return can leave a half-rebased worktree, which is
+ * why `slice-run.ts` verifies the result itself and aborts rather than trusting
+ * what the resolver says it did.
  *
  * WHAT THE SHELL GETS
  * -------------------
@@ -66,6 +76,24 @@ export type Agent = {
    * null until this seam grows a stdin variant, which nothing needs yet.
    */
   review(prompt: string): string[] | null;
+
+  /**
+   * Full argv for a headless run WITH TOOLS, in a given working directory, or
+   * null if this agent cannot do that. Distinct from `review` on purpose:
+   * `review` is text-in/text-out and needs no permissions, this one edits files
+   * and runs git.
+   *
+   * Optional, and null is a first-class answer — same precedent as `review` and
+   * the same consequence: no resolver means the `[a] let an agent resolve it`
+   * option is simply not offered and a conflicting slice parks exactly as it
+   * did before.
+   *
+   * The working directory is not a parameter here for the same reason the
+   * review's isn't: the dispatcher runs the argv with `cwd` set to the slice's
+   * worktree, so an agent that needs to be TOLD its directory does not fit this
+   * seam and should return null rather than guess.
+   */
+  resolve?(prompt: string): string[] | null;
 };
 
 /** Injected so tests never look for a real binary. */
@@ -93,6 +121,14 @@ export type ClaudeOptions = {
  * `-p` is its headless mode: one prompt, printed answer, no interactive input.
  * The review prompts ask for a verdict line and nothing else, which is why they
  * need no tools and no MCP servers.
+ *
+ * `resolve` is the same `-p` plus `--permission-mode acceptEdits`, which is the
+ * whole difference: the resolution has to edit the conflicted files and run git
+ * in the worktree, and a run that stops to ask about every edit is a run that
+ * hangs until its timeout under `--auto`. `acceptEdits` rather than a blanket
+ * bypass because the dispatcher verifies the result afterwards regardless — see
+ * `resolutionProblem` in slice-resolve.ts — so the permission mode is about not
+ * stalling, never about trust.
  */
 export function claude(opts: ClaudeOptions = {}): Agent {
   const bin = opts.bin ?? "claude";
@@ -102,6 +138,13 @@ export function claude(opts: ClaudeOptions = {}): Agent {
     problem: () => (which(bin) ? null : missing("claude", bin)),
     sessionCommand: [bin, ...(opts.sessionFlags ?? [])],
     review: (prompt) => [bin, "-p", prompt],
+    resolve: (prompt) => [
+      bin,
+      "-p",
+      "--permission-mode",
+      "acceptEdits",
+      prompt,
+    ],
   };
 }
 
@@ -131,6 +174,14 @@ export type CodexOptions = {
  *
  * Pass `headless: true` once you have verified it; the wiring is here and
  * costs one flag.
+ *
+ * `resolve` is absent entirely, and `headless: true` does not grant it. That is
+ * the same refusal one step further: a conflict resolution needs a headless run
+ * that may WRITE, and which flag makes `codex exec` write without stopping to
+ * ask has not been run against a real conflicted worktree here. An unverified
+ * resolver does not fail the way an unverified reviewer does — it fails with a
+ * half-rebased worktree — so the honest default is no resolver and the existing
+ * `[r/f/p/q]` prompt. `custom()` is the escape hatch once you have verified it.
  */
 export function codex(opts: CodexOptions = {}): Agent {
   const bin = opts.bin ?? "codex";
@@ -155,6 +206,11 @@ export type CustomOptions = {
   name: string;
   sessionCommand: string[];
   review?: (prompt: string) => string[] | null;
+  /**
+   * Headless AND able to write in the worktree. Left out means no resolver,
+   * which is a complete answer: the `[a]` option is not offered.
+   */
+  resolve?: (prompt: string) => string[] | null;
   which?: Which;
 };
 
@@ -169,5 +225,9 @@ export function custom(opts: CustomOptions): Agent {
     problem: () => (which(bin) ? null : missing(opts.name, bin)),
     sessionCommand: opts.sessionCommand,
     review: opts.review ?? (() => null),
+    // Passed through rather than defaulted to `() => null`: the contract makes
+    // this one optional, and "absent" is what the dispatcher reads to decide
+    // whether the `[a]` option exists at all.
+    resolve: opts.resolve,
   };
 }
