@@ -51,14 +51,23 @@
 # it lands. That is what "only one session touches the DB at a time" means
 # when taken literally, which is the point.
 #
-# KNOWN LIMITATION: this is a point-in-time scan, not an atomic lock, at the
-# point slice-session.sh calls it (launch time) — two sessions can both pass
-# a clean check before either has touched a migration, then both proceed.
-# That's why there are two checkpoints: the real enforcement point is
-# session-commit.sh's call, which runs this same check while already holding
-# session-commit.sh's own mkdir-based commit mutex, so two commits can never
-# race each other there. The launch-time check is a best-effort early
-# warning, not a guarantee — the merge-time check is what closes the race.
+# KNOWN LIMITATION, AND IT IS THE BIG ONE: this is a scan of git state, not a
+# lock anyone takes. Every caller — slice-session.sh at launch, session-commit.sh
+# at commit, slice-run.ts before a wave — can only NOTICE a migration after it
+# has been written. The dangerous act, applying that migration to the live
+# database, happens between launch and commit, and nothing here is in a
+# position to refuse it. On 2026-09-23 two slices on consumer-a applied
+# migrations nine minutes apart; the first refusal arrived at commit time,
+# about the git record, after both applies were done. The claim protocol in
+# docs/db-lock-plan.md (Phase 2) is the fix: a lock a session takes BEFORE it
+# touches the DB. Until it lands, this scan is a backstop, not an enforcement
+# point.
+#
+# The commit-time call does run under session-commit.sh's mkdir mutex, which
+# lives in the COMMON git dir and so serializes commits across worktrees. That
+# stops two commits interleaving; it does not, and cannot, stop two sessions
+# each writing a migration and then each seeing the other's — which is the
+# mutual case db_lock_holder names explicitly below.
 
 # Self-contained: both callers have usually loaded this already, and
 # slice-config.sh no-ops on a second source, so this costs nothing when they

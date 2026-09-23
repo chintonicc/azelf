@@ -63,10 +63,8 @@ set -euo pipefail
 # own copies stayed unformatted and its format gate never ran. slice-done.sh had
 # used --show-toplevel all along and was right.
 #
-# A side effect worth naming: session-commit.sh's lock lives in `--git-dir`,
-# which now resolves to the worktree's own `.git/worktrees/<name>` rather than
-# to the shared one. That is the correct scope — the lock guards ONE index
-# against interleaved staging, and every worktree has its own.
+# (session-commit.sh's commit lock is the one thing that DOES belong in the
+# common dir, and lives there — see the note on it in that script.)
 #
 # -P to match git's own canonicalized worktree paths, which
 # `git worktree list --porcelain` always prints resolved.

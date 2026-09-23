@@ -93,10 +93,8 @@ done
 # own copies stayed unformatted and its format gate never ran. slice-done.sh had
 # used --show-toplevel all along and was right.
 #
-# A side effect worth naming: session-commit.sh's lock lives in `--git-dir`,
-# which now resolves to the worktree's own `.git/worktrees/<name>` rather than
-# to the shared one. That is the correct scope — the lock guards ONE index
-# against interleaved staging, and every worktree has its own.
+# The commit LOCK below is the one place this script does reach for the common
+# dir — see the note there for why the two scopes differ.
 #
 # -P to match git's own canonicalized worktree paths, which
 # `git worktree list --porcelain` always prints resolved.
@@ -117,8 +115,23 @@ source "scripts/slice-config.sh"
 # mkdir is atomic even across processes/sessions, so it doubles as a mutex.
 # The cleanup trap is only registered AFTER we own the lock — registering it
 # earlier would let a timed-out session rmdir the lock another session holds.
-git_dir=$(git rev-parse --git-dir)
-lock_dir="$git_dir/session-commit.lock"
+#
+# The lock lives in the COMMON git dir, shared by every worktree of this repo —
+# not in `--git-dir`, which inside a linked worktree is that worktree's private
+# `.git/worktrees/<name>`. It sat there for a while, on the argument that the
+# lock guards one index and every worktree has its own. That is true of the
+# staging half of this script and misses the other half: the DB-lock check
+# further down is documented (db-lock-check.sh's header) as running "while
+# already holding this mutex, so two commits can never race each other", and a
+# per-worktree lock made that sentence false — two slice worktrees each held
+# their own lock and raced freely, in the one scenario azelf exists for. Found
+# by two slices on consumer-a on 2026-09-23. Serializing every commit across
+# worktrees costs seconds per commit, and nothing else.
+#
+# `--path-format=absolute` because the common dir is otherwise printed relative
+# to the cwd, and the `cd` above already moved us.
+git_common_dir=$(git rev-parse --path-format=absolute --git-common-dir)
+lock_dir="$git_common_dir/session-commit.lock"
 
 waited=0
 while ! mkdir "$lock_dir" 2>/dev/null; do
