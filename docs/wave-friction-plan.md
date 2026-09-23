@@ -1,14 +1,14 @@
 # What consumer-a's 2026-09-23 waves tripped over
 
-**Status:** Phases 1–2 LANDED 2026-09-23 · Phase 3 open · **Written:** 2026-09-23
+**Status:** COMPLETE: Phases 1–3 LANDED 2026-09-23 · **Written:** 2026-09-23
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), `scripts/slice-resolve.ts` header, `docs/tab-close-plan.md` (same day, same
 waves).
 
 Written so it can be picked up cold. Each item says what to change, where, why, and what
 proves it. Tick the boxes as they land and add the commit hash after the heading. Line
-numbers are as of `a3899a5`; Phases 1 and 2 moved `slice-run.ts` by about 300 lines, so
-search Phase 3's references by name.
+numbers are as of `a3899a5`; the three phases moved `slice-run.ts` by about 400 lines, so
+search for things by name.
 
 ## What happened
 
@@ -249,7 +249,7 @@ end for the next one.
 
 ## Phase 3 — two dispatchers on one repo
 
-- [ ] **3a. A land lock in `slice-land.sh`.** Take `<common git dir>/azelf-land.lock` (an
+- [x] **3a. A land lock in `slice-land.sh`.** (`85de384`) Take `<common git dir>/azelf-land.lock` (an
   atomic `mkdir`, with an owner file naming pid, ticket and time) after the branch checks
   and before `base_before` (`slice-land.sh:131`). Hold it until exit.
   - It waits up to five minutes, printing once *"waiting for ticket/41's land (pid …)"*.
@@ -265,7 +265,7 @@ end for the next one.
   hook. The second prints the waiting line naming the first, then either lands or refuses
   as "diverged", never with a git lock error.
 
-- [ ] **3b. One gate run per repo at a time.** `gatesPass` (`slice-run.ts:1031`) runs
+- [x] **3b. One gate run per repo at a time.** (`85de384`) `gatesPass` (`slice-run.ts:1031`) runs
   `runGates` under `<common git dir>/azelf-gates.lock`. Use the same owner-file shape as
   3a, in a small `scripts/slice-lock.ts`, so the lock itself is unit-testable. It prints
   *"waiting for #31's gates (other dispatcher, pid …)"* while it waits.
@@ -277,7 +277,7 @@ end for the next one.
   *Proof:* unit tests on `slice-lock.ts`: two processes contend, one waits and then
   proceeds, and a dead owner is taken over.
 
-- [ ] **3c. A gate can ask to be retried once.** `Gate` (`slice-gates.ts:83`) gains
+- [x] **3c. A gate can ask to be retried once.** (`85de384`) `Gate` (`slice-gates.ts:83`) gains
   `retries?: number`, default 0, settable through the opts of `exitCode`,
   `exitCodeOverFiles` and `baselineDiff`.
   - `runGates` (`:288`) re-runs a failed gate up to that many times, still inside the
@@ -293,9 +293,41 @@ end for the next one.
   *Proof:* a unit test with a gate that fails on its first call and passes on its second
   lands with `flaky: [name]`. With `retries: 0` it fails.
 
+**As landed, where it differs from the above:**
+- 3a/3b: one implementation, not two. `slice-land.sh` calls `slice-lock.ts` through
+  its command line (`bun slice-lock.ts acquire|release <dir> --pid $$ …`) and releases
+  in an EXIT trap. A lock is placed whole: its owner file (pid, start time, label,
+  time) is written into a private directory, which is then renamed into place.
+  rename(2) fails onto a non-empty directory, so this is as atomic as `mkdir` and a
+  lock never exists without its owner. A holder is alive when its pid is running and
+  its `ps -o lstart` still matches, because pids get reused. A takeover moves the dead
+  lock aside and checks that it moved the lock it judged dead, so two waiters on one
+  dead holder do not delete each other's fresh lock.
+- 3a: the lock is taken right before `base_before`, so a land refused for having no
+  branch never waits. There is a test for that, besides the two in the plan (the slow
+  `pre-push` race, and a dead holder taken over).
+- 3b: the gate lock waits as long as the holder is running, with no cap. The round
+  has nothing else to do until its gates have run, and a holder that dies is taken
+  over. `azelf run --gates` takes it too. There is a harness test for the waiting line
+  as well as the unit tests.
+- 3b, not closed: `baselineDiff` runs its baseline in the main checkout, and another
+  dispatcher's land can fast-forward that checkout mid-run, because the gate lock
+  does not also take the land lock. The friction log has no case of it. Holding both
+  would stop every land for the length of a gate run.
+- 3c: `flaky` is `{ gate, retry }[]`, not `string[]`, so the warning can name the
+  retry that passed. A failure after its retries reads "…, and again on N retries".
+  `GateOptions`, `GatesResult` and `Flaky` are exported from `index.ts`. The end of
+  the run prints a "landed on a retried gate" block before the parked list. Proof: six
+  unit tests in `sliceGates.test.ts`, and two harness tests (lands and is listed with
+  `retries: 1`; parks without it).
+- The README gains "Two dispatchers on one repo", `retries` under Gates, and a
+  troubleshooting entry. Both `/azelf` command copies say two dispatchers are fine.
+  Nothing new goes in the worktree, so consumers need no `azelf init` for this phase.
+
 ## Order and cost
 
-Phase 1 is about a day, and 1a is most of it; land 1a+1b as one commit (the harness
+All three phases landed on 2026-09-23. The estimate as written: Phase 1 is about a
+day, and 1a is most of it; land 1a+1b as one commit (the harness
 exists to prove 1b), then 1c+1d as another. Phase 2 is half a day and needs `azelf init` on
 the consumer for the new marker. Phase 3 is half a day. Each phase is shippable alone, and
 1b and 1c remove the failures that happened most often.
