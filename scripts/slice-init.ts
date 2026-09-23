@@ -166,9 +166,19 @@ export const SHIMS: { name: string; how: "source" | "exec" }[] = [
  * A shim body.
  *
  * The package is found by a RULE, not by a recorded path: `$AZELF_DIR` if set,
- * otherwise `node_modules/@chintonicc/azelf` under the repo root, which is where an
- * installed dependency is and is the same string on every machine — so the shim
- * is committable and survives the repo being cloned somewhere else.
+ * otherwise `node_modules/@chintonicc/azelf` under the MAIN checkout, which is
+ * where an installed dependency is and is the same string on every machine — so
+ * the shim is committable and survives the repo being cloned somewhere else.
+ *
+ * The main checkout's, and not the worktree's own, because a wave has to run
+ * ONE version of this tooling. The dispatcher and slice-land.sh run from main;
+ * a slice's tab ran whatever its worktree's `bun install` left, and bun keeps
+ * a cached copy of a git dependency even when the pin moved. On consumer-a
+ * that meant a wave dispatched by the new tooling, whose sessions ran a copy
+ * two weeks old: no pid in the done marker, so the land could not end the
+ * agent, so no tab closed. The worktree's own copy is the fallback, for a
+ * main checkout without node_modules. Only the PACKAGE is taken from main —
+ * every script still acts on the tree it was run in.
  *
  * `fallback` is the absolute path this package was run from, written in only
  * when it is not already reachable by that rule. That is the sibling-checkout
@@ -196,7 +206,13 @@ export function shimText(opts: {
 # this exists so ./scripts/${name} keeps working by the name every script, doc
 # and habit already uses. Regenerate with \`azelf init\` rather than editing.
 _azelf_repo="$(cd "$(dirname "\${BASH_SOURCE[0]:-$0}")/.." && pwd -P)"
-_azelf_dir="\${AZELF_DIR:-$_azelf_repo/node_modules/@chintonicc/azelf}"${fb}
+_azelf_dir="$_azelf_repo/node_modules/@chintonicc/azelf"
+# In a slice worktree, the MAIN checkout's copy: one version per wave.
+_azelf_main="$(git -C "$_azelf_repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
+if [ -n "$_azelf_main" ] && [ -f "$(dirname "$_azelf_main")/node_modules/@chintonicc/azelf/scripts/${name}" ]; then
+  _azelf_dir="$(dirname "$_azelf_main")/node_modules/@chintonicc/azelf"
+fi
+_azelf_dir="\${AZELF_DIR:-$_azelf_dir}"${fb}
 if [ ! -f "$_azelf_dir/scripts/${name}" ]; then
   echo "error: azelf is not installed — no $_azelf_dir/scripts/${name}" >&2
   echo "       run 'bun install' here, or set AZELF_DIR to the package root." >&2

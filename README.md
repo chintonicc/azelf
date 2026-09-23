@@ -155,7 +155,12 @@ saying so.
 | `.git/info/exclude` | seven marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
-`node_modules/@chintonicc/azelf`. They are one line of real logic and safe to commit.
+`node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
+worktree, so a whole wave runs the one version you installed there, whatever the
+worktree's own `bun install` left behind — else the worktree's own copy. They act on
+the tree they were run in either way, and are a few lines of logic, safe to commit.
+After a pin bump, `bun install --force` and `azelf init` in the main checkout, and
+commit and push, so new worktrees get the new shims.
 
 ## Quick start
 

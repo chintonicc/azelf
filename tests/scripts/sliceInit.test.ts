@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -202,6 +203,73 @@ describe("shimText", () => {
       fallback: "/opt/azelf",
     });
     expect(withFallback).toContain('_azelf_dir="/opt/azelf"');
+  });
+
+  /**
+   * One version per wave: a worktree's `bun install` can leave a stale copy
+   * of a git dependency, so a shim in a slice worktree runs the MAIN
+   * checkout's package, and its own only when main has none. Each fake
+   * package answers with where it lives.
+   */
+  describe("in a slice worktree", () => {
+    let root: string;
+    const g = (cwd: string, ...args: string[]) =>
+      execFileSync(
+        "git",
+        ["-c", "user.email=t@t", "-c", "user.name=t", "-C", cwd, ...args],
+        { stdio: "ignore" },
+      );
+    const fakePackage = (repo: string, answer: string) => {
+      const d = join(repo, "node_modules", "@chintonicc", "azelf", "scripts");
+      mkdirSync(d, { recursive: true });
+      writeFileSync(join(d, "x.sh"), `#!/usr/bin/env bash\necho ${answer}\n`, {
+        mode: 0o755,
+      });
+    };
+    const runShim = (repo: string, env: Record<string, string> = {}) =>
+      execFileSync(join(repo, "scripts", "x.sh"), {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, AZELF_DIR: "", ...env },
+      }).trim();
+
+    beforeEach(() => {
+      root = realpathSync(mkdtempSync(join(tmpdir(), "azelf-shimwt-")));
+      const main = join(root, "main");
+      mkdirSync(join(main, "scripts"), { recursive: true });
+      writeFileSync(
+        join(main, "scripts", "x.sh"),
+        shimText({ name: "x.sh", how: "exec", fallback: null }),
+        { mode: 0o755 },
+      );
+      writeFileSync(join(main, ".gitignore"), "node_modules/\n");
+      g(root, "init", "-q", "-b", "main", "main");
+      g(main, "add", "-A");
+      g(main, "commit", "-qm", "init");
+      g(main, "worktree", "add", "-q", join(root, "wt"), "-b", "ticket/1");
+      fakePackage(join(root, "wt"), "worktree");
+    });
+    afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+    it("runs the main checkout's package, not the worktree's own", () => {
+      fakePackage(join(root, "main"), "main");
+      expect(runShim(join(root, "wt"))).toBe("main");
+    });
+
+    it("falls back to the worktree's own when main has none", () => {
+      expect(runShim(join(root, "wt"))).toBe("worktree");
+    });
+
+    it("AZELF_DIR still wins", () => {
+      fakePackage(join(root, "main"), "main");
+      const other = join(root, "other");
+      fakePackage(other, "other");
+      expect(
+        runShim(join(root, "wt"), {
+          AZELF_DIR: join(other, "node_modules", "@chintonicc", "azelf"),
+        }),
+      ).toBe("other");
+    });
   });
 
   it("is valid bash for both kinds", () => {
