@@ -40,9 +40,11 @@ call, made with `db-lock.sh transfer` from the main checkout, not yours.
 ## 4. Commit with explicit paths
 
 ```sh
-./scripts/session-commit.sh -m "..." <paths>
+./scripts/session-commit.sh -y -m "..." <paths>
 ```
 
+Always with `-y`: a slice session has no terminal, and without it the script refuses.
+Files you removed with `git rm` or moved with `git mv` are named like any other path.
 Never `git add -A` or `git add .`. Other worktrees share this repo's git dir, and a
 pathspec-less commit is how another session's in-flight work gets committed under
 your message.

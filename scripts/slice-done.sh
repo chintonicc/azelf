@@ -52,7 +52,7 @@ fi
 # slice-land.sh then removes.
 if [[ -n "$(git status --porcelain)" ]]; then
   echo "error: uncommitted changes in this worktree — nothing would land them." >&2
-  echo "       commit first: ./scripts/session-commit.sh -m \"...\" <paths>" >&2
+  echo "       commit first: ./scripts/session-commit.sh -y -m \"...\" <paths>" >&2
   echo >&2
   git status --short >&2
   exit 1

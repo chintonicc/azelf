@@ -1,4 +1,10 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type Consumer, git, makeConsumer, shResult } from "./fixture";
@@ -80,5 +86,65 @@ describe("session-commit.sh under an exclusive path", () => {
     expect(r.out).toContain("already held by this worktree (ticket/40)");
     expect(r.out).toContain("without the claim");
     expect(r.out).toContain("✓ committed:");
+  });
+});
+
+/**
+ * session-commit.sh and ordinary git: a path `git rm` or `git mv` already
+ * removed is in neither the worktree nor the index, and must still commit; a
+ * run that is going to be refused must be refused before it stages anything.
+ */
+describe("session-commit.sh with removals, renames and no terminal", () => {
+  let c: Consumer;
+  let wt: string;
+  beforeEach(() => {
+    c = makeConsumer({ worktrees: [40] });
+    wt = c.wt(40);
+    mkdirSync(join(wt, "lib"));
+    writeFileSync(join(wt, "lib", "a.txt"), "a\n");
+    writeFileSync(join(wt, "old.txt"), "old\n");
+    git(wt, "add", "lib", "old.txt");
+    git(wt, "commit", "-qm", "files");
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("commits a file removed with git rm", () => {
+    git(wt, "rm", "-q", "old.txt");
+    const r = commit(wt, "chore: drop old", "old.txt");
+    expect(r.out).toContain("✓ committed:");
+    expect(r.ok).toBe(true);
+    expect(git(wt, "show", "--name-status", "--format=", "HEAD")).toBe(
+      "D\told.txt",
+    );
+  });
+
+  it("commits a directory moved with git mv as a rename", () => {
+    git(wt, "mv", "lib", "src");
+    const r = commit(wt, "refactor: lib is src", "lib", "src");
+    expect(r.out).toContain("✓ committed:");
+    expect(r.ok).toBe(true);
+    expect(git(wt, "show", "-M", "--name-status", "--format=", "HEAD")).toBe(
+      "R100\tlib/a.txt\tsrc/a.txt",
+    );
+  });
+
+  it("still refuses a path that matches nothing anywhere", () => {
+    writeFileSync(join(wt, "new.txt"), "new\n");
+    const r = commit(wt, "feat: new", "new.txt", "nwe.txt");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("did not match any files");
+    expect(git(wt, "log", "-1", "--format=%s")).toBe("files");
+  });
+
+  it("refuses without -y and without a terminal before staging anything", () => {
+    writeFileSync(join(wt, "new.txt"), "new\n");
+    const r = shResult(
+      wt,
+      './scripts/session-commit.sh -m "feat: new" new.txt',
+    );
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("Pass -y to confirm");
+    expect(r.out).toContain("Nothing was staged.");
+    expect(git(wt, "diff", "--cached", "--name-only")).toBe("");
   });
 });

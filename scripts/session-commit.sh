@@ -66,6 +66,16 @@ for p in "${paths[@]}"; do
   esac
 done
 
+# Refused here, before the lock and before anything is staged. It used to be
+# checked just before the commit, so a run with no terminal staged its paths,
+# was refused, and left them staged for the retry to trip over. A slice
+# session never has a terminal, which is why the slice skill shows -y.
+if ! $auto_yes && [[ ! -t 0 ]]; then
+  echo "error: non-interactive and -y not passed — refusing to guess. Pass -y to confirm." >&2
+  echo "       Nothing was staged." >&2
+  exit 1
+fi
+
 # The CONSUMER repo's root — not this package's.
 #
 # This used to be `dirname "$0"/..`, which was right for exactly as long as the
@@ -159,7 +169,24 @@ echo "── working tree status ───────────────�
 git status --short
 echo "──────────────────────────────────────────────────"
 
-git add -- "${paths[@]}"
+# A path already removed by `git rm`, or moved away by `git mv`, is in neither
+# the worktree nor the index, and `git add` refuses it: "pathspec did not
+# match any files". `git commit -- <path>` accepts it, so such a path is left
+# out of the add and kept in the commit's pathspec below, which is what
+# records the deletion or the rename. Only a path HEAD still has is left out:
+# one that matches nothing anywhere is a typo, and git's error for it stands.
+add_paths=()
+for p in "${paths[@]}"; do
+  if [[ ! -e "$p" && ! -L "$p" ]] &&
+     ! git ls-files --error-unmatch -- "$p" >/dev/null 2>&1 &&
+     [[ -n "$(git ls-tree -r --name-only HEAD -- "$p" 2>/dev/null)" ]]; then
+    continue
+  fi
+  add_paths+=("$p")
+done
+if [[ ${#add_paths[@]} -gt 0 ]]; then
+  git add -- "${add_paths[@]}"
+fi
 
 # The index is shared across sessions and can hold a stray staged entry left
 # by another one (memory: project-shared-tree-commit-race, the "MM" tell). A
@@ -222,13 +249,17 @@ if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
   fi
 fi
 
+# The terminal was checked at the top; this is only the question. An abort
+# unstages what this run staged, as the DB-lock refusal above does, so the
+# index is left as it was found (give or take a `git rm` it staged earlier,
+# which comes back as an unstaged deletion).
 if ! $auto_yes; then
-  if [[ ! -t 0 ]]; then
-    echo "error: non-interactive and -y not passed — refusing to guess. Pass -y to confirm." >&2
+  read -r -p "Commit the ${#paths[@]} path(s) above? [y/N] " reply
+  if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+    git reset -q -- "${paths[@]}" || true
+    echo "Aborted — nothing committed, and nothing left staged."
     exit 1
   fi
-  read -r -p "Commit the ${#paths[@]} path(s) above? [y/N] " reply
-  [[ "$reply" =~ ^[Yy]$ ]] || { echo "Aborted — nothing committed."; exit 1; }
 fi
 
 git commit -m "$message" -- "${paths[@]}"
