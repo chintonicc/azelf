@@ -145,6 +145,62 @@ describe("the hook block", () => {
     return out;
   };
 
+  /**
+   * Under Warp the session must wait for the bootstrap: an exit before it is,
+   * to Warp, a shell that crashed starting up, and the tab stays. zsh, the
+   * marker read and deleted at rc time, the session run from precmd at the
+   * first prompt after WARP_BOOTSTRAPPED — simulated here as a later line.
+   */
+  const zshUnderWarp = (status: number, termProgram = "WarpTerminal") => {
+    const dir = mkdtempSync(join(tmpdir(), "azelf-hook-warp-"));
+    const wt = join(dir, "wt");
+    mkdirSync(join(wt, "scripts"), { recursive: true });
+    writeFileSync(join(dir, "hook.sh"), hookBlock());
+    writeFileSync(
+      join(wt, "scripts", "slice-session.sh"),
+      `#!/bin/sh\necho "SESSION RAN $1"\nexit ${status}\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(wt, ".slice-autostart"), "21\n");
+    const out = execFileSync("zsh", ["-f", "-i"], {
+      cwd: wt,
+      encoding: "utf8",
+      stdio: ["pipe", "pipe", "ignore"],
+      env: { ...process.env, TERM_PROGRAM: termProgram, WARP_BOOTSTRAPPED: "" },
+      input: `. ${join(
+        dir,
+        "hook.sh",
+      )}\necho AFTER_RC\n[ -f .slice-autostart ] || echo MARKER_GONE\nWARP_BOOTSTRAPPED=1\necho AFTER_BOOTSTRAP\necho STILL_AT_PROMPT\n`,
+    })
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => /^(SESSION|AFTER|MARKER|STILL)/.test(l));
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  it("under Warp, starts the session only after the bootstrap", () => {
+    expect(zshUnderWarp(0)).toEqual([
+      "AFTER_RC",
+      "MARKER_GONE",
+      "SESSION RAN 21",
+      "AFTER_BOOTSTRAP",
+      "STILL_AT_PROMPT",
+    ]);
+  });
+
+  it("under Warp, ends the shell on 86 after the bootstrap", () => {
+    expect(zshUnderWarp(86)).toEqual([
+      "AFTER_RC",
+      "MARKER_GONE",
+      "SESSION RAN 21",
+    ]);
+  });
+
+  it("outside Warp, zsh still starts the session at once", () => {
+    expect(zshUnderWarp(0, "Apple_Terminal")[0]).toBe("SESSION RAN 21");
+  });
+
   it("runs the session script named by the marker", () => {
     expect(sourceHookWithSession(0)).toContain("SESSION RAN 21");
   });

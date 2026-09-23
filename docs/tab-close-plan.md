@@ -133,7 +133,14 @@ no attempt to close a tab whose session was never a slice session.
 - A fifth test: `slice-land.sh` rejects an unknown flag and a second ticket id, now
   that it parses arguments.
 
-Not yet seen: Warp closing the tab. That is the dry run in the last section.
+**Seen on consumer-a, and it did not close.** The land ended the agent and the
+session exited 86 as designed, but Warp kept the tab: "Shell process exited
+prematurely!". The v3 hook ran the whole session inside the rc file, before Warp's
+bootstrap, and Warp treats a shell that exits before its bootstrap as one that
+crashed starting up. Hook v4 starts the session under Warp (zsh) from a one-shot
+precmd hook at the first prompt after `WARP_BOOTSTRAPPED`; three test tabs then
+closed on their own ("Shell is bootstrapped" … "storing data for closed tab" in
+Warp's log), and one took typed input. Needs `azelf init --hook`.
 
 ## Order and cost
 

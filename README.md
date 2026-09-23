@@ -481,7 +481,7 @@ Under `--auto` the tab is the one thing nobody is reading. azelf already tells t
 agent *"run ./scripts/slice-done.sh and then exit — nobody is watching this tab"*,
 and moments later the dispatcher lands the branch and deletes the worktree the tab
 is sitting in. So `slice-session.sh` exits **86** when the session ran under
-`--self-land` *and* the agent exited cleanly, and the autostart hook (v3 and later)
+`--self-land` *and* the agent exited cleanly, and the autostart hook (v4 and later)
 ends the shell on that status, which is what the terminal closes the tab on. Under
 `tmux()` the pane's command has ended anyway; under `manual()` you get 86 at your
 own prompt with a line saying why.
@@ -518,7 +518,11 @@ and exits 86, and the tab closes. Both guards hold: a land by hand never ends a
 session, and an agent that dies with its worktree still in place — a crash, not a
 land — keeps its tab.
 
-This changed the hook, so it is `v3`. If your rc file carries `v2`, `azelf init`
+Under Warp the hook starts the session only once Warp has bootstrapped the shell,
+at the first prompt, instead of inside your rc file. An exit before the bootstrap
+is, to Warp, a shell that crashed while starting: it keeps the tab and says "Shell
+process exited prematurely". That was `v3`'s behaviour and the reason its tabs
+never closed; `v4` fixes it. If your rc file carries an older block, `azelf init`
 says so and `azelf init --hook` replaces it.
 
 #### A slice's tab is named after its ticket
