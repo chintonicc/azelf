@@ -278,6 +278,7 @@ export default {
 | `readyLabel` | `string` | issue label marking a ticket runnable |
 | `exclusiveLockPaths` | `string[]` | paths only one worktree may hold changes to; `[]` disables |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
+| `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
 | `gates` | `Gate[]` | what a slice must pass before landing, in order |
 | `tracker` | `Tracker` | where tickets and blocking edges live |

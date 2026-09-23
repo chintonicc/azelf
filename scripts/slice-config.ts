@@ -75,6 +75,18 @@ export type SliceConfig = {
   /** Gitignored files copied into each new worktree. */
   provisionCopy: string[];
   /**
+   * Free space, in GB, the dispatcher keeps where the worktrees go. Optional;
+   * 10 when left out. Below it, nothing new is prepped: landing carries on,
+   * and each land removes a worktree.
+   *
+   * A worktree is a checkout plus its own `node_modules`, about 3 GB on
+   * consumer-a. A prep that ran out of space partway left 2.4 GB behind and
+   * was retried every round, so the floor is checked before a prep, not
+   * learned from one failing. Set it to what two of your worktrees and a gate
+   * run need. `0` turns the check off.
+   */
+  minFreeDiskGb?: number;
+  /**
    * Paths the overlap report leaves out. Optional; `[]` and omitted are the
    * same. `*` stays inside one path segment, `**` crosses them, a trailing
    * `/` means everything beneath a directory.
@@ -303,6 +315,14 @@ function validate(c: SliceConfig): SliceConfig {
       }
     }
   }
+  if (
+    c.minFreeDiskGb !== undefined &&
+    !(Number.isFinite(c.minFreeDiskGb) && c.minFreeDiskGb >= 0)
+  ) {
+    bad(
+      "minFreeDiskGb must be a number of GB, 0 or more — 0 turns the disk check off",
+    );
+  }
   if (!Array.isArray(c.gates)) bad("gates must be an array of gates");
   for (const [i, g] of c.gates.entries()) {
     if (!g || typeof g.name !== "string" || typeof g.run !== "function") {
@@ -472,6 +492,8 @@ export const tracker: Tracker = config.tracker;
 export const launcher: Launcher = config.launcher ?? manual();
 /** The configured agent, or `claude()` — the default is a real agent, not a missing one. */
 export const agent: Agent = config.agent ?? claude();
+/** The configured disk floor, or 10 GB. */
+export const minFreeDiskGb: number = config.minFreeDiskGb ?? 10;
 
 /** `#42` on GitHub, `ENG-42` on Linear — whatever the tracker says. */
 export const ref = (id: TicketId): string => refFor(tracker.refTemplate, id);

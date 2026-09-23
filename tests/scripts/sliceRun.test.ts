@@ -72,6 +72,74 @@ describe("the dispatcher", () => {
 });
 
 /**
+ * A prep that ran out of space partway was retried every round, and each
+ * retry left another half-built worktree. The floor holds new worktrees
+ * before that happens, and a prep that fails anyway cleans up after itself.
+ * `bun install` fails here on a `file:` dependency that does not exist, which
+ * needs no network.
+ */
+describe("the disk floor and a failed prep", () => {
+  const BAD_PACKAGE =
+    '{ "name": "fx", "dependencies": { "nope": "file:./does-not-exist" } }\n';
+  const REMOVED =
+    "removed the half-prepped worktree for #40 — it held nothing but a partial install";
+
+  it("preps nothing below the floor, and stops when that is all that is left", async () => {
+    c = makeConsumer({ agent: ["true"], configExtra: "minFreeDiskGb: 1e9," });
+
+    // In the background: without the floor this run would retry its prep
+    // forever, and that has to fail the test, not hang it.
+    d = startDispatcher(c, ["--auto", "-y", "--interval", "1", "40"]);
+    await d.until(
+      "nothing can advance — nothing is running or left to land, and #40 cannot start",
+    );
+
+    const out = d.output();
+    expect(out).toMatch(/· disk: \d+\.\d GB free where the worktrees go/);
+    const hold =
+      /disk: \d+\.\d GB free where the worktrees go, below minFreeDiskGb \(1000000000\) — starting nothing until there is more/g;
+    expect(out.match(hold)).toHaveLength(1);
+    expect(out).not.toContain("prepping");
+    expect(out).toContain("lower minFreeDiskGb in slice.config.ts");
+    expect(await d.exited).toBe(1);
+    expect(existsSync(c.wt(40))).toBe(false);
+  }, 60_000);
+
+  it("removes a worktree its failed prep created, every time, and keeps the branch", async () => {
+    c = makeConsumer({
+      remote: true,
+      agent: ["true"],
+      configExtra: "minFreeDiskGb: 0,",
+    });
+    writeFileSync(join(c.main, "package.json"), BAD_PACKAGE);
+    git(c.main, "commit", "-qam", "chore: a dependency that is not there");
+    git(c.main, "push", "-q", "origin", "main");
+
+    d = startDispatcher(c, ["--auto", "-y", "--interval", "1", "40"]);
+    await d.until(new RegExp(`(${REMOVED}[\\s\\S]*){2}\\[round`));
+
+    expect(d.output()).toContain("! #40 failed to prep — skipping this round");
+    expect(d.output()).toContain("on existing local branch ticket/40");
+    expect(existsSync(c.wt(40))).toBe(false);
+    expect(git(c.main, "worktree", "list")).not.toContain("ticket-40");
+    expect(git(c.main, "branch", "--list", "ticket/40")).toContain("ticket/40");
+  }, 60_000);
+
+  it("never removes a worktree that was there before the prep", () => {
+    c = makeConsumer({ worktrees: [40], agent: ["true"] });
+    writeFileSync(join(c.wt(40), "package.json"), BAD_PACKAGE);
+
+    const r = runDispatcher(c, ["--once", "-y", "40"]);
+
+    expect(r.out).toContain("! #40 failed to prep — skipping this round");
+    expect(r.out).not.toContain("removed the half-prepped");
+    expect(readFileSync(join(c.wt(40), "package.json"), "utf8")).toBe(
+      BAD_PACKAGE,
+    );
+  });
+});
+
+/**
  * The resolver edits and azelf runs the git. The fake resolver below keeps
  * both sides of every hunk — the conflicts here are line-level, so that is a
  * correct resolution — and logs each call.

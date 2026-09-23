@@ -77,9 +77,10 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statfsSync,
   writeFileSync,
 } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
 // file; nothing below should grow a literal back.
@@ -89,6 +90,7 @@ import {
   config,
   isTicketId,
   launcher as configuredLauncher,
+  minFreeDiskGb,
   ref,
   repoRoot,
   tracker,
@@ -670,6 +672,101 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       !(lockHeld && isWaitingOnLock(t.id)) &&
       t.foreignBlockers.length === 0 &&
       t.blockedBy.every((b) => closed.has(b)),
+  );
+}
+
+// ─── disk ─────────────────────────────────────────────────────────────────
+
+/**
+ * Free space where this ticket's worktree goes, in GB, or null when it cannot
+ * be read. Measured on the nearest directory that exists, since the worktree
+ * itself does not yet, and a `worktreeDir` with `{n}` in a directory name
+ * does not have its parent yet either.
+ */
+function freeGbFor(n: TicketId): number | null {
+  let dir = dirname(worktreeFor(n));
+  while (!existsSync(dir)) {
+    const up = dirname(dir);
+    if (up === dir) return null;
+    dir = up;
+  }
+  try {
+    const s = statfsSync(dir);
+    return (s.bavail * s.bsize) / 1e9;
+  } catch {
+    return null;
+  }
+}
+
+const gb = (n: number) => `${n.toFixed(1)} GB`;
+
+/**
+ * Below `minFreeDiskGb` at the last check. Printed on the way down and on the
+ * way up, not every time it is checked, which is before every prep.
+ */
+let diskHeld = false;
+
+/**
+ * Is there room to prep a new worktree for this ticket? Asked before each
+ * prep that creates one, not once per round: one round can start several
+ * slices, and each is a checkout and a `node_modules`.
+ *
+ * WHY THIS EXISTS. On consumer-a a prep failed with ENOSPC partway through
+ * `bun install`, and the next round tried it again, and the next. Each retry
+ * left another half-built worktree until the machine restarted with four
+ * sessions open. Landing is what frees space here, since each land removes a
+ * worktree, so a held start waits for that and lands are never held.
+ *
+ * A reading that fails is room: the check protects the disk, and a
+ * filesystem statfs cannot read is no reason to stop a wave.
+ */
+function roomToPrep(n: TicketId): boolean {
+  if (minFreeDiskGb <= 0) return true;
+  const free = freeGbFor(n);
+  if (free === null) return true;
+  const low = free < minFreeDiskGb;
+  if (low && !diskHeld) {
+    console.log(
+      `  disk: ${gb(
+        free,
+      )} free where the worktrees go, below minFreeDiskGb (${minFreeDiskGb}) — starting nothing until there is more. Landing carries on, and each land removes a worktree.`,
+    );
+  } else if (!low && diskHeld) {
+    console.log(
+      `  disk: ${gb(
+        free,
+      )} free again, above minFreeDiskGb (${minFreeDiskGb}) — starting slices again.`,
+    );
+  }
+  diskHeld = low;
+  return !low;
+}
+
+/**
+ * A prep that failed after creating its worktree leaves one behind: a
+ * checkout, the files provisioning copied, and part of a `node_modules`. On
+ * consumer-a one was 2.4 GB, and each retry added another. Removed with
+ * `--force`, because what makes it dirty is the prep's own copying and
+ * installing. The branch stays, with whatever it had, and the next prep
+ * checks it out again.
+ *
+ * Only for a worktree this prep created: the caller checks it was not there
+ * before. One that was is a reused worktree, and someone's work may be in it.
+ */
+function removeHalfPrepped(n: TicketId): void {
+  if (!hasWorktree(n)) return;
+  const { ok, out } = run(
+    ["git", "worktree", "remove", "--force", worktreeFor(n)],
+    { allowFail: true },
+  );
+  console.log(
+    ok
+      ? `  removed the half-prepped worktree for ${ref(
+          n,
+        )} — it held nothing but a partial install`
+      : `  ! could not remove the half-prepped worktree at ${worktreeFor(
+          n,
+        )}: ${out.trim()}`,
   );
 }
 
@@ -2207,7 +2304,20 @@ const maxParallel = Number(value("--max") ?? width);
 if (planOnly) process.exit(0);
 
 console.log("");
-console.log(`  concurrency cap: ${maxParallel}`);
+// Every ticket's worktree shares a parent unless `worktreeDir` puts `{n}` in
+// a directory name, so the first ticket's reading stands for the rest.
+const freeAtStart = freeGbFor((tickets[0] as Ticket).id);
+console.log(
+  `  concurrency cap: ${maxParallel}${
+    freeAtStart === null
+      ? ""
+      : ` · disk: ${gb(freeAtStart)} free where the worktrees go${
+          minFreeDiskGb > 0
+            ? `, nothing new prepped below ${minFreeDiskGb} GB (minFreeDiskGb)`
+            : ""
+        }`
+  }`,
+);
 console.log(
   `  note: ${maxParallel} slices means ${maxParallel} ${agent.name} sessions running at once.`,
 );
@@ -2394,26 +2504,56 @@ for (;;) {
   const free = maxParallel - up.length;
   const ready = runnable(tickets, holder !== "");
 
-  if (free > 0 && ready.length > 0) {
-    const starting = ready.slice(0, free);
+  // Below minFreeDiskGb, a slice that needs a NEW worktree waits. A relaunch
+  // reuses its worktree, costs next to nothing on disk, and leads to a land,
+  // which is what frees space, so it is never held. The first new one is
+  // checked before the round's line, so a held round does not announce
+  // starts it will not make.
+  const wanted = free > 0 ? ready.slice(0, free) : [];
+  const isNew = (t: Ticket) => !hasWorktree(t.id);
+  const firstNew = wanted.find(isNew);
+  let room = firstNew === undefined || roomToPrep(firstNew.id);
+  const heldOnDisk = room ? [] : wanted.filter(isNew);
+  const starting = wanted.filter((t) => !heldOnDisk.includes(t));
+  const prepped: TicketId[] = [];
+
+  if (starting.length > 0) {
     console.log(
       `\n[round ${round}] starting ${starting
         .map((t) => `${ref(t.id)}`)
         .join(", ")}`,
     );
-    const prepped: TicketId[] = [];
     for (const t of starting) {
       // Serially, on purpose: concurrent `git worktree add` against one repo
       // contends on ref locks, and parallel `bun install`s are a pointless
       // spike. A failure here is reported and skipped, never fatal — the
       // other slices in this wave should still start.
+      //
+      // The disk is read again before every new worktree: the one before it
+      // took its share.
+      const fresh = isNew(t);
+      if (fresh && !(room && roomToPrep(t.id))) {
+        room = false;
+        heldOnDisk.push(t);
+        continue;
+      }
       console.log(`  prepping ${ref(t.id)} …`);
       const { ok } = run(
         ["./scripts/slice-session.sh", t.id, ...sessionFlags, "--prep-only"],
         { inherit: true, allowFail: true },
       );
-      if (ok) prepped.push(t.id);
-      else console.log(`  ! ${ref(t.id)} failed to prep — skipping this round`);
+      if (ok) {
+        prepped.push(t.id);
+        continue;
+      }
+      console.log(`  ! ${ref(t.id)} failed to prep — skipping this round`);
+      if (fresh) removeHalfPrepped(t.id);
+      // Running out of space is the usual way a prep fails partway, and says
+      // so only in `bun install`'s output, which went straight to the
+      // terminal. The disk is read instead: below the floor, the rest of this
+      // round's new worktrees wait, and so does every round after it until a
+      // land frees space. That is what stops the retries.
+      if (!roomToPrep(t.id)) room = false;
     }
     if (prepped.length) {
       for (const n of prepped) launchedAt.set(n, Date.now());
@@ -2482,6 +2622,39 @@ for (;;) {
     })
   ) {
     console.log("\n  nothing can advance — every open slice is parked.");
+    break;
+  }
+
+  /**
+   * The same stop, when the disk is what holds the rest: nothing running,
+   * nothing left to land, and a slice that could start is held below
+   * minFreeDiskGb. Only a land frees space inside a run, and none is coming.
+   * Exits 1 even with nothing parked, because the work is not done.
+   */
+  if (
+    heldOnDisk.length > 0 &&
+    up.length === 0 &&
+    prepped.length === 0 &&
+    remaining.every((t) => {
+      const p = parked.get(t.id);
+      if (p) return retryDue(t.id, p) === null;
+      return !(
+        hasWorktree(t.id) &&
+        (isReadyToLand(t.id) || (autoLand && autoFinished(t.id)))
+      );
+    })
+  ) {
+    const left = freeGbFor((heldOnDisk[0] as Ticket).id);
+    console.log(
+      `\n  nothing can advance — nothing is running or left to land, and ${heldOnDisk
+        .map((t) => ref(t.id))
+        .join(", ")} cannot start: ${
+        left === null
+          ? "the disk is"
+          : `${gb(left)} free where the worktrees go,`
+      } below minFreeDiskGb (${minFreeDiskGb}). Nothing in this run will free space; free some, or lower minFreeDiskGb in slice.config.ts, and run again.`,
+    );
+    process.exitCode = 1;
     break;
   }
 
