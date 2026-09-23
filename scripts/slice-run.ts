@@ -535,6 +535,24 @@ const hasSession = (n: TicketId) =>
 const isReadyToLand = (n: TicketId) =>
   existsSync(join(worktreeFor(n), READY_MARKER));
 
+/**
+ * A fourth question, asked only when `exclusiveLockPaths` is set: did this
+ * slice's session exit because `db-lock.sh claim` refused it?
+ *
+ * db-lock.sh writes `.slice-lock-wait` on a refusal inside a slice worktree
+ * and clears it on a successful claim; slice-session.sh clears it at every
+ * launch. While it is present AND the lock is still held, the slice is
+ * neither finished nor runnable: under --auto its commits are the part of
+ * the ticket that did not need the lock, not the ticket, and relaunching it
+ * would open a session whose first act is to be refused again. Once the lock
+ * frees it is runnable like any other prepped-but-idle worktree, and the
+ * ordinary relaunch path picks it up.
+ */
+const LOCK_WAIT_MARKER = ".slice-lock-wait";
+const isWaitingOnLock = (n: TicketId) =>
+  existsSync(join(worktreeFor(n), LOCK_WAIT_MARKER));
+const lockEnabled = config.exclusiveLockPaths.length > 0;
+
 /** When we launched a ticket, so a slow start isn't launched twice. */
 const launchedAt = new Map<TicketId, number>();
 
@@ -564,14 +582,29 @@ const idleWorktrees = (tickets: Ticket[]) =>
       t.open && hasWorktree(t.id) && !occupied(t.id) && !isReadyToLand(t.id),
   );
 
-/** Empty when free; otherwise the holder, as db-lock-check.sh describes it. */
+/**
+ * Empty when free; otherwise the holder, as db-lock-check.sh describes it —
+ * the claim's owner first, and only when nobody holds the claim whatever the
+ * scan turns up. Empty at once when the lock is not configured, so a project
+ * without one pays no bash spawn per round for it.
+ */
 function dbLockHolder(): string {
+  if (!lockEnabled) return "";
   const { out } = run(
     [
       "bash",
       "-c",
       'source scripts/db-lock-check.sh; db_lock_holder "" || true',
     ],
+    { allowFail: true },
+  );
+  return out.trim();
+}
+
+/** `DB lock: free` / `held by ticket/44 since …` — one line, for the banner. */
+function dbLockStatusLine(): string {
+  const { out } = run(
+    ["bash", "-c", "source scripts/db-lock-check.sh; db_lock_status_line"],
     { allowFail: true },
   );
   return out.trim();
@@ -592,14 +625,19 @@ function refreshOpenState(tickets: Ticket[]): void {
  * be relaunched next round: a second session opened into a worktree the first
  * one may still be sitting in, to redo work that is already committed. The
  * ticket is finished; what it is waiting for is a land, not an agent.
+ *
+ * And not parked on the DB lock while it is held (`lockHeld` is this round's
+ * reading of it): see `isWaitingOnLock`. A slice that exited on a refused
+ * claim is relaunched the round the lock frees, not every round until then.
  */
-function runnable(tickets: Ticket[]): Ticket[] {
+function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
   const closed = new Set(tickets.filter((t) => !t.open).map((t) => t.id));
   return tickets.filter(
     (t) =>
       t.open &&
       !occupied(t.id) &&
       !isReadyToLand(t.id) &&
+      !(lockHeld && isWaitingOnLock(t.id)) &&
       t.foreignBlockers.length === 0 &&
       t.blockedBy.every((b) => closed.has(b)),
   );
@@ -964,8 +1002,14 @@ const commitsAhead = (n: TicketId) =>
  * worktree prepped seconds ago whose tab has not opened yet is not read as a
  * session that closed. The commits check comes before the gates only to keep
  * an idle prepped worktree from printing "nothing to land" every round.
+ *
+ * Not while it waits on the DB lock: the skill tells a slice refused at
+ * `claim` to commit what it has OUTSIDE the exclusive paths and exit, and
+ * without this clause that exit, with those commits behind it, would read as
+ * a finished ticket and land half of one.
  */
-const autoFinished = (n: TicketId) => !occupied(n) && commitsAhead(n) > 0;
+const autoFinished = (n: TicketId) =>
+  !occupied(n) && !isWaitingOnLock(n) && commitsAhead(n) > 0;
 
 /**
  * Re-run the quality gates against a finished slice, in its own worktree,
@@ -1811,6 +1855,13 @@ console.log(
       }; plan-level review when the graph empties.`
     : "  review: OFF — nothing reads the diff before it lands. --review to enable.",
 );
+if (lockEnabled) {
+  console.log(
+    `  ${dbLockStatusLine()} — ${config.exclusiveLockPaths.join(
+      ", ",
+    )}; a slice claims it before touching them, and parks if refused.`,
+  );
+}
 console.log(
   !agent.resolve
     ? `  conflicts: ${agent.name} declares no resolver — a rebase conflict parks, as before.`
@@ -1873,52 +1924,61 @@ for (;;) {
     break;
   }
 
+  // The DB lock, read once per round. A held lock no longer stops the wave:
+  // it used to ("DB lock held — not starting anything"), and on consumer-a
+  // that turned one holder into a run that started nothing and said so once.
+  // The claim protocol makes starting safe — a slice that needs the lock is
+  // refused at `db-lock.sh claim`, exits, and is parked here until the lock
+  // frees — so the only tickets held back are the ones that already tried.
+  // The holder text is printed whole, indented, because it can be more than
+  // a name: when worktrees are dirty with no claim it carries the diagnosis.
+  const holder = dbLockHolder();
+  const lockParked = tickets.filter(
+    (t) => t.open && holder !== "" && isWaitingOnLock(t.id),
+  );
+  if (holder) {
+    console.log(
+      `\n[round ${round}] DB lock held by:\n${holder
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n")}${
+        lockParked.length
+          ? `\n  waiting for it: ${lockParked
+              .map((t) => ref(t.id))
+              .join(", ")} — relaunched when it frees`
+          : ""
+      }`,
+    );
+  }
+
   const up = tickets.filter((t) => t.open && occupied(t.id));
   const free = maxParallel - up.length;
-  const ready = runnable(tickets);
+  const ready = runnable(tickets, holder !== "");
 
   if (free > 0 && ready.length > 0) {
-    // Checked BEFORE prepping, not after: slice-session.sh refuses to launch
-    // while any other worktree has a migration diff, so prepping into a held
-    // lock would build worktrees whose tabs then immediately fail.
-    const holder = dbLockHolder();
-    if (holder) {
-      // The holder text is printed whole, indented, because it can be more
-      // than a name: when two worktrees are both mid-migration it carries the
-      // diagnosis and the way out, and this line used to be the only symptom
-      // of a run that would never resume on its own.
-      console.log(
-        `\n[round ${round}] DB lock held — not starting anything:\n${holder
-          .split("\n")
-          .map((l) => `    ${l}`)
-          .join("\n")}`,
+    const starting = ready.slice(0, free);
+    console.log(
+      `\n[round ${round}] starting ${starting
+        .map((t) => `${ref(t.id)}`)
+        .join(", ")}`,
+    );
+    const prepped: TicketId[] = [];
+    for (const t of starting) {
+      // Serially, on purpose: concurrent `git worktree add` against one repo
+      // contends on ref locks, and parallel `bun install`s are a pointless
+      // spike. A failure here is reported and skipped, never fatal — the
+      // other slices in this wave should still start.
+      console.log(`  prepping ${ref(t.id)} …`);
+      const { ok } = run(
+        ["./scripts/slice-session.sh", t.id, ...sessionFlags, "--prep-only"],
+        { inherit: true, allowFail: true },
       );
-    } else {
-      const starting = ready.slice(0, free);
-      console.log(
-        `\n[round ${round}] starting ${starting
-          .map((t) => `${ref(t.id)}`)
-          .join(", ")}`,
-      );
-      const prepped: TicketId[] = [];
-      for (const t of starting) {
-        // Serially, on purpose: concurrent `git worktree add` against one repo
-        // contends on ref locks, and parallel `bun install`s are a pointless
-        // spike. A failure here is reported and skipped, never fatal — the
-        // other slices in this wave should still start.
-        console.log(`  prepping ${ref(t.id)} …`);
-        const { ok } = run(
-          ["./scripts/slice-session.sh", t.id, ...sessionFlags, "--prep-only"],
-          { inherit: true, allowFail: true },
-        );
-        if (ok) prepped.push(t.id);
-        else
-          console.log(`  ! ${ref(t.id)} failed to prep — skipping this round`);
-      }
-      if (prepped.length) {
-        for (const n of prepped) launchedAt.set(n, Date.now());
-        openSessions(prepped);
-      }
+      if (ok) prepped.push(t.id);
+      else console.log(`  ! ${ref(t.id)} failed to prep — skipping this round`);
+    }
+    if (prepped.length) {
+      for (const n of prepped) launchedAt.set(n, Date.now());
+      openSessions(prepped);
     }
   }
 
@@ -1926,6 +1986,13 @@ for (;;) {
     console.log("\n--once: stopping here.");
     break;
   }
+
+  // A session that has been SEEN is one that came up. Forgetting the launch
+  // time here is what keeps a slice that came up, worked, and exited without
+  // declaring done — a refused DB-lock claim is the usual reason — from being
+  // reported below as one that "never came up". `occupied` does not need the
+  // entry once the live marker exists, and the marker outlives the window.
+  for (const t of tickets) if (hasSession(t.id)) launchedAt.delete(t.id);
 
   // Keyed off the launcher's own grace window, so under Warp this means "the
   // tab opened and nothing ran in it — the hook, most likely" and under
