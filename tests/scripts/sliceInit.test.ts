@@ -74,7 +74,7 @@ describe("upsertBlock", () => {
 });
 
 describe("the exclude block", () => {
-  it("carries exactly the six markers", () => {
+  it("carries exactly the seven markers", () => {
     const patterns = EXCLUDE_BLOCK.split("\n").filter(
       (l) => l.length > 0 && !l.startsWith("#"),
     );
@@ -83,6 +83,7 @@ describe("the exclude block", () => {
       ".slice-autostart",
       ".slice-live",
       ".slice-ready-to-land",
+      ".slice-lock-wait",
       ".slice-flags",
       ".slice-reviews/",
     ]);

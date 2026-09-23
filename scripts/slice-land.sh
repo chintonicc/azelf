@@ -140,6 +140,58 @@ fi
 git push origin "$SLICE_BASE_BRANCH"
 echo "✓ pushed"
 
+# ─── The DB lock ────────────────────────────────────────────────────────────
+#
+# A slice that changed an exclusive path claimed the DB lock before it did
+# (db-lock.sh, via session-commit.sh) and has held it since; the change is now
+# on the base branch and pushed, which is the moment the hold was for. Released
+# from here with --landed because the slice's own session is gone by now, and
+# because the main checkout is the one place that can vouch for "landed".
+#
+# Never fatal — same rule as the cleanup below: the work is public, and a lock
+# left held is printed with the exact command to run by hand. Three cases:
+#
+#   - the branch holds the claim → release it, noting when it never actually
+#     landed a change under those paths (held, but harmlessly);
+#   - the branch landed such a change and holds NO claim → the protocol was
+#     skipped; nothing to release, but say so, because the database may hold
+#     what two sessions applied;
+#   - neither → nothing to do, silently. This is every ordinary slice.
+if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
+  source "scripts/db-lock-check.sh"
+  lock_owner=""
+  lock_rc=0
+  db_lock_read_owner || lock_rc=$?
+  if [[ $lock_rc -eq 0 ]]; then lock_owner="$DB_LOCK_OWNER_BRANCH"; fi
+  touched_lock=false
+  if git diff --name-only "$base_before" HEAD | grep -qE "$(db_lock_re)"; then touched_lock=true; fi
+
+  if [[ "$lock_owner" == "$branch" ]]; then
+    echo "── releasing the DB lock ──────────────────────────"
+    if release_out=$("$SLICE_AZELF_DIR/scripts/db-lock.sh" release --landed "$branch" 2>&1); then
+      printf '%s\n' "$release_out"
+      if ! $touched_lock; then
+        echo "  (it held the claim without landing a change under ${SLICE_EXCLUSIVE_LOCK_PATHS[*]})"
+      fi
+    else
+      echo "⚠️  couldn't release the DB lock held by $branch:"
+      printf '%s\n' "$release_out" | sed 's/^/    /'
+      echo "    run it by hand, from here: ./scripts/db-lock.sh release --landed $branch"
+    fi
+  elif $touched_lock; then
+    if [[ -n "$lock_owner" ]]; then
+      echo "⚠️  $branch landed a change under ${SLICE_EXCLUSIVE_LOCK_PATHS[*]} while the DB lock is held by $lock_owner —"
+      echo "    it skipped the claim. Check what BOTH have applied to the database before $lock_owner continues."
+    elif [[ $lock_rc -eq 2 ]]; then
+      echo "⚠️  $branch landed a change under ${SLICE_EXCLUSIVE_LOCK_PATHS[*]}, and the DB lock is UNVERIFIABLE:"
+      _db_lock_unverifiable_lines | sed 's/^/    /'
+    else
+      echo "⚠️  $branch landed a change under ${SLICE_EXCLUSIVE_LOCK_PATHS[*]} without ever holding the DB lock —"
+      echo "    it skipped the claim. Nothing to release; worth knowing if another session was mid-migration."
+    fi
+  fi
+fi
+
 # CLEANUP MUST NOT BE ABLE TO FAIL THE LAND, and must say what it skipped.
 #
 # By this line the base branch has already been fast-forwarded AND pushed — the

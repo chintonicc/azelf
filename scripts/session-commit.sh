@@ -180,44 +180,42 @@ echo "── staged for this commit ──────────────�
 git diff --cached --stat -- "${paths[@]}"
 echo "──────────────────────────────────────────────────"
 
-# ─── DB-lock check ──────────────────────────────────────────────────────
+# ─── DB lock ────────────────────────────────────────────────────────────
 # Only relevant when this commit itself touches an exclusive path — see
 # slice.config.ts's exclusiveLockPaths, scripts/db-lock-check.sh and
 # docs/adr/0001-parallel-slice-sessions.md.
-# This is the merge-time half of the same check slice-session.sh runs at
-# launch; running it again here — already holding this script's own commit
-# lock above — is what actually closes the race, since two commits can never
-# reach this point at the same time regardless of what the launch-time check
-# saw. NOTE: source by a path relative to repo root, not `dirname "$0"` —
+#
+# A commit that touches those paths REQUIRES THE CLAIM (scripts/db-lock.sh),
+# and this is where that is checked: `claim` is idempotent for the owner, wins
+# the lock if nobody holds it — a slice that wrote its migration before
+# claiming is not punished, it is just late — and is refused, with the owner
+# named, by everyone else. There is no --force here, on purpose: the lock
+# guards a live database, and an override on it belongs to the operator
+# (`db-lock.sh transfer`, from the main checkout, logged), never to the
+# session that wants past it. The scan of other worktrees runs inside the
+# claim as its backstop; for the owner it prints as a warning, because the
+# claim is the authority and a warning is what gets a skipped protocol seen.
+#
+# Under this script's own commit mutex, so two commits never reach this point
+# at once. NOTE: source by a path relative to repo root, not `dirname "$0"` —
 # we already `cd`'d to repo root above, so re-deriving from $0 here would
 # resolve relative to the NEW cwd instead of the ORIGINAL invocation dir.
 #
 # Two pathspecs can't be ANDed by git, so the exclusive paths are matched as a
-# regex over the file list this commit is actually staging, rather than by
-# asking git a second question. Each is anchored and followed by `/` or
-# end-of-string, so an entry may name a directory OR a single file.
+# regex (db_lock_re) over the file list this commit is actually staging,
+# rather than by asking git a second question. The package's own copy of
+# db-lock.sh is run, not the consumer's shim: this script is in the commit
+# path, and a consumer that has not re-run `azelf init` since the lock became
+# a claim has no shim yet.
 if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
-  lock_re=""
-  for lock_path in "${SLICE_EXCLUSIVE_LOCK_PATHS[@]}"; do
-    lock_path="${lock_path%/}"
-    # A literal `.` in a configured path would otherwise match any character
-    # and over-trigger the lock — a false hold, which is the safe direction,
-    # but confusing enough to be worth not doing.
-    lock_path="$(printf '%s' "$lock_path" | sed 's/[].[^$*\\]/\\&/g')"
-    lock_re="${lock_re}${lock_re:+|}^${lock_path}"'(/|$)'
-  done
-
-  if git diff --cached --name-only -- "${paths[@]}" | grep -qE "$lock_re"; then
-    source "scripts/db-lock-check.sh"
-    this_branch=$(git rev-parse --abbrev-ref HEAD)
-    holder=$(db_lock_holder "$this_branch") || true
-    if [[ -n "$holder" ]]; then
-      # Printed verbatim: when more than one worktree is mid-migration the
-      # holder text carries the way out, and "let that one merge first" is
-      # exactly the advice that cannot be followed in that case.
-      echo "error: this commit touches ${SLICE_EXCLUSIVE_LOCK_PATHS[*]}, but the lock is held by:" >&2
-      printf '%s\n' "$holder" | sed 's/^/       /' >&2
-      echo "       only one worktree may touch those paths at a time." >&2
+  source "scripts/db-lock-check.sh"
+  if git diff --cached --name-only -- "${paths[@]}" | grep -qE "$(db_lock_re)"; then
+    if claim_out=$("$SLICE_AZELF_DIR/scripts/db-lock.sh" claim 2>&1); then
+      printf '%s\n' "$claim_out" | sed 's/^/  /'
+    else
+      echo "error: this commit touches ${SLICE_EXCLUSIVE_LOCK_PATHS[*]}, and the DB lock is not yours:" >&2
+      printf '%s\n' "$claim_out" | sed 's/^/       /' >&2
+      echo "       Nothing was committed. Only one worktree may touch those paths at a time." >&2
       git reset -- "${paths[@]}" >/dev/null
       exit 1
     fi

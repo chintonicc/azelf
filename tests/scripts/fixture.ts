@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -34,6 +34,23 @@ export const sh = (cwd: string, script: string): string =>
     stdio: ["ignore", "pipe", "pipe"],
   });
 
+/**
+ * Like `sh`, for a script that is allowed to fail: the exit status and both
+ * streams joined, in the order a terminal would show them, so a refusal's
+ * stderr text can be asserted on next to its stdout.
+ */
+export const shResult = (
+  cwd: string,
+  script: string,
+): { ok: boolean; out: string } => {
+  const r = spawnSync("bash", ["-c", `set -euo pipefail\n${script}`], {
+    cwd,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  return { ok: r.status === 0, out: `${r.stdout}${r.stderr}` };
+};
+
 export type Consumer = {
   /** The temp dir everything lives under. */
   root: string;
@@ -43,6 +60,9 @@ export type Consumer = {
   closeFile: string;
   /** A linked worktree's path, by ticket number. */
   wt: (n: number) => string;
+  /** The DB lock's claim dir and log, in the common git dir. */
+  lockDir: string;
+  lockLog: string;
 };
 
 export function makeConsumer(opts: {
@@ -60,6 +80,10 @@ export function makeConsumer(opts: {
   const lockPaths = opts.lockPaths ?? [];
 
   git(root, "init", "-q", "-b", "main", "repo");
+  // Repo-local identity, because the scripts under test run plain `git
+  // commit` — the `-c` flags on `git()` above only cover the test's own calls.
+  git(main, "config", "user.email", "t@t");
+  git(main, "config", "user.name", "t");
   mkdirSync(join(main, "scripts"));
   for (const s of ["slice-config.sh", "db-lock-check.sh"]) {
     writeFileSync(
@@ -67,7 +91,12 @@ export function makeConsumer(opts: {
       `source ${JSON.stringify(join(AZELF, "scripts", s))}\n`,
     );
   }
-  for (const s of ["slice-done.sh", "slice-land.sh", "session-commit.sh"]) {
+  for (const s of [
+    "slice-done.sh",
+    "slice-land.sh",
+    "session-commit.sh",
+    "db-lock.sh",
+  ]) {
     writeFileSync(
       join(main, "scripts", s),
       `#!/usr/bin/env bash\nexec ${JSON.stringify(
@@ -123,5 +152,12 @@ export default {
   for (const n of opts.worktrees ?? []) {
     git(main, "worktree", "add", "-q", wt(n), "-b", `ticket/${n}`);
   }
-  return { root, main, closeFile, wt };
+  return {
+    root,
+    main,
+    closeFile,
+    wt,
+    lockDir: join(main, ".git", "azelf-db.lock"),
+    lockLog: join(main, ".git", "azelf-db.log"),
+  };
 }

@@ -69,6 +69,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-autostart
 .slice-live
 .slice-ready-to-land
+.slice-lock-wait
 .slice-flags
 .slice-reviews/
 ${EXCLUDE_END}`;
@@ -148,6 +149,7 @@ export function gitPaths(cwd: string): { root: string; commonDir: string } {
 export const SHIMS: { name: string; how: "source" | "exec" }[] = [
   { name: "slice-config.sh", how: "source" },
   { name: "db-lock-check.sh", how: "source" },
+  { name: "db-lock.sh", how: "exec" },
   { name: "slice-session.sh", how: "exec" },
   { name: "slice-land.sh", how: "exec" },
   { name: "slice-done.sh", how: "exec" },

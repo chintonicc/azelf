@@ -23,8 +23,8 @@
 # project with no PITR (db-lock-check.sh, shared with session-commit.sh so
 # the identical check runs at launch AND at merge).
 #
-# This script only does the prep: validate the ticket, refuse to proceed if
-# the DB lock is held, create the worktree, provision it, and launch an
+# This script only does the prep: validate the ticket, say who holds the DB
+# lock if anyone does, create the worktree, provision it, and launch an
 # interactive agent session inside it. You drive that
 # session and commit with session-commit.sh yourself; once you're done,
 # scripts/slice-land.sh fast-forwards the branch onto master and cleans up —
@@ -199,15 +199,24 @@ fi
 
 echo "✓ $ticket_ref \"$title\" is $SLICE_READY_LABEL with no open blockers"
 
-# ─── DB-lock check ──────────────────────────────────────────────────────
+# ─── DB lock ────────────────────────────────────────────────────────────
+# A notice, not a refusal. This used to exit here while any other worktree
+# held a migration, on the theory that a slice which could not commit one
+# should not start. Now that the lock is a claim taken before the DDL
+# (scripts/db-lock.sh), starting is safe: a slice that needs the lock is
+# refused at `claim`, commits what it has outside those paths, and exits for
+# the dispatcher to relaunch once the lock is free — and a slice that never
+# touches them was being held back for nothing. The dispatcher calls this
+# with --prep-only for every ticket it starts, so a refusal here would still
+# stall the whole wave on one holder, which is the failure this replaced.
 branch="$(slice_branch_for "$ticket")"
 holder=$(db_lock_holder "$branch") || true
 if [[ -n "$holder" ]]; then
   # Verbatim: with more than one holder the text carries the way out.
-  echo "error: DB lock held by:" >&2
-  printf '%s\n' "$holder" | sed 's/^/       /' >&2
-  echo "       only one worktree may touch ${SLICE_EXCLUSIVE_LOCK_PATHS[*]} at a time." >&2
-  exit 1
+  echo "⚠️  DB lock held by:"
+  printf '%s\n' "$holder" | sed 's/^/       /'
+  echo "       this slice must not touch ${SLICE_EXCLUSIVE_LOCK_PATHS[*]} until it is free;"
+  echo "       ./scripts/db-lock.sh claim will refuse until then."
 fi
 
 # ─── Create the worktree ────────────────────────────────────────────────
@@ -370,6 +379,12 @@ fi
 live_marker="$worktree_path/.slice-live"
 echo "$$" >"$live_marker"
 trap 'rm -f "$live_marker"' EXIT
+
+# A previous session of this slice may have exited on a refused DB-lock claim
+# and left .slice-lock-wait, which parks the ticket in the dispatcher while the
+# lock is held. A session is starting now; whether it still waits is for its
+# next `db-lock.sh claim` to say, so the old answer goes.
+rm -f "$worktree_path/.slice-lock-wait"
 
 # The opening instruction, so a slice starts working when its tab opens
 # instead of waiting to be told the same thing eight times. --no-start gives
