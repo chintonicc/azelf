@@ -74,6 +74,11 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-reviews/
 ${EXCLUDE_END}`;
 
+/** Counted, not written down: a hard-coded 6 outlived the seventh marker. */
+const EXCLUDE_PATTERNS = EXCLUDE_BLOCK.split("\n").filter((l) =>
+  l.startsWith(".slice-"),
+).length;
+
 /**
  * Replace a delimited block, or append it. Returns the new text and whether
  * anything actually changed, so callers can print "already current" instead of
@@ -271,7 +276,7 @@ export function init(opts: {
     line: `${changed ? "wrote" : "current"}  ${relative(
       root,
       excludePath,
-    )} — 6 marker patterns`,
+    )} — ${EXCLUDE_PATTERNS} marker patterns`,
     changed,
   });
 
