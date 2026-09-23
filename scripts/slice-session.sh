@@ -203,8 +203,10 @@ echo "✓ $ticket_ref \"$title\" is $SLICE_READY_LABEL with no open blockers"
 branch="$(slice_branch_for "$ticket")"
 holder=$(db_lock_holder "$branch") || true
 if [[ -n "$holder" ]]; then
-  echo "error: DB lock held by $holder." >&2
-  echo "       only one worktree may touch ${SLICE_EXCLUSIVE_LOCK_PATHS[*]} at a time — finish and merge that one first." >&2
+  # Verbatim: with more than one holder the text carries the way out.
+  echo "error: DB lock held by:" >&2
+  printf '%s\n' "$holder" | sed 's/^/       /' >&2
+  echo "       only one worktree may touch ${SLICE_EXCLUSIVE_LOCK_PATHS[*]} at a time." >&2
   exit 1
 fi
 

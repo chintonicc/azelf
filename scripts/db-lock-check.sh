@@ -161,21 +161,75 @@ db_lock_holder() {
   # returns EMPTY — reporting the lock free without having checked anything.
   # Both callers run under a bash shebang so they were never affected, but a
   # gate that fails OPEN in any shell is the one direction this must not fail.
+  # Every holder is collected, not just the first, and the caller's own
+  # worktree is checked too (without counting as a holder). Both are for one
+  # diagnosis: the MUTUAL case. Two worktrees that each hold an uncommitted
+  # migration each see the other as the holder, and this function used to
+  # return the first one it found with nothing more — so each side got "the
+  # lock is held by <the other one>, let it merge first", waited for that, and
+  # waited forever, because the other side was doing the same. Two slices on
+  # consumer-a sat in exactly that state on 2026-09-23 with pollers running
+  # against a condition that could never become true. Waiting is the wrong
+  # move there and the message has to say so, because "let that one merge
+  # first" is impossible advice when it is also waiting on you.
   local entry wt_path wt_branch wt_status
+  local -a holders=()
+  local self_dirty=false
   for entry in "${entries[@]}"; do
     wt_path="${entry%%$'\t'*}"
     wt_branch="${entry#*$'\t'}"
 
-    # Only the caller's own worktree is exempt — see the header on why the
-    # base worktree is deliberately NOT skipped any more.
-    [[ -n "$exclude_branch" && "$wt_branch" == "$exclude_branch" ]] && continue
-
     wt_status=$(_db_lock_worktree_status "$wt_path" "$wt_branch" "$base")
+
+    # Only the caller's own worktree is exempt from HOLDING — see the header
+    # on why the base worktree is deliberately NOT skipped any more. Its state
+    # still matters: dirty-and-blocked is the mutual case.
+    if [[ -n "$exclude_branch" && "$wt_branch" == "$exclude_branch" ]]; then
+      if [[ "$wt_status" == "dirty" ]]; then self_dirty=true; fi
+      continue
+    fi
+
     case "$wt_status" in
-      dirty) echo "$wt_path (${wt_branch:-detached}, dirty)"; return 0 ;;
+      dirty) holders+=("$wt_path (${wt_branch:-detached}, dirty)") ;;
+      # Fails closed, and immediately: an unverifiable worktree is reported
+      # on its own, ahead of any diagnosis, because the diagnosis assumes the
+      # scan can be trusted.
       error) echo "$wt_path (${wt_branch:-detached}, UNVERIFIABLE — treating as locked)"; return 0 ;;
     esac
   done
 
-  return 1
+  if [[ ${#holders[@]} -eq 0 ]]; then
+    return 1
+  fi
+
+  printf '%s\n' "${holders[@]}"
+
+  local dirty_total=${#holders[@]}
+  if $self_dirty; then
+    dirty_total=$((dirty_total + 1))
+    echo "(and this worktree — $exclude_branch — is dirty there too)"
+  fi
+  if [[ $dirty_total -ge 2 ]]; then
+    _db_lock_mutual_advice "$dirty_total"
+  fi
+  return 0
+}
+
+# Printed under the holder list whenever more than one worktree holds
+# uncommitted changes to an exclusive path. Every caller prints db_lock_holder's
+# output verbatim, so this travels with the holder rather than needing each
+# caller to re-diagnose.
+_db_lock_mutual_advice() {
+  local n="$1" lock_paths="${SLICE_EXCLUSIVE_LOCK_PATHS[*]}"
+  cat <<EOF
+
+⚠️  $n worktrees hold uncommitted changes under $lock_paths at once.
+    This does NOT clear by waiting: each is waiting for the other to land, and
+    neither can commit. Pick one to go first. In each of the others:
+        git stash push -- $lock_paths
+    then let the first one commit and land, \`git stash pop\` there, and renumber
+    the migration if it now sorts before the one that landed.
+    And check what each session has ALREADY applied to the database: this state
+    means more than one may have. (docs/db-lock-plan.md in the azelf package)
+EOF
 }

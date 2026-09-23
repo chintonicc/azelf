@@ -1883,8 +1883,15 @@ for (;;) {
     // lock would build worktrees whose tabs then immediately fail.
     const holder = dbLockHolder();
     if (holder) {
+      // The holder text is printed whole, indented, because it can be more
+      // than a name: when two worktrees are both mid-migration it carries the
+      // diagnosis and the way out, and this line used to be the only symptom
+      // of a run that would never resume on its own.
       console.log(
-        `\n[round ${round}] DB lock held by ${holder} — not starting anything.`,
+        `\n[round ${round}] DB lock held — not starting anything:\n${holder
+          .split("\n")
+          .map((l) => `    ${l}`)
+          .join("\n")}`,
       );
     } else {
       const starting = ready.slice(0, free);

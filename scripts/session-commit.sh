@@ -212,8 +212,12 @@ if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
     this_branch=$(git rev-parse --abbrev-ref HEAD)
     holder=$(db_lock_holder "$this_branch") || true
     if [[ -n "$holder" ]]; then
-      echo "error: this commit touches ${SLICE_EXCLUSIVE_LOCK_PATHS[*]}, but the lock is held by $holder." >&2
-      echo "       only one worktree may touch those paths at a time — let that one merge first." >&2
+      # Printed verbatim: when more than one worktree is mid-migration the
+      # holder text carries the way out, and "let that one merge first" is
+      # exactly the advice that cannot be followed in that case.
+      echo "error: this commit touches ${SLICE_EXCLUSIVE_LOCK_PATHS[*]}, but the lock is held by:" >&2
+      printf '%s\n' "$holder" | sed 's/^/       /' >&2
+      echo "       only one worktree may touch those paths at a time." >&2
       git reset -- "${paths[@]}" >/dev/null
       exit 1
     fi
