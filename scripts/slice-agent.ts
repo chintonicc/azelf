@@ -27,7 +27,7 @@
  *
  * `resolve` is the third, and it is separate from `review` on purpose rather
  * than as a convenience. Review is text-in/text-out and needs no permissions;
- * resolve edits files and runs git inside a worktree. Folding the two into one
+ * resolve edits files inside a worktree mid-rebase. Folding the two into one
  * headless capability would hand the reviewer a writable tree, and a reviewer
  * that can edit the tree is a reviewer that can make its own findings go away.
  * They also fail differently: a review that does not return costs a review, a
@@ -80,8 +80,9 @@ export type Agent = {
   /**
    * Full argv for a headless run WITH TOOLS, in a given working directory, or
    * null if this agent cannot do that. Distinct from `review` on purpose:
-   * `review` is text-in/text-out and needs no permissions, this one edits files
-   * and runs git.
+   * `review` is text-in/text-out and needs no permissions, this one edits
+   * files. It does not run git: the dispatcher stages each stop's files and
+   * continues the rebase itself, so a write permission is all it needs.
    *
    * Optional, and null is a first-class answer — same precedent as `review` and
    * the same consequence: no resolver means the `[a] let an agent resolve it`
@@ -123,9 +124,12 @@ export type ClaudeOptions = {
  * need no tools and no MCP servers.
  *
  * `resolve` is the same `-p` plus `--permission-mode acceptEdits`, which is the
- * whole difference: the resolution has to edit the conflicted files and run git
- * in the worktree, and a run that stops to ask about every edit is a run that
- * hangs until its timeout under `--auto`. `acceptEdits` rather than a blanket
+ * whole difference: the resolution has to edit the conflicted files, and a run
+ * that stops to ask about every edit is a run that hangs until its timeout
+ * under `--auto`. `acceptEdits` does not cover `git add`, which is why the
+ * dispatcher runs the git and not the resolver: told to finish the rebase
+ * itself, it was refused at `git add` and four correct resolutions on
+ * consumer-a were thrown away. `acceptEdits` rather than a blanket
  * bypass because the dispatcher verifies the result afterwards regardless — see
  * `resolutionProblem` in slice-resolve.ts — so the permission mode is about not
  * stalling, never about trust.

@@ -1,8 +1,11 @@
 import {
   type ResolutionState,
+  type StopState,
   droppedFiles,
   hasConflictMarkers,
+  irreconcilable,
   resolutionProblem,
+  stopProblem,
 } from "@/scripts/slice-resolve";
 import { describe, expect, it } from "vitest";
 
@@ -69,6 +72,63 @@ describe("resolutionProblem", () => {
         }),
       ),
     ).toContain("still in progress");
+  });
+});
+
+/** One stop the resolver got right; each test spoils one thing. */
+const stop = (over: Partial<StopState> = {}): StopState => ({
+  output: "Kept both entries.",
+  markerFiles: [],
+  stray: [],
+  ...over,
+});
+
+describe("stopProblem", () => {
+  it("lets a stop with no markers and nothing stray be staged", () => {
+    expect(stopProblem(stop())).toBeNull();
+  });
+
+  it("takes the resolver's refusal as the reason, over the markers it left", () => {
+    expect(
+      stopProblem(
+        stop({
+          output: "Read both sides.\nIRRECONCILABLE: both rename the key\n",
+          markerFiles: ["a.ts"],
+        }),
+      ),
+    ).toBe(
+      "the resolver says the two sides cannot coexist: both rename the key",
+    );
+  });
+
+  it("names the files that still hold markers", () => {
+    expect(stopProblem(stop({ markerFiles: ["a.ts"] }))).toContain("a.ts");
+  });
+
+  it("rejects edits outside the files it was given, and names them", () => {
+    const why = stopProblem(stop({ stray: ["package.json"] }));
+    expect(why).toContain("dirty outside the conflicted files (package.json)");
+  });
+});
+
+describe("irreconcilable", () => {
+  it("reads the reason after the word", () => {
+    expect(irreconcilable("IRRECONCILABLE: x and y")).toBe("x and y");
+  });
+
+  it("tolerates the markdown a model wraps it in", () => {
+    expect(irreconcilable("**IRRECONCILABLE:** x and y")).toBe("x and y");
+    expect(irreconcilable("`IRRECONCILABLE: x and y`")).toBe("x and y");
+  });
+
+  it("finds nothing in prose that only mentions it mid-line", () => {
+    expect(irreconcilable("Nothing here was IRRECONCILABLE: merged.")).toBe(
+      null,
+    );
+  });
+
+  it("still refuses when no reason follows", () => {
+    expect(irreconcilable("IRRECONCILABLE:")).toBe("(no reason given)");
   });
 });
 

@@ -572,8 +572,9 @@ An agent has three capabilities and they are not the same one. A **session** is
 interactive: a terminal, an opening instruction, running until it is done. A
 **review** is headless: one prompt in, text out, bounded time, used to check a diff
 against its ticket before landing. A **resolve** is headless *with tools*: it edits
-files and runs git inside one slice's worktree, and it is the only one of the three
-that writes.
+the conflicted files inside one slice's worktree while a rebase is stopped, and it is
+the only one of the three that writes. It never runs git; the dispatcher stages its
+files and continues the rebase.
 
 Review and resolve are kept apart on purpose. A reviewer that can edit the tree is a
 reviewer that can make its own findings go away — so the review argv carries no write
@@ -767,13 +768,25 @@ say so if the two genuinely cannot coexist. That first rule is there because a b
 union resolution of exactly this conflict put `=======` inside a `describe(...)` body
 and produced `error TS1005: '}' expected` across ten files.
 
-**Nothing takes the resolver's word for it.** When it returns, the dispatcher checks
-the worktree itself: no rebase still in progress, `git status` clean, the base branch
-actually an ancestor of `HEAD`, and no conflict markers left in any changed file. Then
+**The resolver edits; azelf runs the git.** It is called once per commit the rebase
+stops on, with that stop's files, and told not to run `git add`, `rebase --continue`
+or `--abort`. When it returns, the dispatcher checks that stop: no conflict markers
+left in those files, and nothing changed outside them. Only then does it
+`git add -A` exactly those files (so a resolution that deletes a file stages the
+deletion) and continue the rebase, and if the next commit stops too, the resolver is
+called again. A resolver that decides the two sides cannot coexist leaves the files
+alone and prints one line starting `IRRECONCILABLE:`, which becomes the reason the
+resolution is rejected. This split exists because a resolver told to finish the
+rebase itself needed permission for `git add`, which `acceptEdits` does not grant,
+and correct resolutions were thrown away with the rebase still in progress.
+
+**Nothing takes the resolver's word for it.** Once the rebase is through, the
+dispatcher checks the worktree itself: `git status` clean, the base branch actually
+an ancestor of `HEAD`, and no conflict markers left in any changed file. Then
 the ordinary gates and the spec review run, unchanged — a resolution is held to
 exactly the standard the code it is fixing was. Any of those failing means the resolution is thrown
 away — `git rebase --abort`, and a `reset --hard` back to the commit the branch was
-on if the resolver had already finished the rebase, so "the branch is as it was" is
+on if the rebase had already finished, so "the branch is as it was" is
 true even when there was no rebase left to abort — plus a saved transcript and the
 same `[r/f/p/q]` question with the reason named. One attempt per branch head: a failed resolution parks, and only a new
 commit makes the slice eligible again.

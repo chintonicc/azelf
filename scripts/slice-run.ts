@@ -103,6 +103,7 @@ import {
   droppedFiles,
   hasConflictMarkers,
   resolutionProblem,
+  stopProblem,
 } from "./slice-resolve";
 // And the tracker: every ticket and every blocking edge below is read through
 // `tracker`, never through gh directly. Ids are strings the tracker defines
@@ -168,6 +169,8 @@ function run(
     allowFail?: boolean;
     cwd?: string;
     timeoutMs?: number;
+    /** Added to this process's environment, not in place of it. */
+    env?: Record<string, string>;
   } = {},
 ): { ok: boolean; out: string } {
   const [bin, ...args] = cmd;
@@ -176,6 +179,7 @@ function run(
     stdio: opts.inherit ? "inherit" : "pipe",
     encoding: "utf8",
     timeout: opts.timeoutMs,
+    env: opts.env ? { ...process.env, ...opts.env } : undefined,
     // Default is 1MB, which a full-branch `git diff` or a long tsc run can
     // exceed — and spawnSync signals that by TRUNCATING and setting an error,
     // so the failure would look like a gate result rather than a buffer limit.
@@ -1159,11 +1163,12 @@ function rebaseOntoBase(t: Ticket): { ok: boolean; conflicted: string[] } {
 }
 
 /**
- * Longer than the review's ten minutes, because this one has tools: it reads
- * files, edits them, and runs git several times over however many commits the
- * rebase stops on. A review that times out costs a review; this one times out
- * into a half-rebased worktree, which is exactly what the verification below
- * exists to catch — so the budget is generous and the check is strict.
+ * Per stop of the rebase, not per resolution: the resolver is called once for
+ * each commit that conflicts. Longer than the review's ten minutes, because
+ * this one has tools: it reads files, edits them, and may run the project's
+ * checks. A review that times out costs a review; this one times out into
+ * files still holding markers, which the stop check below catches — so the
+ * budget is generous and the check is strict.
  */
 const RESOLVE_TIMEOUT_MS = 20 * 60 * 1000;
 
@@ -1190,17 +1195,54 @@ const changedIn = (wt: string, range: string): string[] =>
     .filter(Boolean);
 
 /**
- * The instruction the resolver is given. Every rule in it is here because
- * something went wrong without it in consumer-a's first three-slice wave.
+ * A git path list, NUL-separated so a path is never quoted: the stop check
+ * compares these lists with each other, and `git status` quotes a path with a
+ * space in it where `git diff --name-only` does not.
+ */
+const pathsFrom = (wt: string, args: string[]): string[] =>
+  run(["git", ...args, "-z"], { cwd: wt, allowFail: true })
+    .out.split("\0")
+    .filter(Boolean);
+
+const unmergedIn = (wt: string): string[] =>
+  pathsFrom(wt, ["diff", "--name-only", "--diff-filter=U"]);
+
+const rebaseInProgress = (wt: string): boolean =>
+  existsSync(gitPath(wt, "rebase-merge")) ||
+  existsSync(gitPath(wt, "rebase-apply"));
+
+/** Which of these files, relative to the worktree, hold conflict markers. */
+const withMarkers = (wt: string, files: string[]): string[] =>
+  files.filter((f) => {
+    try {
+      return hasConflictMarkers(readFileSync(join(wt, f), "utf8"));
+    } catch {
+      // Deleted by the resolution, or not text. Neither can hold a marker.
+      return false;
+    }
+  });
+
+/**
+ * The instruction the resolver is given, once per stop of the rebase. Every
+ * rule in it is here because something went wrong without it in consumer-a's
+ * first three-slice wave, and the last paragraph because of its fourth: told
+ * to finish the rebase itself, the resolver needed `git add`, which its
+ * permission mode does not grant, and correct resolutions were thrown away
+ * with the rebase still in progress.
  */
 function resolvePrompt(
   t: Ticket,
   conflicted: string[],
   landedCommits: string,
+  replaying: string,
 ): string {
-  return `You are finishing a git rebase in this worktree. That is the whole job.
+  return `You are resolving a git conflict in this worktree. That is the whole job.
 
-Branch \`${branchFor(t.id)}\` is being rebased onto \`${baseBranch}\`. The rebase is IN PROGRESS in this directory and has stopped on conflicts:
+Branch \`${branchFor(
+    t.id,
+  )}\` is being rebased onto \`${baseBranch}\`. The rebase is IN PROGRESS in this directory and has stopped${
+    replaying ? ` replaying ${replaying}` : ""
+  } on conflicts in:
 
 ${conflicted.map((f) => `  ${f}`).join("\n")}
 
@@ -1221,37 +1263,48 @@ RULES. These are not advice; a resolution that breaks one of them is thrown away
    rule got written: it produced \`error TS1005: '}' expected\` in ten files.
    Read what the braces actually do before you keep both halves.
 2. Never resolve by discarding one side. Both sides are work somebody meant. If
-   the two genuinely cannot coexist, STOP: run \`git rebase --abort\` and say in
-   one line what the irreconcilable disagreement is. Stopping is a correct
-   outcome and it is much better than a plausible-looking wrong merge.
+   the two genuinely cannot coexist, STOP: leave the files exactly as they are
+   and print one line starting \`IRRECONCILABLE:\` that says what the
+   disagreement is. Stopping is a correct outcome and it is much better than a
+   plausible-looking wrong merge.
 3. Both intents matter. The ticket above says what this branch is trying to do;
    the commit list says what it is landing on top of. The resolved file has to
    still do both.
 4. Verify before you say you are done: no \`<<<<<<<\`, \`=======\` or \`>>>>>>>\`
-   left anywhere, the files you touched still parse, and the project's checks
-   pass.
-5. Resolve the conflict and NOTHING ELSE. Do not amend earlier commits, do not
-   rename anything, do not take the opportunity to improve the code you are
+   left in the files above, the files you touched still parse, and the
+   project's checks pass.
+5. Resolve the conflict and NOTHING ELSE. Edit only the files listed above. Do
+   not rename anything, do not take the opportunity to improve the code you are
    looking at. The diff you produce should be explicable as "this is what the
-   two sides together mean".
+   two sides together mean". A change anywhere else fails the resolution.
 
-HOW TO FINISH: edit the conflicted files, \`git add\` them, then
-\`git -c core.editor=true rebase --continue\` — with \`core.editor\` set that way,
-so it never opens an editor and waits for input that is not coming. Repeat for
-every commit the rebase stops on, until \`git status\` says no rebase is in
-progress and the tree is clean.`;
+HOW TO FINISH: edit the conflicted files until they are resolved, and stop. Do
+not run \`git add\`, \`git rebase --continue\`, \`git rebase --abort\`,
+\`git commit\`, \`git reset\` or \`git stash\`: azelf stages the files above and
+continues the rebase itself once you have finished, and calls you again if the
+next commit stops too. Reading git — \`git diff\`, \`git log\`, \`git show\` — is
+fine. To resolve a conflict by deleting a file, delete it.`;
 }
 
 /**
  * Let the agent resolve a rebase conflict, then check its work.
+ *
+ * The resolver edits and azelf runs the git. For every commit the rebase stops
+ * on, the resolver is handed that stop's conflicted files; when it returns,
+ * the stop is checked (`stopProblem`: no refusal, no markers left in those
+ * files, nothing changed outside them), and only then does this function
+ * `git add -A` exactly those files and `rebase --continue`. `-A` so that a
+ * resolution which deletes a file stages the deletion: an unmerged path is
+ * still in the index, and plain `add` would refuse it.
  *
  * Returns true ONLY if the branch is now rebased, clean and free of conflict
  * markers — the gates are check 5 and `tryLand` runs them immediately after
  * this returns, which is why they are not repeated here.
  *
  * Nothing here trusts the resolver's own report. It gets read into the
- * transcript and that is all it is for; the decision is made from the state of
- * the worktree.
+ * transcript, and the one line it can say that counts is a refusal
+ * (`IRRECONCILABLE:`); everything else is decided from the state of the
+ * worktree.
  */
 function resolveConflict(t: Ticket, conflicted: string[]): boolean {
   const argvFor = agent.resolve;
@@ -1259,15 +1312,23 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
   const wt = worktreeFor(t.id);
   const branch = branchFor(t.id);
 
-  // Read BEFORE the rebase starts, because both of these are about the branch
-  // as its author left it: the file set is what check 6 compares against, and
-  // the commit list is the other slices' work, which the merge-base stops being
-  // able to name once the rebase has moved the branch.
+  // Read BEFORE the rebase starts, because all of these are about the branch
+  // as its author left it: the file set is what check 6 compares against, the
+  // commit count is the most stops the rebase can make, and the commit list is
+  // the other slices' work, which the merge-base stops being able to name once
+  // the rebase has moved the branch.
   const before = changedIn(wt, `${baseBranch}...${branch}`);
   const head = run(["git", "rev-parse", "HEAD"], {
     cwd: wt,
     allowFail: true,
   }).out.trim();
+  const replayed =
+    Number(
+      run(["git", "rev-list", "--count", `${baseBranch}..${branch}`], {
+        cwd: wt,
+        allowFail: true,
+      }).out.trim(),
+    ) || 0;
   const mergeBase = run(["git", "merge-base", baseBranch, branch], {
     cwd: wt,
     allowFail: true,
@@ -1295,15 +1356,35 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     return true;
   }
 
-  const give = (why: string, transcript: string): boolean => {
+  // One entry per stop: the files the resolver was given and what it printed.
+  const stops: { files: string[]; out: string }[] = [];
+  const report = (verdict: string): string =>
+    saveReport(
+      `conflict-${t.id}.md`,
+      `# Conflict resolution — ${ref(t.id)} ${t.title}\n\n${verdict}\n\n${
+        stops.length
+          ? stops
+              .map(
+                (s, i) =>
+                  `## Stop ${i + 1}: ${s.files.join(", ")}\n\n${
+                    s.out.trim() || "(the agent printed nothing)"
+                  }`,
+              )
+              .join("\n\n")
+          : `## Conflicted files\n\n${conflicted
+              .map((f) => `- ${f}`)
+              .join("\n")}\n\n(the agent was not run)`
+      }\n`,
+    );
+
+  const give = (why: string): boolean => {
     run(["git", "rebase", "--abort"], { cwd: wt, allowFail: true });
-    // An abort is not enough on its own, and this is the case that makes the
-    // difference: a resolver can FINISH the rebase and still fail check 4 —
-    // markers committed, ten files that do not parse. There is no rebase left
-    // to abort by then, so without this the branch keeps the bad resolution and
-    // "the branch is as it was" would be a lie. `head` is this branch's own
-    // commit from a moment ago, so the reset discards exactly the resolution
-    // and nothing else.
+    // An abort is not enough on its own: a rebase that got through every stop
+    // can still fail the final check — markers in a file that never conflicted,
+    // a tree dirty afterwards. There is no rebase left to abort by then, so
+    // without this the branch keeps the bad resolution and "the branch is as it
+    // was" would be a lie. `head` is this branch's own commit from a moment ago, so the
+    // reset discards exactly the resolution and nothing else.
     const now = run(["git", "rev-parse", "HEAD"], {
       cwd: wt,
       allowFail: true,
@@ -1311,35 +1392,99 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     if (head && now && now !== head) {
       run(["git", "reset", "--hard", head], { cwd: wt, allowFail: true });
     }
-    const path = saveReport(
-      `conflict-${t.id}.md`,
-      `# Conflict resolution — ${ref(t.id)} ${
-        t.title
-      }\n\nREJECTED: ${why}\n\n## Conflicted files\n\n${conflicted
-        .map((f) => `- ${f}`)
-        .join("\n")}\n\n## Agent transcript\n\n${transcript}\n`,
-    );
+    const path = report(`REJECTED: ${why}`);
     console.log(`     ✗ resolution rejected — ${why}`);
     console.log(`     the rebase was aborted; the branch is as it was.`);
     console.log(`     transcript: ${path}`);
     return false;
   };
 
-  const argv = argvFor(resolvePrompt(t, conflicted, landedCommits));
-  if (!argv) return give("the agent declined the headless run", "(none)");
-  const { out } = run(argv, {
-    cwd: wt,
-    allowFail: true,
-    timeoutMs: RESOLVE_TIMEOUT_MS,
-  });
-  const transcript = out.trim() || "(the agent printed nothing)";
+  // What the last `--continue` said, for a rebase that then stops on nothing.
+  let continued = "";
+  while (rebaseInProgress(wt)) {
+    const files = unmergedIn(wt);
+    if (files.length === 0) {
+      const said = continued
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+        .join(" ")
+        .slice(0, 200);
+      return give(
+        `the rebase stopped with nothing left conflicted${
+          said ? ` — git said: ${said}` : ""
+        }`,
+      );
+    }
+    // A commit stops at most once, so a rebase still stopping after one stop
+    // per commit is going round in a loop, not making progress.
+    if (stops.length > replayed) {
+      return give(
+        `the rebase stopped ${
+          stops.length + 1
+        } times replaying ${replayed} commit(s)`,
+      );
+    }
+    if (stops.length > 0) {
+      console.log(
+        `     the next commit stops too (${files.length} file${
+          files.length === 1 ? "" : "s"
+        }) — resolving that …`,
+      );
+    }
+
+    const replaying = run(
+      ["git", "log", "-1", "--format=%h %s", "REBASE_HEAD"],
+      { cwd: wt, allowFail: true },
+    );
+    const argv = argvFor(
+      resolvePrompt(
+        t,
+        files,
+        landedCommits,
+        replaying.ok ? replaying.out.trim() : "",
+      ),
+    );
+    if (!argv) return give("the agent declined the headless run");
+    const { out } = run(argv, {
+      cwd: wt,
+      allowFail: true,
+      timeoutMs: RESOLVE_TIMEOUT_MS,
+    });
+    stops.push({ files, out });
+
+    const given = new Set(files);
+    const problem = stopProblem({
+      output: out,
+      markerFiles: withMarkers(wt, files),
+      stray: [
+        ...new Set([
+          ...pathsFrom(wt, ["diff", "--name-only"]),
+          ...pathsFrom(wt, ["ls-files", "--others", "--exclude-standard"]),
+        ]),
+      ].filter((p) => !given.has(p)),
+    });
+    if (problem) return give(problem);
+
+    const add = run(["git", "add", "-A", "--", ...files], {
+      cwd: wt,
+      allowFail: true,
+    });
+    if (!add.ok) return give(`git add failed: ${add.out}`);
+    // GIT_EDITOR rather than `-c core.editor`: the environment variable wins
+    // over the config, so an exported GIT_EDITOR would otherwise open an
+    // editor nobody is at.
+    continued = run(["git", "rebase", "--continue"], {
+      cwd: wt,
+      allowFail: true,
+      env: { GIT_EDITOR: "true" },
+    }).out;
+  }
 
   const after = changedIn(wt, `${baseBranch}...HEAD`);
   const state: ResolutionState = {
     base: baseBranch,
-    rebaseInProgress:
-      existsSync(gitPath(wt, "rebase-merge")) ||
-      existsSync(gitPath(wt, "rebase-apply")),
+    rebaseInProgress: rebaseInProgress(wt),
     dirty: run(["git", "status", "--porcelain"], { cwd: wt, allowFail: true })
       .out.split("\n")
       .map((l) => l.trim())
@@ -1348,26 +1493,14 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
       cwd: wt,
       allowFail: true,
     }).ok,
-    markerFiles: after.filter((f) => {
-      try {
-        return hasConflictMarkers(readFileSync(join(wt, f), "utf8"));
-      } catch {
-        // Deleted by the resolution, or not text. Neither can hold a marker.
-        return false;
-      }
-    }),
+    markerFiles: withMarkers(wt, after),
   };
 
   const problem = resolutionProblem(state);
-  if (problem) return give(problem, transcript);
+  if (problem) return give(problem);
 
-  const path = saveReport(
-    `conflict-${t.id}.md`,
-    `# Conflict resolution — ${ref(t.id)} ${
-      t.title
-    }\n\nACCEPTED: rebased onto ${baseBranch}, clean, no conflict markers. The gates run next.\n\n## Conflicted files\n\n${conflicted
-      .map((f) => `- ${f}`)
-      .join("\n")}\n\n## Agent transcript\n\n${transcript}\n`,
+  const path = report(
+    `ACCEPTED: rebased onto ${baseBranch} over ${stops.length} stop(s), clean, no conflict markers. The gates run next.`,
   );
   console.log(
     `     ✓ rebased onto ${baseBranch}, clean, no markers left — the gates run next`,

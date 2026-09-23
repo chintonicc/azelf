@@ -29,7 +29,7 @@
  * resolution is held to exactly the standard the code it is fixing was.
  */
 
-/** What the worktree looks like after the resolver has had its turn. */
+/** What the worktree looks like once every stop is resolved and continued. */
 export type ResolutionState = {
   /** The base branch's name, for the message when the rebase did not happen. */
   base: string;
@@ -41,6 +41,25 @@ export type ResolutionState = {
   rebased: boolean;
   /** Changed files that still contain conflict markers. */
   markerFiles: string[];
+};
+
+/**
+ * What the worktree looks like after the resolver has had ONE stop of the
+ * rebase — before azelf stages its files and continues.
+ *
+ * The resolver edits and azelf runs the git: a resolver told to finish the
+ * rebase itself needed permission to run `git add`, which `acceptEdits` does
+ * not grant, and on consumer-a four correct resolutions were thrown away
+ * because the rebase was still in progress when the resolver gave up asking.
+ * So every stop is checked here first, and only then staged.
+ */
+export type StopState = {
+  /** What the resolver printed. A line starting `IRRECONCILABLE:` is its refusal. */
+  output: string;
+  /** The files it was given that still hold conflict markers. */
+  markerFiles: string[];
+  /** Paths it changed or created that it was not given. */
+  stray: string[];
 };
 
 /** How many paths a failure message names before it stops listing them. */
@@ -72,6 +91,44 @@ export function resolutionProblem(s: ResolutionState): string | null {
   }
   if (s.markerFiles.length > 0) {
     return `conflict markers are still in the tree: ${list(s.markerFiles)}`;
+  }
+  return null;
+}
+
+/**
+ * The resolver's own refusal, if it printed one: the text after
+ * `IRRECONCILABLE:`. Markdown emphasis around the word is tolerated, because
+ * a model asked for a plain line often bolds it anyway.
+ */
+export function irreconcilable(output: string): string | null {
+  const m = output.match(/^[\s>*`_]*IRRECONCILABLE:[*`_]*[ \t]*(.*)$/m);
+  if (!m) return null;
+  return (m[1] ?? "").replace(/[*`_\s]+$/, "") || "(no reason given)";
+}
+
+/**
+ * Why this stop's resolution must not be staged, or null if azelf may run
+ * `git add` and `rebase --continue` on it.
+ *
+ * The refusal comes first: a resolver that says the sides cannot coexist has
+ * left the markers in place on purpose, and "markers are still there" would
+ * name the symptom instead of its answer. Stray edits come last, and are
+ * checked at all because nothing else would say it: git's `--continue` over
+ * an unrelated unstaged edit fails with "You must edit all merge conflicts",
+ * which sends whoever reads it looking at the wrong file.
+ */
+export function stopProblem(s: StopState): string | null {
+  const refusal = irreconcilable(s.output);
+  if (refusal !== null) {
+    return `the resolver says the two sides cannot coexist: ${refusal}`;
+  }
+  if (s.markerFiles.length > 0) {
+    return `conflict markers are still in ${list(s.markerFiles)}`;
+  }
+  if (s.stray.length > 0) {
+    return `the worktree is dirty outside the conflicted files (${list(
+      s.stray,
+    )}) — a resolver edits the files it was given and nothing else`;
   }
   return null;
 }
