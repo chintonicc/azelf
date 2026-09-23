@@ -22,7 +22,8 @@
 #
 # EXIT 86 CLOSES THIS TAB. slice-session.sh returns it only when the session ran
 # under --self-land (so --auto, where nobody is watching the tab) AND the agent
-# exited cleanly. Every other status leaves you at a prompt with the output
+# exited cleanly — or was ended by the land after its worktree was removed,
+# which is how a session that sat at its REPL closes. Every other status leaves you at a prompt with the output
 # still on screen — a session a human is reading, and a session that crashed,
 # are the two cases where the tab is the point. `exit` here ends the shell the
 # terminal started, which is what the terminal closes the tab on.

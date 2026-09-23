@@ -505,6 +505,13 @@ names the still-running session by pid when it removes its directory —
     Nothing is lost — close that tab.
 ```
 
+— and under `--auto` the dispatcher does not leave it there. It lands with
+`slice-land.sh --end-session`, which, once the worktree is removed, ends the agent
+of a session that declared itself done; `slice-session.sh` sees its worktree gone
+and exits 86, and the tab closes. Both guards hold: a land by hand never ends a
+session, and an agent that dies with its worktree still in place — a crash, not a
+land — keeps its tab.
+
 This changed the hook, so it is `v3`. If your rc file carries `v2`, `azelf init`
 says so and `azelf init --hook` replaces it.
 

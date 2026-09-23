@@ -1,6 +1,6 @@
 # Closing the tab of a landed `--auto` slice
 
-**Status:** open · **Written:** 2026-09-23
+**Status:** LANDED 2026-09-23 · **Written:** 2026-09-23
 **Companion:** `README.md` "A finished `--auto` slice closes its own tab",
 `scripts/slice-session.sh` "Closing the tab", `scripts/slice-autostart.sh` header.
 
@@ -56,7 +56,7 @@ no attempt to close a tab whose session was never a slice session.
 
 ## Phase 1 — end the agent, exit 86 on a gone worktree
 
-- [ ] **1a. `slice-land.sh --end-session`.** A flag, off by default. In the cleanup
+- [x] **1a. `slice-land.sh --end-session`.** A flag, off by default. In the cleanup
   block, inside the `if git worktree remove …` success branch (`slice-land.sh:248`), after
   the existing "still running" report: when the flag is set and the pid passed the `ps`
   check, end the agent under that session. The pid is the `bash` running
@@ -69,7 +69,7 @@ no attempt to close a tab whose session was never a slice session.
   and the KILL fallback covers a wrapper that does not forward it — say so in the comment.
   *Proof:* the test in 1c.
 
-- [ ] **1b. `slice-session.sh`: exit 86 when the worktree is gone.** At the block starting
+- [x] **1b. `slice-session.sh`: exit 86 when the worktree is gone.** At the block starting
   `slice-session.sh:466`, the condition becomes: `--self-land` *and* (the agent exited 0
   *or* `[[ ! -d "$worktree_path" ]]`). Rewrite the "TWO CONDITIONS" comment above it: the
   second condition is now "the agent exited cleanly, or its worktree was landed and
@@ -78,7 +78,7 @@ no attempt to close a tab whose session was never a slice session.
   (the one nobody reads, under `--auto`) still says why it closed.
   *Proof:* the test in 1c.
 
-- [ ] **1c. The dispatcher passes the flag under `--auto`.** `tryLand`
+- [x] **1c. The dispatcher passes the flag under `--auto`.** `tryLand`
   (`slice-run.ts:1524`): `["./scripts/slice-land.sh", t.id, ...(autoLand ? ["--end-session"] : [])]`.
   Nowhere else — the manual land path and `--gates` never end a session.
   *Proof:* `tests/scripts/sliceSessionClose.test.ts` on `makeConsumer` from
@@ -105,11 +105,35 @@ no attempt to close a tab whose session was never a slice session.
   Under `manual()` (the fixture's default launcher) flags travel on the command line,
   so `--self-land` needs no `.slice-flags` file; the test never touches the hook.
 
-- [ ] **1d. README.** In "When the agent does not exit, and it often does not": the
+- [x] **1d. README.** In "When the agent does not exit, and it often does not": the
   paragraph now ends with what the dispatcher does about it under `--auto` (removes the
   worktree, ends the agent, the session exits 86, the tab closes), and keeps the two
   guards. One sentence in the `slice-autostart.sh` header saying 86 can now also mean
   "landed out from under me". Keep it to the length of what is there now.
+
+## Landed
+
+`c4e452c` (1a+1b+1c, with the test) and the docs commit (1d). Deviations:
+
+- **Only a session that declared done is ended.** 1a said "the pid passed the `ps`
+  check"; `slice-land.sh` also requires the `.slice-ready-to-land` marker, because a
+  session that never ran `slice-done.sh` is being landed out from under it and its
+  tab may hold the only explanation. Under `--auto` that case does not arise (the
+  dispatcher never lands an occupied slice); a fourth test pins it anyway.
+- **The fixture now writes the `init` exclude block** into every temp consumer's
+  `.git/info/exclude`. Without it `.slice-ticket.md` and `.slice-live` are untracked,
+  `git worktree remove` refuses, and the land never reaches the end-session step —
+  which is also what a real consumer without `init` would see.
+- **The fake agent is `bash -c "exec sleep <n>"`,** not `sleep 300`: the session
+  appends the start prompt to the agent's argv, which `sleep` rejects and `bash -c`
+  puts in `$0`. `<n>` is random per test, so `pgrep -f` finds only its own.
+- **`vitest.config.ts` sets `testTimeout: 30_000`.** The script tests run at one to
+  three seconds alone and hit the 5s default once they ran next to a file that
+  launches real sessions.
+- A fifth test: `slice-land.sh` rejects an unknown flag and a second ticket id, now
+  that it parses arguments.
+
+Not yet seen: Warp closing the tab. That is the dry run in the last section.
 
 ## Order and cost
 
