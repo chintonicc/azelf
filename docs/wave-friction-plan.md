@@ -1,14 +1,14 @@
 # What consumer-a's 2026-09-23 waves tripped over
 
-**Status:** Phase 1 LANDED 2026-09-23 · Phases 2–3 open · **Written:** 2026-09-23
+**Status:** Phases 1–2 LANDED 2026-09-23 · Phase 3 open · **Written:** 2026-09-23
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), `scripts/slice-resolve.ts` header, `docs/tab-close-plan.md` (same day, same
 waves).
 
 Written so it can be picked up cold. Each item says what to change, where, why, and what
 proves it. Tick the boxes as they land and add the commit hash after the heading. Line
-numbers are as of `a3899a5`; Phase 1 moved `slice-run.ts` by about 100 lines, so search
-Phases 2–3's references by name.
+numbers are as of `a3899a5`; Phases 1 and 2 moved `slice-run.ts` by about 300 lines, so
+search Phase 3's references by name.
 
 ## What happened
 
@@ -147,7 +147,7 @@ end for the next one.
 
 ## Phase 2 — a parked slice retries when the reason it parked changes
 
-- [ ] **2a. A ticket closed elsewhere leaves `parked`.** After `refreshOpenState`
+- [x] **2a. A ticket closed elsewhere leaves `parked`.** (`4faf7dc`) After `refreshOpenState`
   (`slice-run.ts:613`), drop every parked ticket that now reads closed, and print
   *"#17 was closed outside this run — no longer parked"*. It then stops counting toward
   `N parked` and the end-of-run summary (`:2059`), which also stops a run that finished
@@ -157,14 +157,14 @@ end for the next one.
   next refresh. `slice-session.sh` refuses it on the tracker check, which is harmless;
   leave it.
 
-- [ ] **2b. `Parked` records why and against what.** `type Parked` (`:1400`) gains:
+- [x] **2b. `Parked` records why and against what.** (`4faf7dc`) `type Parked` (`:1400`) gains:
   - `kind`: `"rebase" | "gates" | "review" | "land"`, set by each `park()` call in
     `tryLand` (`:1484`);
   - `base`: the base branch's head at park time;
   - for `review` only, `body`: a hash of `tracker.body` at park time;
   - `autoRetries`: a count.
 
-- [ ] **2c. The automatic triggers.** `isParked` (`:1412`) keeps "the branch moved" and
+- [x] **2c. The automatic triggers.** (`4faf7dc`) `isParked` (`:1412`) keeps "the branch moved" and
   adds two more:
   - `gates` or `land`, and the base branch has moved since parking: retry, at most twice
     per branch head. Print *"master moved since #42 was parked — retrying"*. This covers
@@ -182,7 +182,7 @@ end for the next one.
   trigger is an outside event, and a run with nothing else to do should say so and stop
   rather than poll. Starting the dispatcher again is the retry.
 
-- [ ] **2d. `azelf retry <ticket>`.** A new verb in `bin/azelf.ts`. It spawns
+- [x] **2d. `azelf retry <ticket>`.** (`4faf7dc`) A new verb in `bin/azelf.ts`. It spawns
   `slice-run.ts --retry <id>`, which validates the id, writes `.slice-retry` into that
   slice's worktree before loading any plan, and prints:
 
@@ -199,7 +199,7 @@ end for the next one.
   when its branch moves, when master moves, or now with: azelf retry 17"*, trimmed to the
   triggers that apply to that `kind`.
 
-- [ ] **2e. README.** The parked-slice section: what retries automatically and when, what
+- [x] **2e. README.** (`4faf7dc`) The parked-slice section: what retries automatically and when, what
   `azelf retry` is for, and that `slice-land.sh` by hand is for landing without the
   review, not for retrying it.
 
@@ -214,6 +214,38 @@ end for the next one.
     `parked` no longer counts it, and the run exits 0.
   - **The cap:** a `gates` park whose gate never passes retries twice as master moves,
     then stays parked.
+
+**As landed, where it differs from the above:**
+- 2b: `base` is the branch's merge-base with the base branch at park time, not the
+  base's head. A land that loses a fast-forward race parks after the other land has
+  already moved the base, so the head would include the very move that should retry
+  it. The harness test for that race (a gate that lands a commit on main while it
+  runs) fails with the head and passes with the merge-base.
+- 2b: `autoRetries` is carried from a retry to the park that follows it through a
+  separate `retriesSpent` map, because a retry deletes its `Parked` record. "Per
+  branch head" means per head the author committed: a retry's own rebase moves the
+  branch too, and counting that as a new head would reset the cap every time.
+  `azelf retry` and an edited ticket carry the count unchanged; a moved branch
+  resets it.
+- 2c: once the cap is spent, the next base move prints one line saying so (not
+  one per round), naming `azelf retry`.
+- 2c: the "nothing can advance" exit does not fire while a parked slice is already
+  due a retry. One trigger is not an outside event: this round's own land can move
+  the base, and a `gates` park waiting on exactly that gets its next round. There is
+  a harness test for it (#42 lands the fix that #40's gate needs).
+- 2c: a body the tracker fails to return never reads as "changed", so a flaky
+  tracker cannot turn into a retry per round.
+- 2d: `--retry` also refuses an id with no worktree (exit 1). An interactive `[p]`
+  prints the same ways-out line as a non-interactive park.
+- 2d: the end-of-run summary does not repeat "retried when …", because that is a
+  running dispatcher's promise and the run is exiting. It says the next run starts
+  with nothing parked, and that `slice-land.sh` lands without the review.
+- 2e: both copies of the `/azelf` command (`agent/commands/`, `.claude/commands/`)
+  describe the triggers too, and the spec review's BLOCK line suggests correcting the
+  ticket.
+- Tests: the fixture takes a `gate` (as `exitCode(gate)`). The eight new tests in
+  `tests/scripts/sliceRun.test.ts` are the five above, the race, the self-moved
+  base, and `azelf retry` on a ticket with no worktree.
 
 ## Phase 3 — two dispatchers on one repo
 
