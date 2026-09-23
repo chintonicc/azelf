@@ -260,7 +260,7 @@ describe("runGates", () => {
   it("runs every gate in order and passes when all do", () => {
     const { exec, calls } = fakeExec({ git: clean });
     const r = runGates([exitCode(["one"]), exitCode(["two"])], ctxWith(exec));
-    expect(r).toEqual({ ok: true });
+    expect(r).toEqual({ ok: true, flaky: [] });
     expect(calls.map((c) => c.cmd[0])).toEqual([
       "git",
       "one",
@@ -317,5 +317,96 @@ describe("runGates", () => {
       /^gate `bun run format` modified the worktree — gates must be read-only/,
     );
     expect(r.detail).toEqual(["M lib/a.ts", "?? lib/new.ts"]);
+  });
+});
+
+/**
+ * `retries`: a gate that is flaky under a wave's load may be re-run, and a
+ * pass on a retry is reported rather than buried. Off by default, because
+ * re-running a deterministic gate only doubles what a real failure costs.
+ */
+describe("runGates with retries", () => {
+  const clean = { ok: true, out: "" };
+
+  /** An exec where `test` fails its first `failures` calls, then passes. */
+  const flakyTest = (failures: number) => {
+    let calls = 0;
+    const exec: Exec = (cmd) => {
+      if (cmd[0] === "git") return clean;
+      calls += 1;
+      return calls <= failures
+        ? { ok: false, out: "Test timed out in 5000ms" }
+        : { ok: true, out: "" };
+    };
+    return { exec, calls: () => calls };
+  };
+
+  it("passes a gate that failed once and passed on its retry, and names it flaky", () => {
+    const { exec, calls } = flakyTest(1);
+    const r = runGates([exitCode(["test"], { retries: 1 })], ctxWith(exec));
+    expect(r).toEqual({ ok: true, flaky: [{ gate: "test", retry: 1 }] });
+    expect(calls()).toBe(2);
+  });
+
+  it("fails the same gate without retries, running it once", () => {
+    const { exec, calls } = flakyTest(1);
+    const r = runGates([exitCode(["test"])], ctxWith(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toBe("`test` failed");
+    expect(r.flaky).toEqual([]);
+    expect(calls()).toBe(1);
+  });
+
+  it("fails once the retries are spent, and says it was retried", () => {
+    const { exec, calls } = flakyTest(3);
+    const r = runGates([exitCode(["test"], { retries: 2 })], ctxWith(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toBe("`test` failed, and again on 2 retries");
+    expect(r.detail).toEqual(["Test timed out in 5000ms"]);
+    expect(calls()).toBe(3);
+  });
+
+  it("does not re-run a gate that passed, and reports the retry that passed", () => {
+    const { exec, calls } = flakyTest(2);
+    const r = runGates(
+      [exitCode(["test"], { retries: 3 }), exitCodeOverFiles(["lint"])],
+      ctxWith(exec, []),
+    );
+    expect(r).toEqual({ ok: true, flaky: [{ gate: "test", retry: 2 }] });
+    expect(calls()).toBe(3);
+  });
+
+  it("checks for writes after every attempt, not only the last", () => {
+    let status = 0;
+    let runs = 0;
+    const exec: Exec = (cmd) => {
+      if (cmd[0] === "git") {
+        status += 1;
+        // Clean going in and after the first attempt; dirty after the retry.
+        return status <= 2 ? clean : { ok: true, out: " M lib/a.ts" };
+      }
+      runs += 1;
+      return { ok: runs > 1, out: "" };
+    };
+    const r = runGates([exitCode(["test"], { retries: 1 })], ctxWith(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toMatch(/^gate `test` modified the worktree/);
+  });
+
+  it("is carried by every shape", () => {
+    expect(exitCode(["a"], { retries: 1 }).retries).toBe(1);
+    expect(exitCodeOverFiles(["a"], { retries: 1 }).retries).toBe(1);
+    expect(
+      baselineDiff({
+        cmd: ["tsc"],
+        errorMatch: /error/,
+        normalize: (l) => l,
+        retries: 1,
+      }).retries,
+    ).toBe(1);
+    expect(exitCode(["a"]).retries).toBeUndefined();
   });
 });

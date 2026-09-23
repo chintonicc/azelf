@@ -126,6 +126,27 @@ $(printf '%s\n' "$land_notes" | head -n "$LAND_NOTES_MAX")"
   fi
 fi
 
+# ─── The land lock ─────────────────────────────────────────────────────────
+#
+# One land at a time per repo, whoever runs it. A dispatcher lands one slice
+# per round, which serialises its own lands and nobody else's: with two
+# dispatchers on consumer-a, five slices landed onto one master in one main
+# checkout, and a hand land during a running wave raced them too. Two `git
+# merge`s at once fail on git's index.lock, which reads as a broken land; one
+# after the other, the second refuses as "diverged" below, which a dispatcher
+# parks and retries when the base moves.
+#
+# Here and not in the dispatcher, because hand lands race too. Taken after the
+# checks above, so a land that was never going to happen waits for nobody, and
+# held until this script exits, cleanup and ticket close included. The holder
+# is this shell: a land that died holding it is taken over by the next one,
+# which says so. See scripts/slice-lock.ts.
+LAND_LOCK_WAIT=300
+land_lock="$_slice_common/azelf-land.lock"
+bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" acquire "$land_lock" \
+  --pid $$ --label "$branch" --what land --wait "$LAND_LOCK_WAIT" || exit 1
+trap 'bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" release "$land_lock" --pid $$ || true' EXIT
+
 # Taken before the fast-forward, for the "landed as" line below: afterwards
 # `base..HEAD` is empty by definition.
 base_before="$(git rev-parse HEAD)"

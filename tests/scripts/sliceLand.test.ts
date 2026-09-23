@@ -1,7 +1,21 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type Consumer, git, makeConsumer, sh } from "./fixture";
+import {
+  type Consumer,
+  git,
+  makeConsumer,
+  sh,
+  shResult,
+  startScript,
+} from "./fixture";
 
 /**
  * slice-done.sh and slice-land.sh, end to end against a real repo with a bare
@@ -138,5 +152,98 @@ describe("slice-land.sh and the DB lock", () => {
     expect(land).toContain("✓ closed #40");
     expect(land).not.toContain("DB lock");
     expect(existsSync(c.lockDir)).toBe(true);
+  });
+});
+
+/**
+ * The land lock: one `slice-land.sh` at a time per repo, whoever runs it.
+ * Two dispatchers on consumer-a landed five slices onto one master in one
+ * main checkout with nothing between them, and a hand land raced them too.
+ */
+describe("slice-land.sh and the land lock", () => {
+  let c: Consumer;
+  let lock: string;
+  const commitIn = (n: number) => {
+    const wt = c.wt(n);
+    writeFileSync(join(wt, `${n}.txt`), `${n}\n`);
+    git(wt, "add", `${n}.txt`);
+    git(wt, "commit", "-qm", `feat: ${n}`);
+  };
+  beforeEach(() => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true });
+    lock = join(c.main, ".git", "azelf-land.lock");
+    commitIn(40);
+    commitIn(41);
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("makes a second land wait for the first, which it then refuses as diverged — never a git lock error", async () => {
+    // A pre-push hook that holds the first land open until the test says go:
+    // by then it has fast-forwarded main and is pushing, which is the window
+    // two unlocked lands collided in.
+    const go = join(c.root, "go");
+    writeFileSync(
+      join(c.main, ".git", "hooks", "pre-push"),
+      `#!/usr/bin/env bash\nwhile [ ! -f ${go} ]; do sleep 0.1; done\n`,
+      { mode: 0o755 },
+    );
+    const first = startScript(c.main, "./scripts/slice-land.sh 40");
+    try {
+      await first.until("pushing main");
+      const second = startScript(c.main, "./scripts/slice-land.sh 41");
+      try {
+        await second.until(/waiting for ticket\/40's land \(pid \d+, since /);
+        expect(second.output()).not.toContain("fast-forwarding");
+
+        writeFileSync(go, "");
+        expect(await first.exited).toBe(0);
+        expect(await second.exited).toBe(1);
+      } finally {
+        await second.stop();
+      }
+      expect(first.output()).toContain("✓ closed #40");
+      expect(second.output()).toContain("can't fast-forward onto ticket/41");
+      expect(second.output()).toContain("it has diverged");
+      for (const out of [first.output(), second.output()]) {
+        expect(out).not.toMatch(/index\.lock|Unable to create/);
+      }
+    } finally {
+      writeFileSync(go, "");
+      await first.stop();
+    }
+    // The refusal released it too.
+    expect(existsSync(lock)).toBe(false);
+  }, 60_000);
+
+  it("takes the lock over from a land that died holding it, and lands", () => {
+    const dead = Number(
+      spawnSync("bash", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim(),
+    );
+    mkdirSync(lock);
+    writeFileSync(
+      join(lock, "owner"),
+      `pid=${dead}\nstarted=\nlabel=ticket/39\nsince=2026-09-23T10:00:00.000Z\n`,
+    );
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+    expect(land).toContain(
+      `took over the land lock from ticket/39 (pid ${dead}) — that process is no longer running`,
+    );
+    expect(land).toContain("✓ closed #40");
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("is not taken by a land that is refused before it", () => {
+    // A live holder, which a refused land must never wait on: the branch
+    // check comes first.
+    mkdirSync(lock);
+    writeFileSync(
+      join(lock, "owner"),
+      `pid=${process.pid}\nstarted=\nlabel=ticket/39\nsince=2026-09-23T10:00:00.000Z\n`,
+    );
+    const r = shResult(c.main, "./scripts/slice-land.sh 77");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("no local branch 'ticket/77'");
+    expect(r.out).not.toContain("waiting for");
+    expect(readFileSync(join(lock, "owner"), "utf8")).toContain("ticket/39");
   });
 });

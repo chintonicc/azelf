@@ -67,6 +67,14 @@ If every open slice is parked and nothing is running, the dispatcher says so and
 stops instead of sleeping in a circle. The run ends with a list of what is parked and
 why, and exits non-zero.
 
+**Two dispatchers on one repo are fine**, each with its own tickets. `slice-land.sh`
+takes a land lock and a dispatcher's gate run takes a gate lock, both in the common
+git dir, so the runs wait for each other ("waiting for ticket/41's land (pid …)")
+instead of landing into one checkout at once or running their gates on top of each
+other. A lock whose holder has exited is taken over. A gate with `retries` re-runs
+after a failure; a slice that passes only on a retry lands, and the run's summary
+names it as flaky.
+
 **A session that never comes up** is reported after the launch grace window. The
 report names the launcher, because that is the thing to look at: `warp` starts
 sessions through a shell hook and a marker file, everything else carries the command

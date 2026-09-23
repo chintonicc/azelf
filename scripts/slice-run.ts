@@ -97,10 +97,12 @@ import {
 // The gates themselves are in slice.config.ts too, as three shapes from
 // slice-gates.ts; this file only runs them. See that file for the read-only
 // contract every gate is held to.
-import { runGates } from "./slice-gates";
+import { type Flaky, runGates } from "./slice-gates";
 // The launcher is picked below, in the launching section; `manual` is
 // imported here because it is the fallback as well as the default.
 import { type Launcher, type Session, manual } from "./slice-launcher";
+// One gate run per repo at a time, across dispatchers; see gatesPass.
+import { acquire, release } from "./slice-lock";
 // The pure half of the overlap report; the git that feeds it is below, in the
 // overlap section, because only this file knows where a slice's branch is.
 import { findOverlaps, ignores } from "./slice-overlap";
@@ -1040,6 +1042,27 @@ const autoFinished = (n: TicketId) =>
   !occupied(n) && !isWaitingOnLock(n) && commitsAhead(n) > 0;
 
 /**
+ * The gate lock's directory, in the common git dir every worktree shares.
+ * Read once: the main checkout's git dir does not move during a run.
+ */
+let gatesLockDir: string | undefined;
+const gatesLock = () => {
+  gatesLockDir ??= join(
+    run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"]).out,
+    "azelf-gates.lock",
+  );
+  return gatesLockDir;
+};
+
+/**
+ * Gates that passed only on a retry: per slice from its last gate run, and
+ * per LANDED slice for the end of the run. A pass on a retry lands, and the
+ * summary names it, so a flaky suite is seen and not buried.
+ */
+const flakyGates = new Map<TicketId, Flaky[]>();
+const landedOnRetry = new Map<TicketId, Flaky[]>();
+
+/**
  * Re-run the quality gates against a finished slice, in its own worktree,
  * before landing it.
  *
@@ -1057,6 +1080,7 @@ const autoFinished = (n: TicketId) =>
  * gate whatever it reported (enforced in runGates).
  */
 function gatesPass(n: TicketId): boolean {
+  flakyGates.delete(n);
   const wt = worktreeFor(n);
   const fail = (why: string) => {
     console.log(`  ✗ ${ref(n)} not landed — ${why}`);
@@ -1089,15 +1113,51 @@ function gatesPass(n: TicketId): boolean {
     } files) …`,
   );
 
-  const result = runGates(config.gates, {
-    worktree: wt,
-    // The main checkout is the baseline: it sits on the base branch the slice
-    // was just rebased onto, so its errors are exactly the standing debt.
-    baselineDir: repoRoot,
-    changedFiles: changed,
-    exec: (cmd, cwd) => run(cmd, { cwd, allowFail: true }),
+  // One gate run per repo at a time. This process already gates one slice at
+  // a time; the lock stops a second dispatcher's gates running on top of
+  // them, which on consumer-a meant a load average near 30 and green slices
+  // parked on test timeouts. Waits for as long as the holder is running: this
+  // round has nothing to do until its gates have run, and a holder that dies
+  // is taken over. The sessions' own test runs are not covered; that is what
+  // a gate's `retries` is for.
+  acquire(gatesLock(), {
+    pid: process.pid,
+    label: ref(n),
+    onWait: (h) =>
+      console.log(
+        h
+          ? `  waiting for ${h.label}'s gates (another dispatcher, pid ${h.pid}) …`
+          : "  waiting for the gate lock …",
+      ),
+    onTakeover: (h) =>
+      console.log(
+        `  took over the gate lock${
+          h ? ` from ${h.label} (pid ${h.pid})` : ""
+        } — that process is no longer running`,
+      ),
   });
-  if (result.ok) return true;
+  let result: ReturnType<typeof runGates>;
+  try {
+    result = runGates(config.gates, {
+      worktree: wt,
+      // The main checkout is the baseline: it sits on the base branch the slice
+      // was just rebased onto, so its errors are exactly the standing debt.
+      baselineDir: repoRoot,
+      changedFiles: changed,
+      exec: (cmd, cwd) => run(cmd, { cwd, allowFail: true }),
+    });
+  } finally {
+    release(gatesLock(), process.pid);
+  }
+  for (const f of result.flaky) {
+    console.log(
+      `  ⚠ \`${f.gate}\` failed, then passed on retry ${f.retry} — flaky under load`,
+    );
+  }
+  if (result.ok) {
+    if (result.flaky.length) flakyGates.set(n, result.flaky);
+    return true;
+  }
 
   const DETAIL_LINES = 10;
   const detail = result.detail ?? [];
@@ -1856,6 +1916,8 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     );
   }
   landedFiles.set(t.id, landing);
+  const flaky = flakyGates.get(t.id);
+  if (flaky) landedOnRetry.set(t.id, flaky);
   parked.delete(t.id);
   retriesSpent.delete(t.id);
   t.open = false;
@@ -2424,6 +2486,23 @@ for (;;) {
   }
 
   await new Promise((r) => setTimeout(r, intervalMs));
+}
+
+// Landed, but only because a gate was re-run. Before the parked list, which
+// is the part that needs doing; this is the part that needs knowing.
+if (landedOnRetry.size > 0) {
+  console.log(
+    `\n── landed on a retried gate (${landedOnRetry.size}) ─────────────────`,
+  );
+  for (const [id, flaky] of landedOnRetry) {
+    for (const f of flaky) {
+      console.log(`  ${ref(id)}  \`${f.gate}\` passed on retry ${f.retry}`);
+    }
+  }
+  console.log(
+    "\n  Each failed first and passed on a re-run. Find the flaky test before it",
+  );
+  console.log("  hides a real failure the same way.");
 }
 
 /**

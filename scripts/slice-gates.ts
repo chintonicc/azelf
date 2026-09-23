@@ -84,6 +84,19 @@ export type Gate = {
   /** Shown while running and named in the failure line. */
   name: string;
   run: (ctx: GateContext) => GateResult;
+  /**
+   * How many times `runGates` re-runs this gate after it fails, before the
+   * failure counts. 0 when absent. See `runGates` for why it is per gate.
+   */
+  retries?: number;
+};
+
+/** What every gate shape takes besides its command. */
+export type GateOptions = {
+  /** Appended to the failure line: what a human should do about it. */
+  hint?: string;
+  /** Re-runs after a failure, for a gate that is flaky under load. Default 0. */
+  retries?: number;
 };
 
 // ─── the three shapes ─────────────────────────────────────────────────────
@@ -104,10 +117,11 @@ const tail = (out: string, n = 10): string[] =>
  * `hint` is appended to the failure line — the place to say what a human
  * should do about it, in the project's own words.
  */
-export function exitCode(cmd: string[], opts: { hint?: string } = {}): Gate {
+export function exitCode(cmd: string[], opts: GateOptions = {}): Gate {
   const name = cmd.join(" ");
   return {
     name,
+    retries: opts.retries,
     run(ctx) {
       const { ok, out } = ctx.exec(cmd, ctx.worktree);
       if (ok) return { ok: true };
@@ -129,13 +143,11 @@ export function exitCode(cmd: string[], opts: { hint?: string } = {}): Gate {
  * lint and the gate passes without running — running the linter with NO paths
  * would have it check the whole tree, which is a different gate.
  */
-export function exitCodeOverFiles(
-  cmd: string[],
-  opts: { hint?: string } = {},
-): Gate {
+export function exitCodeOverFiles(cmd: string[], opts: GateOptions = {}): Gate {
   const name = cmd.join(" ");
   return {
     name,
+    retries: opts.retries,
     run(ctx) {
       const files = ctx.changedFiles.filter((f) =>
         existsSync(join(ctx.worktree, f)),
@@ -189,8 +201,7 @@ export type BaselineDiffOptions = {
    * read as new. Required, because what counts as position is per-tool too.
    */
   normalize: (line: string) => string;
-  hint?: string;
-};
+} & GateOptions;
 
 /**
  * For tools with a standing baseline of errors, where a non-zero exit is
@@ -231,6 +242,7 @@ export function baselineDiff(opts: BaselineDiffOptions): Gate {
   };
   return {
     name,
+    retries: opts.retries,
     run(ctx) {
       const baseline = errorsIn(ctx, ctx.baselineDir);
       const candidate = errorsIn(ctx, ctx.worktree);
@@ -276,6 +288,12 @@ const unreadable = (worktree: string): GateResult => ({
   why: `could not read the worktree's git status at ${worktree} — refusing to judge what cannot be seen`,
 });
 
+/** A gate that failed and then passed: `retry` is the run that passed, 1-based. */
+export type Flaky = { gate: string; retry: number };
+
+/** What `runGates` answers: the verdict, and which gates passed only on a retry. */
+export type GatesResult = GateResult & { flaky: Flaky[] };
+
 /**
  * Run the gates in order and stop at the first failure.
  *
@@ -284,29 +302,57 @@ const unreadable = (worktree: string): GateResult => ({
  * rather than hoped for. A gate that left the tree dirty fails the land by
  * name — before its own verdict is even considered, because a gate that
  * writes has disqualified itself whatever it concluded.
+ *
+ * A gate with `retries` is re-run after a failure, and the write check runs
+ * after every attempt. Opt-in and per gate, because retrying a deterministic
+ * gate (tsc, a linter) only doubles what a real failure costs. It is for the
+ * test suite under a wave's load: on consumer-a, at a load average near 30, a
+ * 5-second test timeout parked three green slices that never touched the code
+ * under test. A pass on a retry is still a pass, and is reported in `flaky`
+ * so that it is seen, not buried.
  */
-export function runGates(gates: Gate[], ctx: GateContext): GateResult {
+export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
+  const flaky: Flaky[] = [];
   const before = dirtyPaths(ctx);
-  if (before === null) return unreadable(ctx.worktree);
+  if (before === null) return { ...unreadable(ctx.worktree), flaky };
   if (before.length) {
     return {
       ok: false,
       why: "worktree is dirty before any gate ran — commit or revert first",
       detail: before,
+      flaky,
     };
   }
   for (const gate of gates) {
-    const result = gate.run(ctx);
-    const after = dirtyPaths(ctx);
-    if (after === null) return unreadable(ctx.worktree);
-    if (after.length) {
-      return {
-        ok: false,
-        why: `gate \`${gate.name}\` modified the worktree — gates must be read-only (scripts/slice-gates.ts). Revert it, then fix the gate.`,
-        detail: after,
-      };
+    const retries = Math.max(0, Math.floor(gate.retries ?? 0));
+    for (let attempt = 0; ; attempt++) {
+      const result = gate.run(ctx);
+      const after = dirtyPaths(ctx);
+      if (after === null) return { ...unreadable(ctx.worktree), flaky };
+      if (after.length) {
+        return {
+          ok: false,
+          why: `gate \`${gate.name}\` modified the worktree — gates must be read-only (scripts/slice-gates.ts). Revert it, then fix the gate.`,
+          detail: after,
+          flaky,
+        };
+      }
+      if (result.ok) {
+        if (attempt > 0) flaky.push({ gate: gate.name, retry: attempt });
+        break;
+      }
+      if (attempt >= retries) {
+        return {
+          ...result,
+          why: attempt
+            ? `${result.why}, and again on ${attempt} retr${
+                attempt === 1 ? "y" : "ies"
+              }`
+            : result.why,
+          flaky,
+        };
+      }
     }
-    if (!result.ok) return result;
   }
-  return { ok: true };
+  return { ok: true, flaky };
 }

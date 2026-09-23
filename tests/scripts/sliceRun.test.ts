@@ -11,6 +11,7 @@ import {
   runDispatcher,
   sh,
   startDispatcher,
+  startScript,
 } from "./fixture";
 
 /**
@@ -385,5 +386,98 @@ describe("azelf retry", () => {
     const r = azelfRetry(c, "99");
     expect(r.out).toContain("#99: no worktree at");
     expect(r.code).toBe(1);
+  });
+});
+
+/**
+ * Two dispatchers on one repo: each gates one slice at a time already, and
+ * the gate lock stops the second one's gates running on top of the first's.
+ */
+describe("the gate lock", () => {
+  it("waits for another run's gates, naming them, then runs its own", async () => {
+    c = makeConsumer({ worktrees: [40], gate: ["true"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    const lock = join(c.main, ".git", "azelf-gates.lock");
+    const go = join(c.root, "go");
+    // Another dispatcher, as far as the lock can tell: a live process that
+    // holds it for #31 until the test says go.
+    const other = startScript(
+      c.main,
+      `bun ${join(AZELF, "scripts", "slice-lock.ts")} acquire ${lock} --pid $$ --label '#31'
+echo held
+while [ ! -f ${go} ]; do sleep 0.1; done
+bun ${join(AZELF, "scripts", "slice-lock.ts")} release ${lock} --pid $$`,
+    );
+    try {
+      await other.until("held");
+      d = startDispatcher(c, ["--gates", "40"]);
+      await d.until(
+        `waiting for #31's gates (another dispatcher, pid ${other.pid})`,
+      );
+      expect(d.output()).not.toContain("passes every gate");
+
+      writeFileSync(go, "");
+      expect(await d.exited).toBe(0);
+      expect(d.output()).toContain("✓ #40 passes every gate");
+      expect(existsSync(lock)).toBe(false);
+    } finally {
+      writeFileSync(go, "");
+      await other.stop();
+    }
+  }, 60_000);
+});
+
+/**
+ * A gate with `retries` that fails once and then passes lands the slice,
+ * warns on the spot, and is named again when the run ends.
+ */
+describe("a gate that passes on a retry", () => {
+  // Fails the first time it runs in this consumer, passes after. The flag
+  // file is outside the worktree, which a gate must not write to.
+  const FLAKY = [
+    "bash",
+    "-c",
+    "[ -f ../flaked ] || { touch ../flaked; exit 1; }",
+  ];
+
+  it("lands, and the end of the run lists it", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: FLAKY,
+      gateRetries: 1,
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      `⚠ \`${FLAKY.join(
+        " ",
+      )}\` failed, then passed on retry 1 — flaky under load`,
+    );
+    expect(r.out).toContain("landing #40");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("── landed on a retried gate (1)");
+    expect(r.out).toContain(`#40  \`${FLAKY.join(" ")}\` passed on retry 1`);
+  });
+
+  it("parks it without the retry", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: FLAKY,
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain("the gates are red");
+    expect(r.out).not.toContain("landing #40");
+    expect(r.out).not.toContain("landed on a retried gate");
   });
 });

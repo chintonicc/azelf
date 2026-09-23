@@ -1,4 +1,9 @@
-import { execFileSync, spawn, spawnSync } from "node:child_process";
+import {
+  type ChildProcess,
+  execFileSync,
+  spawn,
+  spawnSync,
+} from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -107,6 +112,8 @@ export function makeConsumer(opts: {
   review?: string[];
   /** One landing gate, as `exitCode(gate)`; none when absent. */
   gate?: string[];
+  /** The gate's `retries`. */
+  gateRetries?: number;
   /** What the fake tracker answers for every ticket, or by id. */
   title?: string;
   titles?: Record<string, string>;
@@ -215,7 +222,15 @@ export default {
   readyLabel: "ready",
   exclusiveLockPaths: ${JSON.stringify(lockPaths)},
   provisionCopy: [],
-  gates: ${opts.gate ? `[exitCode(${JSON.stringify(opts.gate)})]` : "[]"},
+  gates: ${
+    opts.gate
+      ? `[exitCode(${JSON.stringify(opts.gate)}${
+          opts.gateRetries === undefined
+            ? ""
+            : `, { retries: ${opts.gateRetries} }`
+        })]`
+      : "[]"
+  },
   startPrompt: "x",${agent}${opts.configExtra ? `\n  ${opts.configExtra}` : ""}
 } satisfies SliceConfig;
 `,
@@ -297,6 +312,8 @@ export type Dispatcher = {
   exited: Promise<number>;
   /** SIGTERM it if it is still running; resolves with the exit code. */
   stop: () => Promise<number>;
+  /** Its pid. */
+  pid: number;
 };
 
 /**
@@ -305,16 +322,36 @@ export type Dispatcher = {
  * Every test that starts one stops it, finished or not.
  */
 export function startDispatcher(c: Consumer, args: string[]): Dispatcher {
-  const child = spawn("bun", [DISPATCHER, ...args], {
-    cwd: c.main,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: dispatcherEnv(c),
-  });
+  return watch(
+    spawn("bun", [DISPATCHER, ...args], {
+      cwd: c.main,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: dispatcherEnv(c),
+    }),
+    "the dispatcher",
+  );
+}
+
+/**
+ * A bash script left running in the background, with the same handle as a
+ * dispatcher: for two scripts that have to overlap, like two lands.
+ */
+export function startScript(cwd: string, script: string): Dispatcher {
+  return watch(
+    spawn("bash", ["-c", `set -euo pipefail\n${script}`], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+    "the script",
+  );
+}
+
+function watch(child: ChildProcess, what: string): Dispatcher {
   let out = "";
-  child.stdout.on("data", (d) => {
+  child.stdout?.on("data", (d) => {
     out += d;
   });
-  child.stderr.on("data", (d) => {
+  child.stderr?.on("data", (d) => {
     out += d;
   });
   let done = false;
@@ -330,9 +367,7 @@ export function startDispatcher(c: Consumer, args: string[]): Dispatcher {
     const deadline = Date.now() + timeoutMs;
     while (!seen(want)) {
       if (done) {
-        throw new Error(
-          `the dispatcher exited without printing ${want}:\n${out}`,
-        );
+        throw new Error(`${what} exited without printing ${want}:\n${out}`);
       }
       if (Date.now() > deadline) {
         throw new Error(`timed out waiting for ${want}:\n${out}`);
@@ -344,5 +379,5 @@ export function startDispatcher(c: Consumer, args: string[]): Dispatcher {
     if (!done) child.kill("SIGTERM");
     return exited;
   };
-  return { output: () => out, until, exited, stop };
+  return { output: () => out, until, exited, stop, pid: child.pid ?? -1 };
 }

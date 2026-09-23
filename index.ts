@@ -15,7 +15,13 @@
 export type { Agent, Which } from "./scripts/slice-agent";
 export { claude, codex, custom } from "./scripts/slice-agent";
 
-export type { Gate, GateResult } from "./scripts/slice-gates";
+export type {
+  Flaky,
+  Gate,
+  GateOptions,
+  GateResult,
+  GatesResult,
+} from "./scripts/slice-gates";
 export {
   baselineDiff,
   exitCode,

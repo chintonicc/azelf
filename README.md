@@ -38,6 +38,8 @@ session in each, and lands the finished ones — re-running the gates itself, be
   - [Quieting the paths that never matter](#quieting-the-paths-that-never-matter)
 - [When a slice will not land](#when-a-slice-will-not-land)
   - [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict)
+  - [What retries a parked slice](#what-retries-a-parked-slice)
+- [Two dispatchers on one repo](#two-dispatchers-on-one-repo)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
 - [Runtime and limitations](#runtime-and-limitations)
@@ -338,6 +340,21 @@ the multiset difference. A duplicate of an existing error counts as new.
 
 `normalize` is what makes the comparison stable: inserting one line shifts every
 error position below it, so `(line,col)` has to go before the sets are compared.
+
+Every shape also takes `retries`, the number of times to re-run the gate after it
+fails before the failure counts:
+
+```ts
+exitCode(["bun", "run", "test"], { retries: 1 })
+```
+
+It is for a test suite that is flaky under a wave's load. On consumer-a, at a load
+average near 30, a 5-second test timeout parked three green slices whose changes
+had nothing to do with the test that failed. It is off by default, because re-running a
+deterministic gate (tsc, a linter) only doubles what a real failure costs. A slice
+that passes on a retry still lands, but it is not hidden: the dispatcher prints
+``⚠ `bun run test` failed, then passed on retry 1 — flaky under load`` on the spot,
+and the end of the run lists every slice that landed that way.
 
 ### Tracker
 
@@ -862,6 +879,39 @@ dispatcher again is the retry — a new run starts with nothing parked. It ends 
 naming every parked slice and exits non-zero, because "the run ended" and "the work
 is done" are different things.
 
+## Two dispatchers on one repo
+
+A second dispatcher can run a different set of tickets while the first is still
+going, say `azelf run 31 32` next to `azelf run --auto 24 25`. Give each run its own
+tickets. Each lands one slice per round, which keeps its own lands apart and nobody
+else's, so two locks in the common git dir keep the runs off each other:
+
+| lock | taken by | held for | when it is taken |
+| --- | --- | --- | --- |
+| `azelf-land.lock` | `slice-land.sh`, whoever runs it | the whole land: fast-forward, push, cleanup, ticket close | waits up to five minutes, then refuses |
+| `azelf-gates.lock` | a dispatcher's gate run, and `azelf run --gates` | one slice's gates | waits as long as the holder is running |
+
+```
+  waiting for ticket/41's land (pid 48213, since 14:02:11) …
+  waiting for #31's gates (another dispatcher, pid 48190) …
+```
+
+The land lock is in the script and not in the dispatcher, because a land by hand
+races a running wave just as much. With it, the second of two lands waits. Then it
+either lands or refuses as "diverged", which a dispatcher parks and retries when the
+base moves. Without it, two `git merge`s fail on git's `index.lock`, and that reads as
+a broken land.
+
+The gate lock is about load. A single dispatcher already runs one slice's gates at a
+time; without the lock, a second dispatcher's gates run on top of them. It does not
+cover the test runs the sessions start themselves, which is what a gate's
+[`retries`](#gates) is for.
+
+A lock whose holder is no longer running (it crashed, or was killed) is taken over by
+the next process that wants it, with a line saying so. "Running" means the pid and the
+process's start time both match, so a reused pid does not keep a dead lock held.
+There is nothing to clean up by hand.
+
 ## In a coding agent
 
 `init` writes two prompt-shaped files into the repo, so every session in the project
@@ -943,6 +993,11 @@ rather than opening anything, and it is the default.
 **A ticket never leaves the plan.**
 It has an open blocker. `azelf run --plan` prints the reason for every held ticket.
 
+**A land or a gate run says "waiting for …" and does not move.**
+Another process holds the land or gate lock, and the line names it by ticket and pid.
+If that process is stuck, end it: a lock whose holder has exited is taken over. See
+[Two dispatchers on one repo](#two-dispatchers-on-one-repo).
+
 **Marker files show up as untracked.**
 `init` writes them to `.git/info/exclude`, which is per-checkout and not inherited
 by a fresh clone. Re-run `azelf init` there.
@@ -956,6 +1011,7 @@ scripts/
   slice-run.ts          the dispatcher — waves, launching, landing, escalation
   slice-config.ts       the loader: finds and validates slice.config.ts
   slice-gates.ts        the gate contract and its three shapes
+  slice-lock.ts         the land and gate locks: taken whole, taken over from the dead
   slice-tracker.ts      the tracker contract and github()
   slice-overlap.ts      which live slices are editing the same files
   slice-launcher.ts     the launcher contract, manual/warp/tmux, autostart probe
