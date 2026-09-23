@@ -1,13 +1,14 @@
 # What consumer-a's 2026-09-23 waves tripped over
 
-**Status:** open · **Written:** 2026-09-23
+**Status:** Phase 1 LANDED 2026-09-23 · Phases 2–3 open · **Written:** 2026-09-23
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), `scripts/slice-resolve.ts` header, `docs/tab-close-plan.md` (same day, same
 waves).
 
 Written so it can be picked up cold. Each item says what to change, where, why, and what
 proves it. Tick the boxes as they land and add the commit hash after the heading. Line
-numbers are as of `a3899a5`.
+numbers are as of `a3899a5`; Phase 1 moved `slice-run.ts` by about 100 lines, so search
+Phases 2–3's references by name.
 
 ## What happened
 
@@ -48,7 +49,7 @@ end for the next one.
 
 ## Phase 1 — the everyday failures
 
-- [ ] **1a. A dispatcher test harness.** Every later item changes `slice-run.ts`, and
+- [x] **1a. A dispatcher test harness.** (`f34aae2`) Every later item changes `slice-run.ts`, and
   nothing tests it end to end (Phase 2 of the DB-lock plan was proven by a scratch dry
   run). In `tests/scripts/fixture.ts`:
   - The fake tracker reads titles, bodies and states from a JSON file under `root` on
@@ -63,7 +64,7 @@ end for the next one.
   *Proof:* one smoke test. A worktree with a commit and `.slice-ready-to-land`, then
   `--auto --once -y --no-review 40`, lands and closes the ticket.
 
-- [ ] **1b. The resolver edits; azelf runs the git.** In `resolveConflict`
+- [x] **1b. The resolver edits; azelf runs the git.** (`f34aae2`) In `resolveConflict`
   (`slice-run.ts:1256`), replace the single resolver call with a loop over the rebase's
   stops. While a rebase is in progress:
   1. Read the unmerged paths (`git diff --name-only --diff-filter=U`).
@@ -100,8 +101,8 @@ end for the next one.
     no rebase in progress.
   - The resolver also edits an unrelated file: rejected as dirty.
 
-- [ ] **1c. `session-commit.sh` takes deletions and renames, and refuses before it
-  stages.**
+- [x] **1c. `session-commit.sh` takes deletions and renames, and refuses before it
+  stages.** (`0623602`)
   - **Deletions and renames.** Before `git add` (`:162`), leave out each path that is
     absent from the worktree, absent from the index (`git ls-files --error-unmatch`
     fails), and present in `HEAD` (`git ls-tree -r --name-only HEAD -- <path>` is
@@ -121,11 +122,28 @@ end for the next one.
   - a misspelt path is still refused;
   - a run without `-y` and without a terminal exits 1 with `git diff --cached` empty.
 
-- [ ] **1d. The skill says `-y`.** Section 4 of both `agent/skills/slice/SKILL.md` and
+- [x] **1d. The skill says `-y`.** (`0623602`) Section 4 of both `agent/skills/slice/SKILL.md` and
   `.claude/skills/slice/SKILL.md` becomes
   `./scripts/session-commit.sh -y -m "..." <paths>`, plus one sentence: a slice session
   never has a terminal, and without `-y` the script refuses. The README's cheat sheet
   already shows `-y`.
+
+**As landed, where it differs from the above:**
+- 1a: the resolver and reviewer argv are fixture options of their own (`resolve`,
+  `review`), not fields of `agent`; either one alone gives the config a fake agent
+  whose session command is `true`. The fake tracker's `close` also marks the ticket
+  closed in its file, as a real one would. `runDispatcher` and `startDispatcher` are
+  the two runners, and the tests are in `tests/scripts/sliceRun.test.ts`: the smoke
+  test, one multi-round test (`slice-done.sh` run while the dispatcher is waiting),
+  and the four resolver tests.
+- 1b: stray edits are caught by a per-stop check (`stopProblem` in
+  `slice-resolve.ts`), not by the final dirty check. Checked 2026-09-23: with an
+  unrelated file modified, `git rebase --continue` refuses with "You must edit all
+  merge conflicts and then mark them as resolved using git add", so the dirty check
+  never ran and the reason would have named the wrong file. Each stop's prompt names
+  the commit being replayed (`REBASE_HEAD`), and a resolution that empties a commit
+  is fine: `--continue` drops it (checked the same day).
+- 1d: `slice-done.sh`'s "commit first" hint shows `-y` too.
 
 ## Phase 2 — a parked slice retries when the reason it parked changes
 
