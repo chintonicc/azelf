@@ -36,12 +36,17 @@ function session(opts: Parameters<typeof makeConsumer>[0]) {
 }
 
 describe("slice-session.sh names the tab", () => {
-  it("parent › ticket title by default, and keeps Claude Code from renaming it", () => {
+  it("ticket first, then the shortened spec, and keeps Claude Code from renaming it", () => {
     const { out, agentEnv } = session({
-      title: "Add export button",
+      titles: {
+        "40": "Filter pills on the feed",
+        "17": "Spec: home becomes a feed, Connections becomes Library",
+      },
       body: "Some text.\n\n## Parent\n\n#17\n",
     });
-    expect(out).toContain(OSC("#17 › #40 Add export button"));
+    expect(out).toContain(
+      OSC("#40 Filter pills on the feed · #17 home becomes a feed"),
+    );
     expect(agentEnv).toBe("1");
   });
 
@@ -60,10 +65,13 @@ describe("slice-session.sh names the tab", () => {
     const { out } = session({
       title: "Add export button",
       body: "## Parent\n#17\n",
+      titles: { "17": "Spec: video mode — tap to record" },
       configExtra:
-        "tabTitle: ({ ref, title, parentRef }) => `[${parentRef}] ${title} (${ref})`,",
+        "tabTitle: ({ ref, title, parentRef, parentTitle }) => `[${parentRef} ${parentTitle}] ${title} (${ref})`,",
     });
-    expect(out).toContain(OSC("[#17] Add export button (#40)"));
+    expect(out).toContain(
+      OSC("[#17 Spec: video mode — tap to record] Add export button (#40)"),
+    );
   });
 
   it("control characters in a tracker title never reach the terminal, in the title or the log", () => {
@@ -94,5 +102,25 @@ describe("slice-session.sh names the tab", () => {
     );
     expect(r.ok).toBe(false);
     expect(r.out).toContain("tabTitle must be a function");
+  });
+});
+
+describe("shortSpecTitle", () => {
+  it("drops the label and cuts at the first break", async () => {
+    // Imported here, not at the top: slice-config.ts loads the consumer
+    // config on import, and this repo's own config is the one it finds.
+    const { shortSpecTitle } = await import("@/scripts/slice-config");
+    expect(
+      shortSpecTitle("Spec: home becomes a feed, Connections becomes Library"),
+    ).toBe("home becomes a feed");
+    expect(
+      shortSpecTitle("Log polls: a question addressed to them, attached"),
+    ).toBe("Log polls");
+    expect(shortSpecTitle("Spec: video mode — tap to record")).toBe(
+      "video mode",
+    );
+    expect(shortSpecTitle("Epic - the whole thing")).toBe("Epic");
+    expect(shortSpecTitle("Plain title")).toBe("Plain title");
+    expect(shortSpecTitle(": odd")).toBe(": odd");
   });
 });

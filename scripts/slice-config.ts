@@ -148,10 +148,16 @@ export type SliceConfig = {
   /**
    * What a slice's terminal tab is called, or `false` to leave it alone.
    *
-   * Left out, a tab reads `#17 › #42 Add export button`: the parent ticket
-   * (the spec it hangs under, from the `## Parent` section, when it names
-   * one), then the ticket and its title. Without this every slice tab reads
-   * "Claude Code", and a wave of five is five identical tabs.
+   * Left out, a tab reads `#42 Add export button · #17 home becomes a feed`:
+   * the ticket and its title, then the parent (the spec it hangs under, from
+   * the `## Parent` section, when it names one) with its title shortened by
+   * `shortSpecTitle`. Without this every slice tab reads "Claude Code", and a
+   * wave of five is five identical tabs.
+   *
+   * The ticket comes FIRST because a tab shows about twenty characters and
+   * cuts the rest: slices of one spec share a parent, so a parent-first title
+   * made them identical again in exactly the place the name was meant to tell
+   * them apart. Widen the tab bar to see the spec.
    *
    * slice-session.sh prints it as a terminal title just before the agent
    * starts and sets CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 for the agent, since
@@ -159,19 +165,48 @@ export type SliceConfig = {
    * summary is what you give up here; `false` keeps it.
    *
    *   tabTitle: ({ ref, title }) => `${ref} ${title}`
+   *   tabTitle: ({ ref, title, parentRef, parentTitle }) =>
+   *     `${parentTitle ?? ""} › ${ref} ${title}`
    */
   tabTitle?: false | ((t: TabTitleInfo) => string);
 };
 
-/** What a `tabTitle` function is handed. `parentRef` is `null` without a parent. */
+/**
+ * What a `tabTitle` function is handed. The parent fields are `null` without a
+ * parent; `parentTitle` is also `null` when the tracker could not answer for
+ * it, and is the parent's full title — shortening is the default's choice.
+ */
 export type TabTitleInfo = {
   ref: string;
   title: string;
   parentRef: string | null;
+  parentTitle: string | null;
 };
 
-export const defaultTabTitle = ({ ref, title, parentRef }: TabTitleInfo) =>
-  `${parentRef ? `${parentRef} › ` : ""}${ref} ${title}`;
+/**
+ * A spec's title, cut to what fits beside a ticket in a tab: the leading
+ * `Spec:` / `Epic:` / `PRD:` label goes, then everything from the first `:`,
+ * `—`, `–`, `,` or ` - ` on. "Spec: home becomes a feed, Connections becomes
+ * Library" is "home becomes a feed"; "Log polls: a question addressed to them"
+ * is "Log polls". A title that would cut to nothing is kept whole.
+ */
+export const shortSpecTitle = (t: string): string => {
+  const unlabelled = t.replace(/^\s*(spec|epic|prd)\s*:\s*/i, "");
+  const cut = unlabelled.split(/\s*(?::|—|–|,|\s-\s)/)[0]?.trim() ?? "";
+  return cut || unlabelled.trim();
+};
+
+export const defaultTabTitle = ({
+  ref,
+  title,
+  parentRef,
+  parentTitle,
+}: TabTitleInfo) =>
+  `${ref} ${title}${
+    parentRef
+      ? ` · ${parentRef}${parentTitle ? ` ${shortSpecTitle(parentTitle)}` : ""}`
+      : ""
+  }`;
 
 /**
  * Tracker text headed for a terminal — the tab title's escape sequence, and
@@ -370,7 +405,7 @@ function validate(c: SliceConfig): SliceConfig {
     typeof c.tabTitle !== "function"
   ) {
     bad(
-      "tabTitle must be a function ({ ref, title, parentRef }) => string, or false to leave the tab's title alone",
+      "tabTitle must be a function ({ ref, title, parentRef, parentTitle }) => string, or false to leave the tab's title alone",
     );
   }
   if (c.wrapCommand !== undefined) {
@@ -556,6 +591,16 @@ function trackerCli(args: string[]): never {
         if (config.tabTitle === false) break;
         const t = tracker.get(id);
         const parent = parentFromBody(tracker.body(id), tracker.idPattern);
+        // The parent's title is a second tracker call, and the one that may
+        // fail without costing the tab its name: it falls back to the ref.
+        let parentTitle: string | null = null;
+        if (parent) {
+          try {
+            parentTitle = tracker.get(parent).title;
+          } catch {
+            // Left null: the default then shows the parent's ref alone.
+          }
+        }
         const make = config.tabTitle ?? defaultTabTitle;
         console.log(
           terminalSafe(
@@ -563,6 +608,7 @@ function trackerCli(args: string[]): never {
               ref: ref(id),
               title: t.title,
               parentRef: parent ? ref(parent) : null,
+              parentTitle,
             }),
           ),
         );

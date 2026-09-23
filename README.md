@@ -527,18 +527,23 @@ Every slice tab used to read "Claude Code", so a wave of five was five identical
 tabs. `slice-session.sh` now titles the tab just before the agent starts —
 
 ```
-#17 › #42 Add export button
+#30 Filter pills on the feed · #22 home becomes a feed
 ```
 
-— the parent ticket (the spec it hangs under, from its `## Parent` section) when it
-names one, then the ticket and its title. It is an ordinary terminal title (OSC 2),
+— the ticket and its title, then the parent (the spec it hangs under, from its
+`## Parent` section) when it names one, its title shortened: a leading `Spec:` goes,
+and so does everything from the first `:`, `—` or `,`. The ticket comes first
+because a tab shows about twenty characters; slices of one spec share a parent, so
+a parent-first title made them identical again. Widen the tab bar to read the spec.
+It is an ordinary terminal title (OSC 2),
 so Warp, iTerm, Terminal.app and tmux all show it, and a tab you renamed by hand
 keeps your name. Claude Code retitles the tab itself as it works, so the session
 also sets `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` for the agent: you trade its
 running summary for a fixed ticket name. To change the text, or keep Claude's:
 
 ```ts
-tabTitle: ({ ref, title, parentRef }) => `${ref} ${title}`,
+tabTitle: ({ ref, title }) => `${ref} ${title}`,
+tabTitle: ({ ref, title, parentTitle }) => `${parentTitle ?? ""} › ${ref} ${title}`,
 tabTitle: false,
 ```
 

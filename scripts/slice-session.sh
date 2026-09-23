@@ -436,8 +436,9 @@ fi
 # Every slice tab used to read "Claude Code", which is what the agent calls
 # the terminal, so a wave of five was five identical tabs. OSC 2 sets the
 # title — Warp, iTerm, Terminal.app and tmux (as the pane title) all read it.
-# The text is slice.config.ts's `tabTitle`: `#17 › #42 <title>` by default,
-# the parent ticket being the spec this slice hangs under. Empty means the
+# The text is slice.config.ts's `tabTitle`: by default `#42 <title> · #17
+# <spec, shortened>`, the parent being the spec this slice hangs under, and
+# the ticket first because a tab cuts the rest off. Empty means the
 # consumer turned it off, and a tracker that cannot answer costs the tab its
 # name and nothing else — never fatal.
 #

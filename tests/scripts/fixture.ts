@@ -79,8 +79,9 @@ export function makeConsumer(opts: {
    * `node_modules` ignored so the worktree still removes cleanly.
    */
   agent?: string[];
-  /** What the fake tracker answers for every ticket. */
+  /** What the fake tracker answers for every ticket, or by id. */
   title?: string;
+  titles?: Record<string, string>;
   body?: string;
   /** Raw lines added to the config object, e.g. `tabTitle: false,`. */
   configExtra?: string;
@@ -133,7 +134,9 @@ const tracker: Tracker = {
   idPattern: "^[0-9]+$",
   refTemplate: "#{n}",
   listReady: () => [],
-  get: (id) => ({ id, title: ${JSON.stringify(opts.title ?? "t")}, state: "open", labels: ["ready"], url: "" }),
+  get: (id) => ({ id, title: (${JSON.stringify(
+    opts.titles ?? {},
+  )} as Record<string, string>)[id] ?? ${JSON.stringify(opts.title ?? "t")}, state: "open", labels: ["ready"], url: "" }),
   blockers: () => [],
   body: () => ${JSON.stringify(opts.body ?? "")},
   close: (id, comment) =>
