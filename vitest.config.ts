@@ -10,4 +10,9 @@ export default defineConfig({
   resolve: {
     alias: { "@": fileURLToPath(new URL(".", import.meta.url)) },
   },
+  // The tests under tests/scripts run the real shell scripts in a temp
+  // consumer, and every config read starts bun. They take one to three
+  // seconds alone and passed the 5s default only until the files ran
+  // side by side with one that launches real sessions.
+  test: { testTimeout: 30_000 },
 });

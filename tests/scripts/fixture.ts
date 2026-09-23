@@ -2,6 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { EXCLUDE_BLOCK } from "../../scripts/slice-init";
 
 /**
  * A throwaway consumer checkout the shell scripts can run in for real: a git
@@ -71,6 +72,13 @@ export function makeConsumer(opts: {
   worktrees?: number[];
   /** Add a bare `origin` with `main` pushed — slice-land.sh needs one. */
   remote?: boolean;
+  /**
+   * The agent's `sessionCommand`, written as `custom({ name: "fake", … })`,
+   * so `slice-session.sh` can launch a real process the test controls. Also
+   * commits the `package.json` its `bun install` step needs, with
+   * `node_modules` ignored so the worktree still removes cleanly.
+   */
+  agent?: string[];
 }): Consumer {
   // Resolved, because git prints worktree paths canonicalized and macOS's
   // tmpdir is a symlink.
@@ -84,6 +92,9 @@ export function makeConsumer(opts: {
   // commit` — the `-c` flags on `git()` above only cover the test's own calls.
   git(main, "config", "user.email", "t@t");
   git(main, "config", "user.name", "t");
+  // The marker excludes `init` writes, so a worktree holding a session's
+  // markers still removes cleanly, as it does in a real consumer.
+  writeFileSync(join(main, ".git", "info", "exclude"), EXCLUDE_BLOCK);
   mkdirSync(join(main, "scripts"));
   for (const s of ["slice-config.sh", "db-lock-check.sh"]) {
     writeFileSync(
@@ -96,6 +107,7 @@ export function makeConsumer(opts: {
     "slice-land.sh",
     "session-commit.sh",
     "db-lock.sh",
+    "slice-session.sh",
   ]) {
     writeFileSync(
       join(main, "scripts", s),
@@ -108,7 +120,7 @@ export function makeConsumer(opts: {
   writeFileSync(
     join(main, "slice.config.ts"),
     `import { appendFileSync } from "node:fs";
-import type { SliceConfig, Tracker } from ${JSON.stringify(
+import { custom, type SliceConfig, type Tracker } from ${JSON.stringify(
       join(AZELF, "index.ts"),
     )};
 const tracker: Tracker = {
@@ -116,7 +128,7 @@ const tracker: Tracker = {
   idPattern: "^[0-9]+$",
   refTemplate: "#{n}",
   listReady: () => [],
-  get: (id) => ({ id, title: "t", state: "open", labels: [], url: "" }),
+  get: (id) => ({ id, title: "t", state: "open", labels: ["ready"], url: "" }),
   blockers: () => [],
   body: () => "",
   close: (id, comment) =>
@@ -131,13 +143,23 @@ export default {
   exclusiveLockPaths: ${JSON.stringify(lockPaths)},
   provisionCopy: [],
   gates: [],
-  startPrompt: "x",
+  startPrompt: "x",${
+    opts.agent
+      ? `\n  agent: custom({ name: "fake", sessionCommand: ${JSON.stringify(
+          opts.agent,
+        )} }),`
+      : ""
+  }
 } satisfies SliceConfig;
 `,
   );
   for (const p of lockPaths) {
     mkdirSync(join(main, p), { recursive: true });
     writeFileSync(join(main, p, ".keep"), "");
+  }
+  if (opts.agent) {
+    writeFileSync(join(main, "package.json"), '{ "name": "fx" }\n');
+    writeFileSync(join(main, ".gitignore"), "node_modules/\n");
   }
   git(main, "add", "-A");
   git(main, "commit", "-qm", "init");

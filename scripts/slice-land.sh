@@ -4,6 +4,8 @@
 # up its worktree.
 #
 #   ./scripts/slice-land.sh 123
+#   ./scripts/slice-land.sh 123 --end-session   # also end the agent still
+#                                                # sitting in the removed worktree
 #
 # WHY THIS EXISTS
 # ---------------
@@ -21,8 +23,17 @@
 
 set -euo pipefail
 
-ticket="${1:-}"
-[[ -n "$ticket" ]] || { echo "usage: ${AZELF_INVOKED_AS:-$0} <ticket-id>" >&2; exit 64; }
+usage() { echo "usage: ${AZELF_INVOKED_AS:-$0} <ticket-id> [--end-session]" >&2; exit 64; }
+ticket=""
+end_session=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --end-session) end_session=true; shift ;;
+    -*) usage ;;
+    *) [[ -z "$ticket" ]] || usage; ticket="$1"; shift ;;
+  esac
+done
+[[ -n "$ticket" ]] || usage
 
 # The CONSUMER repo's root — not this package's.
 #
@@ -231,6 +242,48 @@ fi
 # the work is landed and pushed by this point, and there is nothing left in
 # there to lose — but the shell holding the tab open cannot know that, and
 # neither could you.
+#
+# ─── Ending it, under --end-session ────────────────────────────────────────
+#
+# The dispatcher passes --end-session under --auto only, where nobody is
+# reading that tab. Ending the agent lets slice-session.sh resume, see its
+# worktree gone, and exit 86 — which is what closes the tab (see "Closing the
+# tab" there). Without the flag, or by hand, the line above stays advice.
+#
+# THREE CONDITIONS, CHECKED WHERE THIS IS CALLED, AND EACH ONE MATTERS:
+#  - After the removal SUCCEEDED, never before. The moment the agent dies the
+#    session tests whether its directory still exists; a removal still in
+#    flight would read as present, and the session would keep its tab. And a
+#    refused removal means the directory stays, so the tab is still the place
+#    to look — killing the agent would only make it harder to read.
+#  - The pid passed the `ps` check: it is a slice session, not a reused pid.
+#  - The session DECLARED done. One that never ran slice-done.sh is being
+#    landed out from under it, and its tab may hold the only explanation.
+#
+# The pid is the bash running slice-session.sh; the agent is its direct child,
+# so the signal goes to the children and never to that shell, which has to
+# survive to exit 86. Under wrapCommand the direct child is the wrapper
+# rather than the agent: TERM to the wrapper is still the right signal, and
+# the KILL fallback covers one that does not forward it. Never fatal — the
+# land is pushed by now, and the worst case is the tab you close by hand.
+end_agent_under() {
+  local session=$1 waited=0
+  pkill -TERM -P "$session" 2>/dev/null || true
+  while pgrep -P "$session" >/dev/null 2>&1 && [[ $waited -lt 10 ]]; do
+    sleep 0.5
+    waited=$((waited + 1))
+  done
+  if pgrep -P "$session" >/dev/null 2>&1; then
+    pkill -KILL -P "$session" 2>/dev/null || true
+    sleep 0.5
+  fi
+  if pgrep -P "$session" >/dev/null 2>&1; then
+    echo "    could not end the agent under pid $session — close that tab yourself."
+  else
+    echo "    ended the agent in that tab — the session exits and the tab closes."
+  fi
+}
+
 echo "── cleaning up ────────────────────────────────────────"
 session_pid=""
 session_declared_done=true
@@ -255,7 +308,10 @@ if [[ -d "$worktree_path" ]]; then
       echo
       echo "⚠️  the session for $ticket_ref is still running (pid $session_pid),"
       echo "    and the directory it is sitting in has just been removed."
-      if $session_declared_done; then
+      if $session_declared_done && $end_session; then
+        echo "    It finished and marked itself done; it just never left its REPL."
+        end_agent_under "$session_pid"
+      elif $session_declared_done; then
         echo "    It finished and marked itself done; it just never left its REPL."
         echo "    Nothing is lost — close that tab."
       else

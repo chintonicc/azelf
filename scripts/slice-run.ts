@@ -1521,10 +1521,16 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
   // reaches the base branch — and so a slice that never got past the gates
   // contributes nothing.
   const landing = changedFiles(t.id);
-  const { ok } = run(["./scripts/slice-land.sh", t.id], {
-    inherit: true,
-    allowFail: true,
-  });
+  // `--end-session` under --auto only: the session in that tab was launched
+  // with --self-land, nobody is reading it, and ending its agent after the
+  // removal is what lets the tab close. A manual land never ends a session.
+  const { ok } = run(
+    ["./scripts/slice-land.sh", t.id, ...(autoLand ? ["--end-session"] : [])],
+    {
+      inherit: true,
+      allowFail: true,
+    },
+  );
   if (!ok) {
     return park(
       t,

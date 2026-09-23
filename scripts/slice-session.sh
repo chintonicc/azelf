@@ -451,10 +451,18 @@ launch ${SLICE_WRAP_COMMAND[@]+"${SLICE_WRAP_COMMAND[@]}"} \
 #    report in this tab and run ./scripts/slice-done.sh in this tab. Closing it
 #    would throw away the report before it had been read, which is the whole
 #    reason a non-auto run has a tab at all.
-#  - The agent exited CLEANLY. A crashed agent — no API key, a wrapper that
-#    blocked the network, an interrupted run — is the one case where the tab
-#    holds the only copy of what went wrong, and a tab that vanishes on failure
-#    turns a legible error into a slice that silently never started.
+#  - The agent exited CLEANLY, or its worktree was landed and removed out from
+#    under it. A crashed agent — no API key, a wrapper that blocked the
+#    network, an interrupted run — is the one case where the tab holds the only
+#    copy of what went wrong, and a tab that vanishes on failure turns a
+#    legible error into a slice that silently never started.
+#
+#    The second half exists because a finished Claude session commonly sits at
+#    its REPL and never exits at all, so under --auto the dispatcher runs
+#    `slice-land.sh --end-session`, which removes this worktree and THEN ends
+#    the agent. That agent exits on a signal, not 0 — but the directory is gone,
+#    and only a land that has already pushed removes it. A crash leaves the
+#    directory in place, so a crash still keeps its tab.
 #
 # Why a status and not a marker file: the dispatcher deletes this worktree
 # seconds after it lands the branch, so anything written here is racing that
@@ -465,6 +473,10 @@ launch ${SLICE_WRAP_COMMAND[@]+"${SLICE_WRAP_COMMAND[@]}"} \
 # clear of 128+, which is a signal.
 if $self_land && [[ $agent_status -eq 0 ]]; then
   echo "── session over — closing this tab ────────────────────"
+  exit 86
+fi
+if $self_land && [[ ! -d "$worktree_path" ]]; then
+  echo "── worktree was landed and removed — closing this tab ─"
   exit 86
 fi
 exit $agent_status
