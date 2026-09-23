@@ -120,6 +120,12 @@ export function makeConsumer(opts: {
   body?: string;
   /** Raw lines added to the config object, e.g. `tabTitle: false,`. */
   configExtra?: string;
+  /**
+   * Start sessions for real: a launcher that spawns each session's command
+   * in its worktree, detached, where `manual()` only prints it. For the
+   * tests that need `slice-session.sh` itself to run after a prep.
+   */
+  launch?: boolean;
 }): Consumer {
   // Resolved, because git prints worktree paths canonicalized and macOS's
   // tmpdir is a symlink.
@@ -181,9 +187,26 @@ export function makeConsumer(opts: {
             : ""
         } }),`
       : "";
+  // Detached and unreferenced, so a `--once` dispatcher exits while the
+  // session it started carries on, as it would in a terminal tab.
+  const launcher = opts.launch
+    ? `
+  launcher: {
+    name: "direct",
+    starts: "command",
+    startingGraceMs: 5_000,
+    problem: () => null,
+    open: (ss) =>
+      ss.map((s) => {
+        spawn(s.cmd[0], s.cmd.slice(1), { cwd: s.dir, stdio: "ignore", detached: true }).unref();
+        return \`started \${s.ref}\`;
+      }),
+  },`
+    : "";
   writeFileSync(
     join(main, "slice.config.ts"),
-    `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+    `import { spawn } from "node:child_process";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringify(
       join(AZELF, "index.ts"),
     )};
@@ -231,7 +254,9 @@ export default {
         })]`
       : "[]"
   },
-  startPrompt: "x",${agent}${opts.configExtra ? `\n  ${opts.configExtra}` : ""}
+  startPrompt: "x",${agent}${launcher}${
+    opts.configExtra ? `\n  ${opts.configExtra}` : ""
+  }
 } satisfies SliceConfig;
 `,
   );
@@ -271,6 +296,27 @@ export default {
     lockDir: join(main, ".git", "azelf-db.lock"),
     lockLog: join(main, ".git", "azelf-db.log"),
   };
+}
+
+/**
+ * A process the dispatcher takes for ticket `n`'s session: its command line is
+ * a `slice-session.sh` with the ticket as an argument, and its pid is in that
+ * worktree's `.slice-live`, as a real session writes it. It runs until
+ * stopped. A made-up pid in the marker no longer does: the dispatcher reads
+ * one that is not a running session as a crash.
+ */
+export function fakeSession(c: Consumer, n: number): Dispatcher {
+  const script = join(c.root, "slice-session.sh");
+  writeFileSync(script, "while :; do sleep 0.2; done\n");
+  const s = watch(
+    spawn("bash", [script, String(n)], {
+      cwd: c.root,
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+    "the fake session",
+  );
+  writeFileSync(join(c.wt(n), ".slice-live"), `${s.pid}\n`);
+  return s;
 }
 
 const DISPATCHER = join(AZELF, "scripts", "slice-run.ts");

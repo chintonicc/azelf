@@ -531,8 +531,8 @@ const READY_MARKER = ".slice-ready-to-land";
  *
  *  - hasWorktree   — prepped. Decides whether a slice can be LANDED.
  *  - hasSession    — a session is actually open, via the `.slice-live` marker
- *                    slice-session.sh writes at launch. Decides whether a SLOT
- *                    is taken.
+ *                    slice-session.sh writes at launch, and the process it
+ *                    names. Decides whether a SLOT is taken.
  *  - isReadyToLand — the slice said it is finished, via `.slice-ready-to-land`.
  *  - occupied      — hasSession, plus a grace window after we launched it but
  *                    before its shell has got as far as writing the marker.
@@ -546,10 +546,113 @@ const READY_MARKER = ".slice-ready-to-land";
  * session's claim on its worktree; leaving the REPL is not.
  */
 const hasWorktree = (n: TicketId) => existsSync(worktreeFor(n));
-const hasSession = (n: TicketId) =>
-  existsSync(join(worktreeFor(n), LIVE_MARKER));
 const isReadyToLand = (n: TicketId) =>
   existsSync(join(worktreeFor(n), READY_MARKER));
+
+/**
+ * Written here when a `.slice-live` turns out to name a session that is gone,
+ * and deleted by slice-session.sh when the next session starts. It is what
+ * tells `autoFinished` that the commits in the worktree are part of a ticket,
+ * not the whole of one.
+ */
+const INTERRUPTED_MARKER = ".slice-interrupted";
+const wasInterrupted = (n: TicketId) =>
+  existsSync(join(worktreeFor(n), INTERRUPTED_MARKER));
+
+/**
+ * `ps` answers per round, by ticket and pid: `occupied` is asked from several
+ * filters in one round, and a process does not become a different one between
+ * them. Cleared at the top of every round.
+ */
+const sessionAnswers = new Map<string, boolean>();
+
+/**
+ * Is `pid` still this ticket's session? It must be running, and its command
+ * line must be slice-session.sh with the ticket as an argument. PIDs are
+ * reused, and after a restart the number on a marker can belong to anything.
+ *
+ * `-ww`, because ps may otherwise cut the command to the terminal's width,
+ * and the ticket id is at the end of a long path. When `ps` cannot run at all,
+ * the answer is yes: a false "gone" opens a second session on top of a live
+ * one, and a false "alive" only waits.
+ */
+function isSessionOf(n: TicketId, pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ESRCH") return false;
+  }
+  const r = spawnSync("ps", ["-ww", "-o", "command=", "-p", String(pid)], {
+    encoding: "utf8",
+  });
+  if (r.error) return true;
+  const cmd = (r.stdout ?? "").trim();
+  return cmd.includes("slice-session") && cmd.split(/\s+/).includes(n);
+}
+
+/**
+ * Is a session open in this slice's worktree? The marker is not enough on its
+ * own. slice-session.sh clears it from an EXIT trap, and a crash, a restart or
+ * a force-quit terminal never runs the trap. On consumer-a a restart left four
+ * markers behind, the dispatcher counted four sessions that did not exist, and
+ * none of those slices was relaunched until the markers were deleted by hand.
+ *
+ * So the pid on the marker's first line has to still be this slice's session.
+ * That works because the session shell lives exactly as long as the session:
+ * slice-session.sh never `exec`s the agent, since the trap is what clears the
+ * marker. A marker with no readable pid counts as live, as every marker did
+ * before; nothing has ever written one, and "gone" is the unsafe mistake.
+ */
+function hasSession(n: TicketId): boolean {
+  const path = join(worktreeFor(n), LIVE_MARKER);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  const first = text.split("\n")[0]?.trim() ?? "";
+  if (!/^[0-9]+$/.test(first)) return true;
+  const key = `${n}:${first}`;
+  let alive = sessionAnswers.get(key);
+  if (alive === undefined) {
+    alive = isSessionOf(n, Number(first));
+    sessionAnswers.set(key, alive);
+  }
+  if (alive) return true;
+  clearStaleSession(n, path, text, first);
+  // Whatever is in the file now: a session that started a moment ago has
+  // written its own marker, and that one is live.
+  return existsSync(path);
+}
+
+/**
+ * The marker is read again and deleted only if it has not changed, so a
+ * session that started since it was first read keeps the one it wrote.
+ * `.slice-interrupted` goes in its place, and the line is printed once,
+ * because the marker it is about is gone after this.
+ */
+function clearStaleSession(
+  n: TicketId,
+  path: string,
+  seen: string,
+  pid: string,
+): void {
+  let now: string;
+  try {
+    now = readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+  if (now !== seen) return;
+  rmSync(path, { force: true });
+  writeFileSync(join(worktreeFor(n), INTERRUPTED_MARKER), `${pid}\n`);
+  console.log(
+    `  ${ref(
+      n,
+    )}: its session (pid ${pid}) ended without clearing .slice-live — a crash, a restart, or a killed tab. Relaunching it.`,
+  );
+}
 
 /**
  * A fourth question, asked only when `exclusiveLockPaths` is set: did this
@@ -1122,6 +1225,13 @@ const commitsAhead = (n: TicketId) =>
     .out.split("\n")
     .filter((l) => l.trim()).length;
 
+/** Nothing modified, staged or untracked; the markers are excluded by `init`. */
+const isClean = (n: TicketId) =>
+  !run(["git", "status", "--porcelain"], {
+    cwd: worktreeFor(n),
+    allowFail: true,
+  }).out.trim();
+
 /**
  * Under `--auto`, a slice counts as finished when its session is gone and it
  * left commits behind — no `slice-done.sh`. `occupied` rather than
@@ -1134,9 +1244,26 @@ const commitsAhead = (n: TicketId) =>
  * `claim` to commit what it has OUTSIDE the exclusive paths and exit, and
  * without this clause that exit, with those commits behind it, would read as
  * a finished ticket and land half of one.
+ *
+ * And not when its session crashed. On consumer-a a slice with one commit
+ * and five uncommitted files counted as finished once its stale marker was
+ * cleared, and the land refused it for a dirty tree and parked it where no
+ * session is ever relaunched. Both of these send such a slice to `runnable`
+ * instead, which relaunches it:
+ *  - `.slice-interrupted`, the direct evidence, written when `hasSession`
+ *    finds the marker's session gone;
+ *  - a dirty tree, for the other ways a marker goes missing: a person deleted
+ *    it by hand, or a dispatcher from before the check was running. A session
+ *    that finished commits its work.
+ * A crashed slice with a clean tree and no marker still reads as finished.
+ * There, the review is what catches half a ticket.
  */
 const autoFinished = (n: TicketId) =>
-  !occupied(n) && !isWaitingOnLock(n) && commitsAhead(n) > 0;
+  !occupied(n) &&
+  !isWaitingOnLock(n) &&
+  !wasInterrupted(n) &&
+  commitsAhead(n) > 0 &&
+  isClean(n);
 
 /**
  * The gate lock's directory, in the common git dir every worktree shares.
@@ -2432,6 +2559,7 @@ for (const t of tickets) {
 let round = 0;
 for (;;) {
   round += 1;
+  sessionAnswers.clear();
   if (round > 1) {
     refreshOpenState(tickets);
     unparkClosed(tickets);

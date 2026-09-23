@@ -43,7 +43,7 @@ const EXCLUDE_BEGIN = "# ─── azelf: slice tooling markers ─────�
 const EXCLUDE_END = "# ─── end azelf ──────────────────────────────────────";
 
 /**
- * The six patterns, and the paragraph explaining where they are NOT.
+ * The marker patterns, and the paragraph explaining where they are NOT.
  *
  * `.gitignore` is hashed RAW by @expo/fingerprint (source reason
  * `bareGitIgnore`), so an entry added there moves an Expo app's runtime version
@@ -72,6 +72,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-lock-wait
 .slice-flags
 .slice-retry
+.slice-interrupted
 .slice-reviews/
 ${EXCLUDE_END}`;
 

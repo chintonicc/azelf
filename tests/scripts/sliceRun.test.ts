@@ -6,6 +6,7 @@ import {
   AZELF,
   type Consumer,
   type Dispatcher,
+  fakeSession,
   git,
   makeConsumer,
   runDispatcher,
@@ -21,9 +22,13 @@ import {
 
 let c: Consumer | undefined;
 let d: Dispatcher | undefined;
+/** Fake sessions a test started, stopped after it. */
+let sessions: Dispatcher[] = [];
 afterEach(async () => {
   await d?.stop();
   d = undefined;
+  for (const s of sessions) await s.stop();
+  sessions = [];
   if (c) rmSync(c.root, { recursive: true, force: true });
   c = undefined;
 });
@@ -59,7 +64,7 @@ describe("the dispatcher", () => {
   it("lands a slice that is marked done while it is running", async () => {
     c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
     commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
-    writeFileSync(join(c.wt(40), ".slice-live"), "99999\n");
+    sessions.push(fakeSession(c, 40));
 
     d = startDispatcher(c, ["-y", "--interval", "1", "40"]);
     await d.until("[round 1] 1 running");
@@ -136,6 +141,159 @@ describe("the disk floor and a failed prep", () => {
     expect(readFileSync(join(c.wt(40), "package.json"), "utf8")).toBe(
       BAD_PACKAGE,
     );
+  });
+});
+
+/**
+ * A session that died without its EXIT trap (a crash, a restart, a killed
+ * tab) leaves `.slice-live` behind. The dispatcher checks the pid in it, and
+ * a slice whose session is gone is relaunched rather than landed, whatever it
+ * left in the worktree. These consumers start sessions for real; the fake
+ * agent writes the prompt it was given next to the worktree.
+ */
+describe("a session that crashed", () => {
+  const WRITE_PROMPT = 'printf "%s\\n" "$1" > "$(dirname "$PWD")/prompt"';
+  const ALREADY =
+    "This worktree already has work from an earlier session of this ticket that ended before it finished — see `git log main..HEAD` and `git status`. Continue from it; don't start over.";
+  const AUTO = ["--auto", "--once", "-y", "--no-review", "40"];
+
+  /** A pid nothing is running under any more. */
+  const deadPid = () =>
+    Number(
+      spawnSync("bash", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim(),
+    );
+
+  const waitFor = async (what: string, ok: () => boolean, ms = 30_000) => {
+    const end = Date.now() + ms;
+    while (!ok()) {
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+
+  /** ticket/40 with one commit, and an agent that records its prompt. */
+  const withCommit = () => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["bash", "-c", WRITE_PROMPT, "agent"],
+      launch: true,
+    });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    return fx;
+  };
+
+  /** What the relaunched session's agent was told, once that session is over. */
+  const relaunchPrompt = async (fx: Consumer) => {
+    const prompt = join(fx.root, "prompt");
+    await waitFor(
+      "the relaunched session",
+      () => existsSync(prompt) && !existsSync(join(fx.wt(40), ".slice-live")),
+    );
+    return readFileSync(prompt, "utf8");
+  };
+
+  const gone = (pid: number) =>
+    `#40: its session (pid ${pid}) ended without clearing .slice-live — a crash, a restart, or a killed tab. Relaunching it.`;
+
+  it("relaunches a slice whose session died, and does not land its dirty tree", async () => {
+    c = withCommit();
+    writeFileSync(join(c.wt(40), "b.txt"), "half\n");
+    const pid = deadPid();
+    writeFileSync(join(c.wt(40), ".slice-live"), `${pid}\n`);
+
+    const r = runDispatcher(c, AUTO);
+
+    expect(r.out).toContain(gone(pid));
+    // Not tried and refused: not tried at all.
+    expect(r.out).not.toContain("marked done");
+    expect(r.out).toContain("started #40");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+    expect(await relaunchPrompt(c)).toContain(ALREADY);
+    // Deleted by the session that picked the work up.
+    expect(existsSync(join(c.wt(40), ".slice-interrupted"))).toBe(false);
+    expect(readFileSync(join(c.wt(40), "b.txt"), "utf8")).toBe("half\n");
+  });
+
+  it("relaunches it with a clean tree too: .slice-interrupted decides", async () => {
+    c = withCommit();
+    const pid = deadPid();
+    writeFileSync(join(c.wt(40), ".slice-live"), `${pid}\n`);
+
+    const r = runDispatcher(c, AUTO);
+
+    expect(r.out).toContain(gone(pid));
+    // Not tried and refused: not tried at all.
+    expect(r.out).not.toContain("marked done");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+    expect(await relaunchPrompt(c)).toContain(ALREADY);
+  });
+
+  it("relaunches a dirty slice whose marker was deleted by hand", async () => {
+    c = withCommit();
+    writeFileSync(join(c.wt(40), "b.txt"), "half\n");
+
+    const r = runDispatcher(c, AUTO);
+
+    expect(r.out).not.toContain("ended without clearing");
+    // Not tried and refused: not tried at all.
+    expect(r.out).not.toContain("marked done");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+    expect(await relaunchPrompt(c)).toContain(ALREADY);
+  });
+
+  it("reads a pid that is running something else as gone", async () => {
+    c = withCommit();
+    writeFileSync(join(c.wt(40), ".slice-live"), `${process.pid}\n`);
+
+    const r = runDispatcher(c, AUTO);
+
+    expect(r.out).toContain(gone(process.pid));
+    // Not tried and refused: not tried at all.
+    expect(r.out).not.toContain("marked done");
+    await relaunchPrompt(c);
+  });
+
+  it("leaves a real session alone across rounds, and tells a new one nothing extra", async () => {
+    const tag = String(3000 + Math.floor(Math.random() * 5000));
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["bash", "-c", `${WRITE_PROMPT}; exec sleep ${tag}`, "agent"],
+      launch: true,
+    });
+    const fx = c;
+    try {
+      d = startDispatcher(fx, ["--auto", "-y", "--interval", "1", "40"]);
+      await d.until("started #40");
+      await waitFor("the session's marker", () =>
+        existsSync(join(fx.wt(40), ".slice-live")),
+      );
+      // Past the launcher's 5s grace, so only the pid check keeps it running.
+      await new Promise((r) => setTimeout(r, 6_000));
+      const rounds = () => d?.output().match(/\[round \d+\] 1 running/g) ?? [];
+      const seen = rounds().length;
+      await waitFor("two more rounds", () => rounds().length >= seen + 2);
+
+      expect(d.output()).not.toContain("ended without clearing");
+      expect(existsSync(join(fx.wt(40), ".slice-live"))).toBe(true);
+      expect(readFileSync(join(fx.root, "prompt"), "utf8")).not.toContain(
+        "already has work",
+      );
+    } finally {
+      spawnSync("pkill", ["-f", `sleep ${tag}`]);
+    }
+  }, 60_000);
+
+  it("still lands a slice that committed everything and closed its session", () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+
+    const r = runDispatcher(c, AUTO);
+
+    expect(r.out).toContain("landing #40");
+    expect(r.code).toBe(0);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
   });
 });
 
@@ -261,7 +419,7 @@ describe("a parked slice", () => {
     const fx = makeConsumer({ worktrees: [40, 41], remote: true, ...opts });
     commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
     sh(fx.wt(40), "./scripts/slice-done.sh");
-    writeFileSync(join(fx.wt(41), ".slice-live"), "99999\n");
+    sessions.push(fakeSession(fx, 41));
     c = fx;
     d = startDispatcher(fx, [...args, "-y", "--interval", "1", "40", "41"]);
     return { c: fx, d };

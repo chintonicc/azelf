@@ -373,9 +373,11 @@ fi
 # process is about to have its working directory deleted. An empty marker
 # left "close that tab" as advice nobody could act on without `ps`.
 #
-# A hard-killed tab (SIGKILL, force-quitting Warp) skips the trap and strands
-# the marker — slice-run.ts reports a slice that looks live but has no session,
-# and deleting .slice-live in that worktree clears it.
+# A hard-killed tab (SIGKILL, force-quitting Warp), a crash or a restart skips
+# the trap and strands the marker. slice-run.ts notices: the pid in it is no
+# longer a slice-session.sh for this ticket, so it deletes the marker, leaves
+# .slice-interrupted in its place, and relaunches the slice. That check is
+# also why this shell must keep running for as long as the session does.
 live_marker="$worktree_path/.slice-live"
 echo "$$" >"$live_marker"
 trap 'rm -f "$live_marker"' EXIT
@@ -386,6 +388,11 @@ trap 'rm -f "$live_marker"' EXIT
 # next `db-lock.sh claim` to say, so the old answer goes.
 rm -f "$worktree_path/.slice-lock-wait"
 
+# Written by the dispatcher when the last session here died without clearing
+# .slice-live, and read by it to keep a crashed slice from landing as if it
+# were finished. This is the session that picks the work back up.
+rm -f "$worktree_path/.slice-interrupted"
+
 # The opening instruction, so a slice starts working when its tab opens
 # instead of waiting to be told the same thing eight times. --no-start gives
 # you the bare prompt back.
@@ -395,6 +402,23 @@ rm -f "$worktree_path/.slice-lock-wait"
 # that another project need not have installed. The self-land clause below is
 # tool mechanics rather than project preference, so it stays here.
 start_prompt="${SLICE_START_PROMPT//\{n\}/$ticket}"
+
+# A worktree with commits of its own, or uncommitted changes, is a relaunch:
+# a crash, a restart, a session that exited on a refused DB-lock claim. The
+# start prompt alone reads as "begin the ticket", and an agent told that in a
+# half-built worktree can start it again from nothing.
+#
+# Counted against origin's base as well as the local one: a new worktree is
+# cut from origin, and a local base that is behind it would make origin's
+# commits look like this slice's own.
+bases=("$SLICE_BASE_BRANCH")
+if git show-ref --verify --quiet "refs/remotes/origin/$SLICE_BASE_BRANCH"; then
+  bases+=("origin/$SLICE_BASE_BRANCH")
+fi
+ahead=$(git rev-list --count HEAD --not "${bases[@]}" 2>/dev/null) || ahead=0
+if [[ "$ahead" != "0" || -n "$(git status --porcelain 2>/dev/null)" ]]; then
+  start_prompt="$start_prompt This worktree already has work from an earlier session of this ticket that ended before it finished — see \`git log $SLICE_BASE_BRANCH..HEAD\` and \`git status\`. Continue from it; don't start over."
+fi
 
 # Under --self-land the slice closes itself out. Both halves matter: the marker
 # is what the dispatcher lands on, and the exit is what clears .slice-live so
