@@ -71,6 +71,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-ready-to-land
 .slice-lock-wait
 .slice-flags
+.slice-retry
 .slice-reviews/
 ${EXCLUDE_END}`;
 

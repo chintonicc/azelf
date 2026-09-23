@@ -13,6 +13,7 @@
  *   ./scripts/slice-run.ts --auto --no-review   # opt out of the review --auto implies
  *   ./scripts/slice-run.ts --no-auto-resolve    # never let an agent resolve a rebase conflict
  *   ./scripts/slice-run.ts --gates 12      # run the landing gates on slice 12, land nothing
+ *   ./scripts/slice-run.ts --retry 12      # retry parked slice 12 in the running dispatcher
  *   ./scripts/slice-run.ts --sync-edges    # write the edges the bodies claim, then stop
  *
  * Inside a finished slice, run ./scripts/slice-done.sh — this then re-runs the
@@ -70,7 +71,14 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { isAbsolute, join } from "node:path";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
@@ -619,6 +627,22 @@ function refreshOpenState(tickets: Ticket[]): void {
 }
 
 /**
+ * A parked ticket the tracker now reads closed was landed by hand, or closed
+ * for some other reason: either way there is nothing left to retry. Left in
+ * `parked`, it counted in every round's line and in the summary, and made a
+ * run that had finished everything exit 1.
+ */
+function unparkClosed(tickets: Ticket[]): void {
+  for (const t of tickets) {
+    if (!t.open && parked.delete(t.id)) {
+      console.log(
+        `  ${ref(t.id)} was closed outside this run — no longer parked`,
+      );
+    }
+  }
+}
+
+/**
  * Open, every blocker closed, nothing outside the set holding it, not already
  * up, and not already finished.
  *
@@ -915,7 +939,7 @@ function reviewSlice(t: Ticket): boolean {
     console.log(
       `  ✗ ${ref(
         t.id,
-      )} not landed — spec review says BLOCK. Fix it in the worktree, or land it yourself with ./scripts/slice-land.sh ${
+      )} not landed — spec review says BLOCK. Fix it in the worktree, correct the ticket if the spec is wrong, or land it without the review: ./scripts/slice-land.sh ${
         t.id
       }.`,
     );
@@ -1515,8 +1539,7 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
 }
 
 /**
- * Why a ticket is not being retried, and the branch head that was true when it
- * failed.
+ * Why a ticket is not being retried, and what was true when it failed.
  *
  * THE BUG THIS EXISTS TO KILL. A land runs the gates and two `claude -p`
  * reviews. A spec review returning BLOCK failed the land, the ready marker
@@ -1525,13 +1548,56 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
  * cannot change, so the retry was not optimism, it was a paid loop. One run
  * burned about an hour of review calls on ticket #3 before anyone noticed.
  *
- * The head is the whole mechanism. A blocked slice is retried when, and only
- * when, its branch has MOVED — which is exactly the condition under which the
- * answer could be different, and exactly what happens when you go fix it in
- * the worktree.
+ * So a parked slice is retried only when something its failure depended on
+ * has changed, and what that is depends on the kind of failure:
+ *
+ *  - its branch moved — every kind. Somebody committed a fix in the worktree.
+ *  - the base branch moved — `gates` and `land` only, at most AUTO_RETRIES
+ *    times per branch head. A lost fast-forward race and a flaky test fixed on
+ *    the base both clear this way, and on consumer-a both had been worked
+ *    around by rebasing a correct branch just to move it. Capped because every
+ *    land moves the base, and a slice whose own code is red should not re-run
+ *    the gates after each one.
+ *  - the ticket body changed — `review` only. A BLOCK against a stale ticket
+ *    is fixed on the tracker, not in the branch.
+ *  - `azelf retry <id>` — every kind, through the `.slice-retry` marker.
+ *
+ * `rebase` gets no base trigger: each attempt can be a resolver run of up to
+ * twenty minutes, against a conflict a moving base rarely removes.
  */
-type Parked = { reason: string; head: string };
+type ParkKind = "rebase" | "gates" | "review" | "land";
+type Parked = {
+  reason: string;
+  kind: ParkKind;
+  /** The slice branch's commit when it parked. */
+  head: string;
+  /**
+   * The base-branch commit the branch was last tried against: its merge-base
+   * when it parked. Not the base's head then, because a land that lost a
+   * fast-forward race parks AFTER the other land moved the base, and the head
+   * would already include the very move that should retry it.
+   */
+  base: string;
+  /** `review` only: a hash of the ticket body the BLOCK was given against. */
+  body?: string;
+  /** Automatic retries on a base move, spent since the branch last moved. */
+  autoRetries: number;
+  /** The cap has been reported for this park, so it is not reported every round. */
+  capNoted?: boolean;
+};
 const parked = new Map<TicketId, Parked>();
+
+/** How many times a base move retries one `gates` or `land` park. */
+const AUTO_RETRIES = 2;
+
+/**
+ * The automatic retries a retried ticket has already spent, handed from the
+ * trigger to the `park` that follows it if the retry fails too. Not kept on
+ * `Parked`, because a retry deletes that record. Counted per branch HEAD in
+ * the author's sense: a retry's own rebase moves the branch as well, and
+ * counting that as a new head would make the cap reset every time it bit.
+ */
+const retriesSpent = new Map<TicketId, number>();
 
 /** The slice branch's current commit, or null if it cannot be read. */
 function branchHead(id: TicketId): string | null {
@@ -1541,19 +1607,136 @@ function branchHead(id: TicketId): string | null {
   return ok && out.trim() ? out.trim() : null;
 }
 
-/** Has this ticket been parked, with nothing new committed since? */
-function isParked(id: TicketId): boolean {
-  const b = parked.get(id);
-  if (!b) return false;
+/** The base branch's current commit, or null if it cannot be read. */
+function baseHead(): string | null {
+  const { ok, out } = run(["git", "rev-parse", baseBranch], {
+    allowFail: true,
+  });
+  return ok && out.trim() ? out.trim() : null;
+}
+
+/** Where the slice branch meets the base branch, or null if it cannot be read. */
+function mergeBase(id: TicketId): string | null {
+  const { ok, out } = run(["git", "merge-base", baseBranch, branchFor(id)], {
+    allowFail: true,
+  });
+  return ok && out.trim() ? out.trim() : null;
+}
+
+/**
+ * A hash of the ticket body, or null when the tracker cannot say. Null never
+ * reads as "changed": a tracker that errors every other call would otherwise
+ * turn each error into a full retry, which is the paid loop again.
+ */
+function bodyHash(id: TicketId): string | null {
+  try {
+    return createHash("sha256").update(tracker.body(id)).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+/** Written by `azelf retry <id>` into the slice's worktree; consumed by `isParked`. */
+const RETRY_MARKER = ".slice-retry";
+
+/**
+ * Why a parked ticket should be retried now, with the automatic retries it
+ * will have spent, or null if nothing it waits on has changed. Reads only:
+ * the round's exit check asks too, and must not consume anything.
+ */
+function retryDue(
+  id: TicketId,
+  p: Parked,
+): { line: string; spent: number } | null {
+  if (existsSync(join(worktreeFor(id), RETRY_MARKER))) {
+    return {
+      line: `${ref(id)}: retry requested — retrying the land.`,
+      spent: p.autoRetries,
+    };
+  }
   const head = branchHead(id);
-  if (head && head !== b.head) {
-    console.log(
-      `  ${ref(id)} has moved since it was parked — retrying the land.`,
-    );
+  if (head && head !== p.head) {
+    return {
+      line: `${ref(id)} has moved since it was parked — retrying the land.`,
+      spent: 0,
+    };
+  }
+  if (p.kind === "review" && p.body !== undefined) {
+    const now = bodyHash(id);
+    if (now !== null && now !== p.body) {
+      return {
+        line: `${ref(id)}: the ticket was edited since the BLOCK — retrying.`,
+        spent: p.autoRetries,
+      };
+    }
+  }
+  if (
+    (p.kind === "gates" || p.kind === "land") &&
+    p.autoRetries < AUTO_RETRIES
+  ) {
+    const base = baseHead();
+    if (base && base !== p.base) {
+      return {
+        line: `${baseBranch} moved since ${ref(
+          id,
+        )} was parked — retrying (automatic retry ${
+          p.autoRetries + 1
+        } of ${AUTO_RETRIES}).`,
+        spent: p.autoRetries + 1,
+      };
+    }
+  }
+  return null;
+}
+
+/**
+ * Has this ticket been parked, with nothing it waits on changed since? A
+ * ticket that is due a retry is un-parked here, which is what retries it.
+ */
+function isParked(id: TicketId): boolean {
+  const p = parked.get(id);
+  const due = p ? retryDue(id, p) : null;
+  // Consumed whether or not the ticket is parked: a request for a slice that
+  // is not parked has nothing to retry, and left on disk it would un-park
+  // that slice's next failure for nothing.
+  rmSync(join(worktreeFor(id), RETRY_MARKER), { force: true });
+  if (!p) return false;
+  if (due) {
+    console.log(`  ${due.line}`);
     parked.delete(id);
+    retriesSpent.set(id, due.spent);
     return false;
   }
+  const base = baseHead();
+  if (
+    (p.kind === "gates" || p.kind === "land") &&
+    p.autoRetries >= AUTO_RETRIES &&
+    !p.capNoted &&
+    base &&
+    base !== p.base
+  ) {
+    p.capNoted = true;
+    console.log(
+      `  ${baseBranch} moved, and ${ref(
+        id,
+      )} has had its ${AUTO_RETRIES} automatic retries at this branch head — staying parked. azelf retry ${id} tries again.`,
+    );
+  }
   return true;
+}
+
+/**
+ * Every way a parked slice comes back, for the line printed when it parks:
+ * only the triggers that apply to its kind, and the base-branch one only while
+ * it has retries left.
+ */
+function waysOut(id: TicketId, kind: ParkKind, spent: number): string {
+  const when = ["when its branch moves"];
+  if ((kind === "gates" || kind === "land") && spent < AUTO_RETRIES) {
+    when.push(`when ${baseBranch} moves`);
+  }
+  if (kind === "review") when.push("when the ticket is edited");
+  return `retried ${when.join(", ")}, or now with: azelf retry ${id}`;
 }
 
 export type Escalation = "resolve" | "retry" | "force" | "park" | "quit";
@@ -1574,6 +1757,7 @@ export type Escalation = "resolve" | "retry" | "force" | "park" | "quit";
 function askAboutBlocked(
   t: Ticket,
   reason: string,
+  ways: string,
   conflicted?: string[],
 ): Escalation {
   console.log(`
@@ -1586,9 +1770,7 @@ function askAboutBlocked(
     console.log(`     conflict: ${conflicted.join("  ")}`);
   }
   if (assumeYes || !process.stdin.isTTY) {
-    console.log(
-      "     parked (non-interactive). It will be retried automatically if you commit to that branch.",
-    );
+    console.log(`     parked (non-interactive) — ${ways}`);
     return "park";
   }
   const canResolve = Boolean(
@@ -1608,6 +1790,7 @@ function askAboutBlocked(
   if (answer.startsWith("r")) return "retry";
   if (answer.startsWith("f")) return "force";
   if (answer.startsWith("q")) return "quit";
+  console.log(`     parked — ${ways}`);
   return "park";
 }
 
@@ -1628,6 +1811,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     if (!decide || !resolveConflict(t, rebase.conflicted)) {
       return park(
         t,
+        "rebase",
         decide
           ? "the rebase failed and the agent could not resolve it"
           : "the rebase onto the base branch failed",
@@ -1638,13 +1822,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     }
   }
   if (!gatesPass(t.id)) {
-    return park(t, "the gates are red");
+    return park(t, "gates", "the gates are red");
   }
   // After the gates, not before: no point paying for a review of something
   // that doesn't compile, and the reviewer should see the rebased diff that
   // is actually about to land.
   if (!opts.force && !reviewSlice(t)) {
-    return park(t, "the spec review says BLOCK");
+    return park(t, "review", "the spec review says BLOCK");
   }
   console.log(`  landing ${ref(t.id)} …`);
   // Read the file set BEFORE landing, because afterwards there is nothing to
@@ -1667,11 +1851,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
   if (!ok) {
     return park(
       t,
+      "land",
       "slice-land.sh refused — the branch is not fast-forwardable, or a hook rejected it",
     );
   }
   landedFiles.set(t.id, landing);
   parked.delete(t.id);
+  retriesSpent.delete(t.id);
   t.open = false;
   return true;
 }
@@ -1683,16 +1869,32 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
  * question. Before this, three of the four returned false with a different
  * message and identical behaviour — retry next round, indefinitely.
  */
-function park(t: Ticket, reason: string, conflicted?: string[]): boolean {
-  const head = branchHead(t.id);
-  switch (askAboutBlocked(t, reason, conflicted)) {
+function park(
+  t: Ticket,
+  kind: ParkKind,
+  reason: string,
+  conflicted?: string[],
+): boolean {
+  // Read before the question, which can take any amount of time to answer.
+  const spent = retriesSpent.get(t.id) ?? 0;
+  const record: Parked = {
+    reason,
+    kind,
+    head: branchHead(t.id) ?? "",
+    base: mergeBase(t.id) ?? "",
+    // Only a review park can be un-parked by the ticket, so only it pays the
+    // tracker call.
+    body: kind === "review" ? bodyHash(t.id) ?? undefined : undefined,
+    autoRetries: spent,
+  };
+  switch (askAboutBlocked(t, reason, waysOut(t.id, kind, spent), conflicted)) {
     case "resolve":
       // A successful resolution leaves the branch rebased, so the tryLand it
       // re-enters finds the base branch already an ancestor and goes straight
       // to the gates. A failed one falls through to the same question without
       // the [a] — the resolver has had its attempt at this branch head.
       if (resolveConflict(t, conflicted ?? [])) return tryLand(t);
-      return park(t, "the agent could not resolve the conflict");
+      return park(t, "rebase", "the agent could not resolve the conflict");
     case "retry":
       return tryLand(t);
     case "force":
@@ -1702,12 +1904,13 @@ function park(t: Ticket, reason: string, conflicted?: string[]): boolean {
       return tryLand(t, { force: true });
     case "quit":
       stopRequested = true;
-      parked.set(t.id, { reason, head: head ?? "" });
-      return false;
-    default:
-      parked.set(t.id, { reason, head: head ?? "" });
-      return false;
+      break;
   }
+  // The count moves onto the record here, and only here: an answer that
+  // tries again goes back through `tryLand`, whose next park reads it.
+  retriesSpent.delete(t.id);
+  parked.set(t.id, record);
+  return false;
 }
 
 // ─── overlap ──────────────────────────────────────────────────────────────
@@ -1866,6 +2069,30 @@ const autoLand = flag("--auto");
 const autoResolve = !flag("--no-auto-resolve");
 const intervalMs = Number(value("--interval") ?? 30) * 1000;
 
+// `--retry <n>`: what `azelf retry` runs. It only writes the marker; the
+// dispatcher that parked the slice consumes it next round (see `isParked`).
+// Before any plan is loaded, because this answers without the tracker.
+if (flag("--retry")) {
+  const id = value("--retry") ?? "";
+  if (!isTicketId(id)) {
+    console.error("--retry needs one ticket id");
+    process.exit(64);
+  }
+  if (!hasWorktree(id)) {
+    console.error(
+      `  ✗ ${ref(id)}: no worktree at ${worktreeFor(id)} — nothing to retry`,
+    );
+    process.exit(1);
+  }
+  writeFileSync(join(worktreeFor(id), RETRY_MARKER), `${Date.now()}\n`);
+  console.log(
+    `  the running dispatcher retries ${ref(
+      id,
+    )} next round; if none is running, \`azelf run --auto ${id}\` does`,
+  );
+  process.exit(0);
+}
+
 // `--gates <n…>`: the landing gates, and nothing else — no GitHub, no rebase,
 // no land. The worktree is judged exactly as it sits. This is how to check a
 // slice by hand, and how the gate shapes were proven against real worktrees.
@@ -2023,10 +2250,20 @@ if (!assumeYes) {
 // everything THIS run produced, however many slices that turned out to be.
 const planBase = run(["git", "rev-parse", baseBranch]).out.trim();
 
+// A retry request is for a run's `parked`, and this run's starts empty — so a
+// marker left over from before it would only un-park this run's first failure
+// for nothing. This run's tickets only: another dispatcher may own the rest.
+for (const t of tickets) {
+  rmSync(join(worktreeFor(t.id), RETRY_MARKER), { force: true });
+}
+
 let round = 0;
 for (;;) {
   round += 1;
-  if (round > 1) refreshOpenState(tickets);
+  if (round > 1) {
+    refreshOpenState(tickets);
+    unparkClosed(tickets);
+  }
 
   const remaining = tickets.filter((t) => t.open);
   if (remaining.length === 0) {
@@ -2044,8 +2281,9 @@ for (;;) {
     (t) =>
       t.open &&
       hasWorktree(t.id) &&
-      // Parked slices are skipped until their branch moves. Without this the
-      // same failing land is re-attempted every round for the life of the run.
+      // Parked slices are skipped until what they failed on changes. Without
+      // this the same failing land is re-attempted every round for the life
+      // of the run.
       !isParked(t.id) &&
       (isReadyToLand(t.id) || (autoLand && autoFinished(t.id))),
   );
@@ -2167,12 +2405,19 @@ for (;;) {
    * This is only reachable because parking exists. The old code could not
    * stall here — it retried the failing land forever instead, which looked
    * like progress and cost a review call every round.
+   *
+   * Not while a parked slice is already due a retry. Its triggers are outside
+   * events, except one: this round's own land moved the base branch, and a
+   * `gates` park waiting on exactly that must get its next round.
    */
   if (
     up.length === 0 &&
     ready.length === 0 &&
     remaining.length > 0 &&
-    remaining.every((t) => parked.has(t.id))
+    remaining.every((t) => {
+      const p = parked.get(t.id);
+      return p !== undefined && retryDue(t.id, p) === null;
+    })
   ) {
     console.log("\n  nothing can advance — every open slice is parked.");
     break;
@@ -2194,11 +2439,17 @@ if (parked.size > 0) {
     console.log(`  ${ref(id)}  ${p.reason}`);
     console.log(`     ${worktreeFor(id)}`);
   }
+  // Not the park line's "retried when …": that is a running dispatcher's
+  // promise, and this one is exiting.
   console.log(
-    "\n  Each will be retried automatically once you commit to its branch.",
+    "\n  Nothing retries them now that this run has stopped. The next run starts",
   );
   console.log(
-    `  Or land one yourself: ./scripts/slice-land.sh <ticket>${
+    "  with nothing parked and tries each again: fix what the reason names first",
+  );
+  console.log("  (commit in the worktree, or correct the ticket).");
+  console.log(
+    `  To land one without the review: ./scripts/slice-land.sh <ticket>${
       parked.size > 1 ? "  (one at a time)" : ""
     }`,
   );

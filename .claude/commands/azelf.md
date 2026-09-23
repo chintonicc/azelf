@@ -55,10 +55,13 @@ failure paths — a failed rebase, red gates, a `VERDICT: BLOCK` spec review, or
 `slice-land.sh` refusing — all stop and offer: retry now, land anyway without the
 review, park it, or stop the run. Non-interactive runs park automatically.
 
-A parked slice is retried when, and only when, its branch moves. That is the point:
-a review verdict on an unchanged diff cannot change, so re-running it is a paid loop
-rather than optimism. Go commit a fix in the worktree and the next round picks it up
-by itself.
+A parked slice is retried when something its failure depended on changes, never on
+a timer: its branch moves (commit a fix in the worktree), the base branch moves (red
+gates or a refused land, at most twice per branch head), or the ticket body is edited
+(a spec review BLOCK). `azelf retry <ticket>` retries one in the running dispatcher's
+next round, whatever it parked on. A review verdict on an unchanged diff and an
+unchanged ticket cannot change, so re-running it would be a paid loop rather than
+optimism. A parked ticket closed some other way — landed by hand — stops counting.
 
 If every open slice is parked and nothing is running, the dispatcher says so and
 stops instead of sleeping in a circle. The run ends with a list of what is parked and

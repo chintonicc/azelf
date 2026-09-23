@@ -1,7 +1,9 @@
+import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AZELF,
   type Consumer,
   type Dispatcher,
   git,
@@ -174,5 +176,214 @@ echo stray >> package.json`);
     expect(r.code).toBe(1);
     expect(git(c.wt(40), "rev-parse", "HEAD")).toBe(head);
     expect(rebaseInProgress(c.wt(40))).toBe(false);
+  });
+});
+
+/**
+ * A parked slice retries when what it failed on changes, not only when its
+ * branch moves. Ticket 41 holds a live session throughout, so the run keeps
+ * polling instead of stopping on "every open slice is parked".
+ */
+describe("a parked slice", () => {
+  const parkedRun = (
+    opts: Parameters<typeof makeConsumer>[0],
+    args: string[] = [],
+  ) => {
+    const fx = makeConsumer({ worktrees: [40, 41], remote: true, ...opts });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    writeFileSync(join(fx.wt(41), ".slice-live"), "99999\n");
+    c = fx;
+    d = startDispatcher(fx, [...args, "-y", "--interval", "1", "40", "41"]);
+    return { c: fx, d };
+  };
+
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  /** `text` at least `n` times, then at least `rounds` more round lines. */
+  const seen = (text: string, n: number, rounds = 0) =>
+    new RegExp(
+      `(${esc(text)}[\\s\\S]*){${n}}${"\\[round \\d+\\][\\s\\S]*".repeat(
+        rounds,
+      )}`,
+    );
+  const count = (out: string, text: string) => out.split(text).length - 1;
+
+  const RED = "✗ #40 did not land — the gates are red";
+  /** 41 still running, 40 gone: the round line once 40 has landed. */
+  const LANDED = "1 running · 0 blocked · 1 open —";
+
+  it("retries red gates when main moves, with nothing committed to the branch", async () => {
+    const { c, d } = parkedRun({ gate: ["test", "-f", "fixed.txt"] });
+    await d.until(
+      "parked (non-interactive) — retried when its branch moves, when main moves, or now with: azelf retry 40",
+    );
+
+    commitIn(c.main, "fixed.txt", "fixed\n", "fix: fixed.txt");
+    await d.until(
+      "main moved since #40 was parked — retrying (automatic retry 1 of 2).",
+    );
+    await d.until(LANDED);
+
+    expect(git(c.main, "log", "--format=%s", "-3")).toBe(
+      "feat: a\nfix: fixed.txt\ninit",
+    );
+    expect(readFileSync(c.closeFile, "utf8")).toContain("40\n");
+  }, 60_000);
+
+  it("retries a land that lost the fast-forward race", () => {
+    // The gate stands in for another dispatcher: the first time it runs, it
+    // lands a commit on main, after this slice was rebased and before it lands.
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      gate: [
+        "bash",
+        "-c",
+        "[ -e ../raced ] || { touch ../raced && git -C ../repo commit -q --allow-empty -m 'race: another land'; }",
+      ],
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["-y", "--interval", "1", "40"]);
+
+    expect(r.out).toContain("it has diverged");
+    expect(r.out).toContain(
+      "parked (non-interactive) — retried when its branch moves, when main moves, or now with: azelf retry 40",
+    );
+    expect(r.out).toContain(
+      "main moved since #40 was parked — retrying (automatic retry 1 of 2).",
+    );
+    expect(r.code).toBe(0);
+    expect(git(c.main, "log", "--format=%s", "-3")).toBe(
+      "feat: a\nrace: another land\ninit",
+    );
+  });
+
+  it("retries a BLOCK when the ticket is edited, and not before", async () => {
+    // Blocks until the ticket body says FIXED. It runs in the worktree, so
+    // ../reviews is next to it, under the consumer's root.
+    const review = `echo call >> ../reviews
+case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
+    const { c, d } = parkedRun(
+      { review: ["bash", "-c", review, "reviewer"], body: "build a" },
+      ["--auto"],
+    );
+    await d.until(
+      "parked (non-interactive) — retried when its branch moves, when the ticket is edited, or now with: azelf retry 40",
+    );
+    await d.until(seen("parked (non-interactive)", 1, 3));
+    // Spec and standards, once each: an unchanged ticket is not reviewed again.
+    const reviews = () =>
+      readFileSync(join(c.root, "reviews"), "utf8").trim().split("\n").length;
+    expect(reviews()).toBe(2);
+
+    c.setTicket("40", { body: "build a — FIXED" });
+    await d.until("#40: the ticket was edited since the BLOCK — retrying.");
+    await d.until(LANDED);
+
+    expect(reviews()).toBe(4);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("does not stop the run while a parked slice is due a retry", () => {
+    // No session holds the run open here: 42's land is what moves main, in
+    // the same round that leaves every open slice parked.
+    c = makeConsumer({
+      worktrees: [40, 42],
+      remote: true,
+      gate: ["test", "-f", "fixed.txt"],
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    commitIn(c.wt(42), "fixed.txt", "fixed\n", "fix: fixed.txt");
+    sh(c.wt(42), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["-y", "--interval", "1", "40", "42"]);
+
+    expect(r.out).toContain(RED);
+    expect(r.out).toContain(
+      "main moved since #40 was parked — retrying (automatic retry 1 of 2).",
+    );
+    expect(r.out).not.toContain("nothing can advance");
+    expect(r.out).toContain("plan complete");
+    expect(r.code).toBe(0);
+  });
+
+  it("retries on azelf retry, and consumes the request", async () => {
+    // Passes once ../ok exists next to the worktree, outside any repo.
+    const { c, d } = parkedRun({ gate: ["test", "-f", "../ok"] });
+    await d.until(RED);
+
+    const r = azelfRetry(c, "40");
+    expect(r.out).toContain(
+      "the running dispatcher retries #40 next round; if none is running, `azelf run --auto 40` does",
+    );
+    expect(r.code).toBe(0);
+    await d.until("#40: retry requested — retrying the land.");
+    // Consumed: parked again, and three round lines later no third attempt.
+    await d.until(seen(RED, 2, 3));
+    expect(count(d.output(), RED)).toBe(2);
+    expect(existsSync(join(c.wt(40), ".slice-retry"))).toBe(false);
+
+    writeFileSync(join(c.root, "ok"), "");
+    azelfRetry(c, "40");
+    await d.until(LANDED);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("stops counting a ticket closed outside the run", async () => {
+    const { c, d } = parkedRun({ gate: ["false"] });
+    await d.until("· 1 parked");
+
+    c.setTicket("40", { state: "closed" });
+    await d.until("#40 was closed outside this run — no longer parked");
+    await d.until(LANDED);
+    c.setTicket("41", { state: "closed" });
+    await d.until("plan complete");
+
+    expect(await d.exited).toBe(0);
+    expect(d.output()).not.toContain("── parked");
+  }, 60_000);
+
+  it("retries red gates twice as main moves, then stays parked", async () => {
+    const { c, d } = parkedRun({ gate: ["false"] });
+    await d.until(RED);
+
+    commitIn(c.main, "m1.txt", "1\n", "main: 1");
+    await d.until("retrying (automatic retry 1 of 2)");
+    await d.until(seen(RED, 2));
+    commitIn(c.main, "m2.txt", "2\n", "main: 2");
+    await d.until("retrying (automatic retry 2 of 2)");
+    await d.until(
+      "parked (non-interactive) — retried when its branch moves, or now with: azelf retry 40",
+    );
+    commitIn(c.main, "m3.txt", "3\n", "main: 3");
+    await d.until(seen("staying parked", 1, 3));
+
+    expect(d.output()).toContain(
+      "main moved, and #40 has had its 2 automatic retries at this branch head — staying parked.",
+    );
+    expect(count(d.output(), RED)).toBe(3);
+    expect(count(d.output(), "staying parked")).toBe(1);
+  }, 60_000);
+});
+
+/** `azelf retry <id>` through the real CLI, from the consumer's main checkout. */
+const azelfRetry = (fx: Consumer, id: string) => {
+  const r = spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), "retry", id], {
+    cwd: fx.main,
+    encoding: "utf8",
+    env: { ...process.env, SLICE_REPO_ROOT: fx.main },
+  });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+};
+
+describe("azelf retry", () => {
+  it("refuses a ticket with no worktree", () => {
+    c = makeConsumer({});
+    const r = azelfRetry(c, "99");
+    expect(r.out).toContain("#99: no worktree at");
+    expect(r.code).toBe(1);
   });
 });

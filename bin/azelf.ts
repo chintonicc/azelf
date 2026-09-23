@@ -1,12 +1,13 @@
 #!/usr/bin/env bun
 /**
- * The command line. Two verbs and a passthrough:
+ * The command line. Two verbs and two passthroughs:
  *
  *   azelf init [--hook] [--codex]   install into the repo you are standing in
  *   azelf run  [args…]    the dispatcher (`--plan`, `--auto`, ticket ids…)
+ *   azelf retry <id>      retry a parked slice in the running dispatcher
  *   azelf hook            print the shell block, for pasting by hand
  *
- * `run` SPAWNS the dispatcher rather than importing it. slice-run.ts is a
+ * `run` and `retry` SPAWN the dispatcher rather than importing it. slice-run.ts is a
  * script, not a library: it reads `process.argv` and does its work at import
  * time under a top-level await. Importing it here would mean rewriting argv
  * underneath it and inheriting its exit path; a spawn keeps both files honest
@@ -30,6 +31,8 @@ const usage = (): never => {
       "  azelf run [args…]",
       "        dispatch slices: --plan, --auto, or explicit ticket ids",
       "        --sync-edges  record the blockers ticket bodies claim, then stop",
+      "  azelf retry <ticket>",
+      "        retry a parked slice's land in the running dispatcher's next round",
       "  azelf hook",
       "        print the shell autostart block, for pasting by hand",
     ].join("\n"),
@@ -54,10 +57,13 @@ if (verb === "init") {
           wrote === 1 ? "" : "s"
         }. Edit slice.config.ts before the first run.`,
   );
-} else if (verb === "run") {
+} else if (verb === "run" || verb === "retry") {
+  if (verb === "retry" && argv.length !== 2) usage();
+  const args =
+    verb === "retry" ? ["--retry", argv[1] as string] : argv.slice(1);
   const proc = spawnSync(
     "bun",
-    [`${packageRoot}/scripts/slice-run.ts`, ...argv.slice(1)],
+    [`${packageRoot}/scripts/slice-run.ts`, ...args],
     { stdio: "inherit" },
   );
   process.exit(proc.status ?? 1);

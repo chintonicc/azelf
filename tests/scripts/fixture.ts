@@ -105,6 +105,8 @@ export function makeConsumer(opts: {
    */
   resolve?: string[];
   review?: string[];
+  /** One landing gate, as `exitCode(gate)`; none when absent. */
+  gate?: string[];
   /** What the fake tracker answers for every ticket, or by id. */
   title?: string;
   titles?: Record<string, string>;
@@ -175,7 +177,7 @@ export function makeConsumer(opts: {
   writeFileSync(
     join(main, "slice.config.ts"),
     `import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
-import { custom, type SliceConfig, type Tracker } from ${JSON.stringify(
+import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringify(
       join(AZELF, "index.ts"),
     )};
 const TICKETS = ${JSON.stringify(ticketsFile)};
@@ -213,7 +215,7 @@ export default {
   readyLabel: "ready",
   exclusiveLockPaths: ${JSON.stringify(lockPaths)},
   provisionCopy: [],
-  gates: [],
+  gates: ${opts.gate ? `[exitCode(${JSON.stringify(opts.gate)})]` : "[]"},
   startPrompt: "x",${agent}${opts.configExtra ? `\n  ${opts.configExtra}` : ""}
 } satisfies SliceConfig;
 `,

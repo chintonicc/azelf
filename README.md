@@ -123,7 +123,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes seven marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes eight marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -152,7 +152,7 @@ saying so.
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | seven marker patterns, in a delimited block |
+| `.git/info/exclude` | eight marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -222,6 +222,12 @@ Installs into the repo you are standing in.
 
 `--gates` is how you check a slice by hand — no tracker call, no rebase, no land.
 The worktree is judged exactly as it sits.
+
+### `azelf retry <ticket>`
+
+Retries a parked slice's land in the running dispatcher's next round, whatever it
+parked on. If no dispatcher is running, `azelf run --auto <ticket>` does the same. See
+[What retries a parked slice](#what-retries-a-parked-slice).
 
 ### `azelf hook`
 
@@ -789,7 +795,7 @@ away — `git rebase --abort`, and a `reset --hard` back to the commit the branc
 on if the rebase had already finished, so "the branch is as it was" is
 true even when there was no rebase left to abort — plus a saved transcript and the
 same `[r/f/p/q]` question with the reason named. One attempt per branch head: a failed resolution parks, and only a new
-commit makes the slice eligible again.
+commit, or `azelf retry`, makes the slice eligible again.
 
 Files that were in the slice's diff before and are not after are **reported, never
 gated**. A legitimate resolution can drop a file — the base branch may already have
@@ -803,19 +809,58 @@ diff. It is strictly less exposure than the slice it is fixing. `--no-auto-resol
 opts out, and the honest counter-argument is worth knowing: a bad resolution is harder
 to spot in review than bad new code, because the diff reads as somebody else's work.
 
-**A parked slice is retried when, and only when, its branch moves.** That condition
-is the whole mechanism: it is exactly when the answer could be different, and exactly
-what happens when you go and fix the thing. Go commit in the worktree; the next round
-picks it up without being told.
+### What retries a parked slice
+
+**A parked slice is retried when something its failure depended on changes**, and
+never on a timer. What counts depends on why it parked, and the park line names
+exactly those:
+
+```
+  ✗ #42 did not land — the gates are red
+     worktree: /…/repo-ticket-42
+     parked (non-interactive) — retried when its branch moves, when master moves, or now with: azelf retry 42
+```
+
+| retried when | for a slice parked on |
+| --- | --- |
+| **its branch moves** — you committed a fix in the worktree | anything |
+| **the base branch moves**, at most twice per branch head | red gates, or `slice-land.sh` refusing |
+| **the ticket body changes** on the tracker | a spec review BLOCK |
+| **`azelf retry <ticket>`**, next round | anything |
+
+A rebase conflict gets only the first and the last: a resolver run can take twenty
+minutes, and a moving base rarely removes a conflict.
+
+The base-branch trigger covers a slice that lost a fast-forward race to another land,
+and a flaky test fixed on master: in both the branch was never the problem. It is
+capped because every land moves the base, and a slice whose own code is red should
+not re-run the gates after each one; after two it says so once and waits for one of
+the other triggers. The ticket trigger covers a BLOCK against a stale ticket, which is
+fixed on the tracker, not in the branch. It costs one tracker call per review-parked
+slice per round.
+
+`azelf retry <ticket>` is for everything else — you know the answer changed and azelf
+cannot see why. It drops a `.slice-retry` marker into the slice's worktree, and the
+running dispatcher consumes it next round. It is not how to skip the review: to land
+a slice without it, run `./scripts/slice-land.sh <ticket>` from the main checkout,
+which fast-forwards, pushes and closes without the dispatcher's gates or review.
+
+A parked ticket that is closed some other way — landed by hand, usually — leaves
+`parked` the next round (`#17 was closed outside this run — no longer parked`), so it
+no longer counts against the run.
 
 This replaced a real loop. A blocking spec review used to fail the land, leave the
 ready marker on disk, and have the next round re-run the gates and both reviews
 against the identical diff — for the life of the run. One run spent about an hour of
 review calls that way before anyone noticed. A verdict on an unchanged diff cannot
-change, so retrying it was never optimism.
+change, so retrying it was never optimism, and none of the triggers above fires on
+an unchanged diff and an unchanged ticket.
 
-The run ends by naming every parked slice and exits non-zero, because "the run
-ended" and "the work is done" are different things.
+When every open slice is parked, nothing is running and no trigger has fired, the run
+stops rather than poll: every trigger is an outside event, and starting the
+dispatcher again is the retry — a new run starts with nothing parked. It ends by
+naming every parked slice and exits non-zero, because "the run ended" and "the work
+is done" are different things.
 
 ## In a coding agent
 
@@ -905,7 +950,7 @@ by a fresh clone. Re-run `azelf init` there.
 ## Repository layout
 
 ```
-bin/azelf.ts            the CLI: init, run, hook
+bin/azelf.ts            the CLI: init, run, retry, hook
 index.ts                the public surface a slice.config.ts imports
 scripts/
   slice-run.ts          the dispatcher — waves, launching, landing, escalation
