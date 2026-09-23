@@ -115,6 +115,10 @@ $(printf '%s\n' "$land_notes" | head -n "$LAND_NOTES_MAX")"
   fi
 fi
 
+# Taken before the fast-forward, for the "landed as" line below: afterwards
+# `base..HEAD` is empty by definition.
+base_before="$(git rev-parse HEAD)"
+
 echo "── fast-forwarding $SLICE_BASE_BRANCH onto $branch ──────────────"
 if ! git merge --ff-only "$branch"; then
   echo "error: $SLICE_BASE_BRANCH can't fast-forward onto $branch — it has diverged." >&2
@@ -178,8 +182,12 @@ echo "✓ pushed"
 echo "── cleaning up ────────────────────────────────────────"
 session_pid=""
 session_declared_done=true
+declared_head=""
 if [[ -f "$worktree_path/.slice-ready-to-land" ]]; then
   session_pid="$(head -n 1 "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
+  # Line 2, when slice-done.sh wrote one: the head the agent declared done at,
+  # BEFORE any rebase moved it. See the note there for why that matters.
+  declared_head="$(sed -n 2p "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
 elif [[ -f "$worktree_path/.slice-live" ]]; then
   session_pid="$(head -n 1 "$worktree_path/.slice-live" | tr -d '[:space:]')"
   session_declared_done=false
@@ -224,6 +232,24 @@ fi
 #
 # Never fatal: the code is on master and pushed by this point, which is the
 # part that can't be redone by hand.
+#
+# The close comment also records WHAT landed, as SHAs. The landed head is the
+# only one a later `merge-base --is-ancestor` will ever say yes to; the
+# declared head is the one the agent has in its scrollback, and the two differ
+# whenever the dispatcher rebased before landing. Putting both on the ticket
+# is what lets "did #42 land?" be answered by looking, instead of by a SHA
+# check that is a false negative most of the time.
+landed_head="$(git rev-parse HEAD)"
+landed_count="$(git rev-list --count "$base_before..$landed_head")"
+landed_line="landed on $SLICE_BASE_BRANCH as $(git rev-parse --short "$landed_head") ($landed_count commit(s))"
+if [[ -n "$declared_head" ]]; then
+  landed_line="declared done at $(git rev-parse --short "$declared_head" 2>/dev/null || echo "$declared_head"), $landed_line"
+fi
+close_comment="$close_comment
+
+$landed_line"
+echo "✓ $landed_line"
+
 echo "── closing $ticket_ref ───────────────────────────────────"
 if close_err=$(slice_tracker_close "$ticket" "$close_comment" 2>&1); then
   echo "✓ closed $ticket_ref"

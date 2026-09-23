@@ -98,7 +98,15 @@ if [[ -f "$live_marker" ]]; then
   session_pid="$(head -n 1 "$live_marker" | tr -d '[:space:]')"
 fi
 
-printf '%s\n' "$session_pid" >"$worktree_root/.slice-ready-to-land"
+# Line 2 is the commit this slice was declared done AT. Landing routinely
+# rewrites it: the dispatcher rebases a branch that is behind base before it
+# lands, which in any multi-slice wave is every slice after the first, so the
+# SHA the agent knows stops being an ancestor of base the moment its work
+# lands. Two sessions reasoned "my commit is not on base, so I have not landed"
+# from exactly that on 2026-09-23. This is the one moment the pre-rebase head
+# is still known, and slice-land.sh carries it into the ticket next to the SHA
+# it actually landed as, so there is something true to compare against.
+printf '%s\n%s\n' "$session_pid" "$(git rev-parse HEAD)" >"$worktree_root/.slice-ready-to-land"
 rm -f "$live_marker"
 
 echo "✓ $(slice_ref "$ticket") marked done ($(git log --oneline "$SLICE_BASE_BRANCH..HEAD" | wc -l | tr -d ' ') commit(s) to land)"

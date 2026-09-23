@@ -48,6 +48,11 @@ and closes the ticket, which unblocks whatever was waiting on it.
 `slice-done.sh` refuses on a dirty tree and refuses a branch with no new commits.
 Both refusals are correct — fix the cause, do not work around them.
 
+A closed ticket means it landed. Landing may rebase your commits, so your SHAs are
+usually **not** ancestors of the base branch afterwards — never test for a land by
+SHA. Match by subject, or read the ticket: its close comment names the commit it
+landed as.
+
 ## If the gates will not go green
 
 Leave the worktree exactly as it is. Do **not** run `slice-done.sh`. Say what is
