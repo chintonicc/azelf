@@ -151,6 +151,10 @@ slice_tracker_brief() {
   bun "$SLICE_AZELF_DIR/scripts/slice-config.ts" --tracker brief "$1"
 }
 
+slice_tracker_tab_title() {
+  bun "$SLICE_AZELF_DIR/scripts/slice-config.ts" --tracker tab-title "$1"
+}
+
 slice_tracker_close() {
   bun "$SLICE_AZELF_DIR/scripts/slice-config.ts" --tracker close "$1" "$2"
 }

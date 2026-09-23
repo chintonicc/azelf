@@ -35,4 +35,4 @@ export { github } from "./scripts/slice-tracker";
 export type { Launcher, Session, Spawn } from "./scripts/slice-launcher";
 export { manual, tmux, warp } from "./scripts/slice-launcher";
 
-export type { SliceConfig } from "./scripts/slice-config";
+export type { SliceConfig, TabTitleInfo } from "./scripts/slice-config";

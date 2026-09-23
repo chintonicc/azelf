@@ -431,6 +431,26 @@ if [[ ${#SLICE_WRAP_COMMAND[@]} -gt 0 ]]; then
 else
   echo "── launching $SLICE_AGENT_NAME ─────────────────────────────────────"
 fi
+# ─── Naming the tab ───────────────────────────────────────────────────────
+#
+# Every slice tab used to read "Claude Code", which is what the agent calls
+# the terminal, so a wave of five was five identical tabs. OSC 2 sets the
+# title — Warp, iTerm, Terminal.app and tmux (as the pane title) all read it.
+# The text is slice.config.ts's `tabTitle`: `#17 › #42 <title>` by default,
+# the parent ticket being the spec this slice hangs under. Empty means the
+# consumer turned it off, and a tracker that cannot answer costs the tab its
+# name and nothing else — never fatal.
+#
+# Claude Code retitles the tab itself as it works, over whatever was printed
+# here; CLAUDE_CODE_DISABLE_TERMINAL_TITLE is its switch for not doing that.
+# Other agents ignore the variable. The escapes are stripped from the title
+# on the TypeScript side, since it is tracker text headed for the terminal.
+tab_title=$(slice_tracker_tab_title "$ticket" 2>/dev/null) || tab_title=""
+if [[ -n "$tab_title" ]]; then
+  printf '\033]2;%s\007' "$tab_title"
+  export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
+fi
+
 agent_status=0
 launch ${SLICE_WRAP_COMMAND[@]+"${SLICE_WRAP_COMMAND[@]}"} \
   "${SLICE_AGENT_SESSION_CMD[@]}" || agent_status=$?

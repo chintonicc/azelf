@@ -79,6 +79,11 @@ export function makeConsumer(opts: {
    * `node_modules` ignored so the worktree still removes cleanly.
    */
   agent?: string[];
+  /** What the fake tracker answers for every ticket. */
+  title?: string;
+  body?: string;
+  /** Raw lines added to the config object, e.g. `tabTitle: false,`. */
+  configExtra?: string;
 }): Consumer {
   // Resolved, because git prints worktree paths canonicalized and macOS's
   // tmpdir is a symlink.
@@ -128,9 +133,9 @@ const tracker: Tracker = {
   idPattern: "^[0-9]+$",
   refTemplate: "#{n}",
   listReady: () => [],
-  get: (id) => ({ id, title: "t", state: "open", labels: ["ready"], url: "" }),
+  get: (id) => ({ id, title: ${JSON.stringify(opts.title ?? "t")}, state: "open", labels: ["ready"], url: "" }),
   blockers: () => [],
-  body: () => "",
+  body: () => ${JSON.stringify(opts.body ?? "")},
   close: (id, comment) =>
     appendFileSync(${JSON.stringify(closeFile)}, \`\${id}\\n\${comment}\\n\`),
 };
@@ -149,7 +154,7 @@ export default {
           opts.agent,
         )} }),`
       : ""
-  }
+  }${opts.configExtra ? `\n  ${opts.configExtra}` : ""}
 } satisfies SliceConfig;
 `,
   );

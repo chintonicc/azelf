@@ -57,6 +57,7 @@ import {
   idFromBranch,
   idPatternProblem,
   openBlockers,
+  parentFromBody,
   refFor,
 } from "./slice-tracker";
 
@@ -144,7 +145,48 @@ export type SliceConfig = {
   wrapCommand?: string[];
   /** Opening instruction for a slice's session. `{n}` is the ticket. */
   startPrompt: string;
+  /**
+   * What a slice's terminal tab is called, or `false` to leave it alone.
+   *
+   * Left out, a tab reads `#17 › #42 Add export button`: the parent ticket
+   * (the spec it hangs under, from the `## Parent` section, when it names
+   * one), then the ticket and its title. Without this every slice tab reads
+   * "Claude Code", and a wave of five is five identical tabs.
+   *
+   * slice-session.sh prints it as a terminal title just before the agent
+   * starts and sets CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1 for the agent, since
+   * Claude Code otherwise retitles the tab with its own running summary. That
+   * summary is what you give up here; `false` keeps it.
+   *
+   *   tabTitle: ({ ref, title }) => `${ref} ${title}`
+   */
+  tabTitle?: false | ((t: TabTitleInfo) => string);
 };
+
+/** What a `tabTitle` function is handed. `parentRef` is `null` without a parent. */
+export type TabTitleInfo = {
+  ref: string;
+  title: string;
+  parentRef: string | null;
+};
+
+export const defaultTabTitle = ({ ref, title, parentRef }: TabTitleInfo) =>
+  `${parentRef ? `${parentRef} › ` : ""}${ref} ${title}`;
+
+/**
+ * Tracker text headed for a terminal — the tab title's escape sequence, and
+ * the `get` line slice-session.sh echoes — so anything that could end or start
+ * an escape (C0 and C1 controls, DEL) is not text here. An issue title
+ * carrying `\x07` or `\x1b]` would otherwise write to the terminal on the
+ * maintainer's machine, and a tab or newline in one would split `get`'s TSV.
+ * Spaces keep the words apart.
+ */
+export const terminalSafe = (s: string): string =>
+  s
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point
+    .replace(/[\x00-\x1f\x7f-\x9f]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 /**
  * The MAIN checkout of the CONSUMER repo — not the caller's worktree, and not
@@ -322,6 +364,15 @@ function validate(c: SliceConfig): SliceConfig {
       );
     }
   }
+  if (
+    c.tabTitle !== undefined &&
+    c.tabTitle !== false &&
+    typeof c.tabTitle !== "function"
+  ) {
+    bad(
+      "tabTitle must be a function ({ ref, title, parentRef }) => string, or false to leave the tab's title alone",
+    );
+  }
   if (c.wrapCommand !== undefined) {
     if (
       !Array.isArray(c.wrapCommand) ||
@@ -466,13 +517,14 @@ export function shellAssignments(): string {
  *   get <id>            state<TAB>ready<TAB>title   (ready: carries readyLabel)
  *   open-blockers <id>  the number of blockers still open, as an integer
  *   brief <id>          the .slice-ticket.md text — title, url, body
+ *   tab-title <id>      the terminal tab's title, one line; empty when off
  *   close <id> <text>   close it, with that comment
  */
 function trackerCli(args: string[]): never {
   const [verb, id, ...rest] = args;
   const usage = (): never => {
     console.error(
-      "usage: slice-config.ts --tracker get|open-blockers|brief <id> | close <id> <comment>",
+      "usage: slice-config.ts --tracker get|open-blockers|brief|tab-title <id> | close <id> <comment>",
     );
     process.exit(64);
   };
@@ -488,7 +540,7 @@ function trackerCli(args: string[]): never {
       case "get": {
         const t = tracker.get(id);
         const ready = t.labels.includes(config.readyLabel);
-        console.log([t.state, String(ready), t.title].join("\t"));
+        console.log([t.state, String(ready), terminalSafe(t.title)].join("\t"));
         break;
       }
       case "open-blockers":
@@ -498,6 +550,22 @@ function trackerCli(args: string[]): never {
         const t = tracker.get(id);
         const body = tracker.body(id) || "(no body)";
         console.log(`# ${ref(id)} — ${t.title}\n\n${t.url}\n\n---\n\n${body}`);
+        break;
+      }
+      case "tab-title": {
+        if (config.tabTitle === false) break;
+        const t = tracker.get(id);
+        const parent = parentFromBody(tracker.body(id), tracker.idPattern);
+        const make = config.tabTitle ?? defaultTabTitle;
+        console.log(
+          terminalSafe(
+            make({
+              ref: ref(id),
+              title: t.title,
+              parentRef: parent ? ref(parent) : null,
+            }),
+          ),
+        );
         break;
       }
       case "close": {

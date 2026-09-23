@@ -272,6 +272,7 @@ export default {
 | `agent` | `Agent?` | which agent runs sessions and reviews diffs (default `claude()`) |
 | `wrapCommand` | `string[]?` | command the agent runs inside; `[]` by default |
 | `startPrompt` | `string` | opening instruction for a session; `{n}` is the ticket |
+| `tabTitle` | `function \| false?` | a slice tab's title; `#17 › #42 <title>` by default |
 
 Two of these have sharp edges worth stating:
 
@@ -514,6 +515,30 @@ land — keeps its tab.
 
 This changed the hook, so it is `v3`. If your rc file carries `v2`, `azelf init`
 says so and `azelf init --hook` replaces it.
+
+#### A slice's tab is named after its ticket
+
+Every slice tab used to read "Claude Code", so a wave of five was five identical
+tabs. `slice-session.sh` now titles the tab just before the agent starts —
+
+```
+#17 › #42 Add export button
+```
+
+— the parent ticket (the spec it hangs under, from its `## Parent` section) when it
+names one, then the ticket and its title. It is an ordinary terminal title (OSC 2),
+so Warp, iTerm, Terminal.app and tmux all show it, and a tab you renamed by hand
+keeps your name. Claude Code retitles the tab itself as it works, so the session
+also sets `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1` for the agent: you trade its
+running summary for a fixed ticket name. To change the text, or keep Claude's:
+
+```ts
+tabTitle: ({ ref, title, parentRef }) => `${ref} ${title}`,
+tabTitle: false,
+```
+
+Control characters in a tracker title are stripped before it reaches the terminal,
+and a tracker that cannot answer costs the tab its name, never the session.
 
 ### Agent
 
