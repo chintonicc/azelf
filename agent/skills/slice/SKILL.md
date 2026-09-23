@@ -18,7 +18,26 @@ Only what the ticket asks. A slice that also fixes an unrelated thing it noticed
 a slice that cannot be reviewed as one change, and it lands into the same base branch
 as every other slice running right now.
 
-## 3. Commit with explicit paths
+## 3. Claim the DB lock before you touch the database
+
+**Before creating or applying anything under `exclusiveLockPaths`** (see
+`slice.config.ts`; migrations, typically), run:
+
+```sh
+./scripts/db-lock.sh claim
+```
+
+If it is refused, do not touch the database and do not poll. Commit what you have
+outside those paths, say in your final message who holds the lock, and exit. The
+dispatcher starts you again when it is free. If it is granted, hold it: landing
+releases it. Applying a migration you have not claimed the lock for is the one thing
+in this worktree that cannot be undone.
+
+`session-commit.sh` checks the claim on every commit that touches those paths, and
+has no override. If you and the holder are both mid-migration, that is the operator's
+call, made with `db-lock.sh transfer` from the main checkout, not yours.
+
+## 4. Commit with explicit paths
 
 ```sh
 ./scripts/session-commit.sh -m "..." <paths>
@@ -28,7 +47,7 @@ Never `git add -A` or `git add .`. Other worktrees share this repo's git dir, an
 pathspec-less commit is how another session's in-flight work gets committed under
 your message.
 
-## 4. Run the gates yourself before declaring done
+## 5. Run the gates yourself before declaring done
 
 The dispatcher will re-run them, so the only thing you gain by guessing is a failed
 land. Run them, read the output, fix what you broke.
@@ -36,7 +55,7 @@ land. Run them, read the output, fix what you broke.
 A gate must never write to the tree. If formatting is a gate here, it runs in check
 mode — apply formatting as an edit you commit, not as part of the gate.
 
-## 5. Finish
+## 6. Finish
 
 ```sh
 ./scripts/slice-done.sh
@@ -57,6 +76,10 @@ landed as.
 
 Leave the worktree exactly as it is. Do **not** run `slice-done.sh`. Say what is
 failing, and exit.
+
+The same if you are blocked on the DB lock: leave the worktree clean of changes
+under `exclusiveLockPaths` if you can (`git stash push -- <those paths>` is fine),
+otherwise leave it and say so. Do not wait in the session for the lock to clear.
 
 A stranded worktree costs a directory and five seconds to clean up. A bad land costs
 the base branch everyone else is cutting from. That trade is the reason this last

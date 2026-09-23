@@ -1,6 +1,6 @@
 # The exclusive-path lock: from a scan to a claim
 
-**Status:** Phase 1 LANDED 2026-09-23 · Phase 2 open · Phase 3 open · **Written:** 2026-09-23
+**Status:** Phase 1 LANDED 2026-09-23 · Phase 2 LANDED 2026-09-23 · Phase 3 open · **Written:** 2026-09-23
 **Companion:** `scripts/db-lock-check.sh` header (the current design and its known
 limitation), `docs/extraction-plan.md` (how the scripts got here).
 
@@ -82,7 +82,9 @@ Deviations from the plan below, all deliberate:
   `git worktree list` output `db_lock_holder` parses, so it checks that entry's state
   on the way past instead of taking a path. Every holder is now collected rather than
   the first returned, which is what lets the dispatcher (which excludes nobody) see two
-  stuck worktrees too. An UNVERIFIABLE worktree still wins over the diagnosis.
+  stuck worktrees too. An UNVERIFIABLE worktree still wins over the diagnosis. The
+  text travels with the holder output, so it reaches every caller alike — a session
+  polling `db_lock_holder` by hand sees it, not only one that runs `session-commit.sh`.
 - **1c's proof is a test, not a dry run.** `tests/scripts/fixture.ts` builds a real
   consumer checkout — shims pointed at this repo, a `slice.config.ts` with a file-backed
   fake tracker, optional bare origin, linked worktrees — and `sliceLand.test.ts` runs
@@ -139,12 +141,46 @@ Each item is independent. Land them as separate commits.
   *Proof:* land a slice whose branch was behind base; the close comment carries both SHAs
   and the second is an ancestor of base.
 
-## Phase 2 — the claim
+## Phase 2 — landed
 
-The fix for 1, 2, 4 and 6. Touches one new script, three existing ones, the shim list,
-the skill and the dispatcher.
+The fix for 1, 2, 4 and 6. Three commits: `c7e59a6` (2a–2d, the shim, the tests) ·
+`48c997d` (2f) · the docs commit after it (2e, 2g, this file).
 
-- [ ] **2a. `scripts/db-lock.sh` — `claim | release | status | transfer`.**
+Deviations from the plan below, all deliberate:
+
+- **Launch no longer refuses on a held lock (2f, not only pre-wave).** The dispatcher
+  starts every ticket through `slice-session.sh --prep-only`, so a launch-time refusal
+  would have stalled the wave exactly as the pre-wave check did. Starting is safe now
+  — the claim guards the DDL, not the launch — so it prints the holder and goes on.
+- **A parked slice leaves a marker.** Checking the pickup path (2f's second bullet)
+  found two things: a slice that exited on a refused claim was relaunched *every*
+  round while the lock was held, opening a session whose first act was to be refused
+  again, and under `--auto` its commits outside the exclusive paths made it read as
+  *finished* — `autoFinished` would have landed half a ticket. So a refused claim in
+  a slice worktree writes `.slice-lock-wait` (excluded by `init`, cleared by a
+  successful claim, by `transfer`, and at every session launch). `runnable()` skips a
+  marked ticket while the lock is held; `autoFinished()` skips it always. That is the
+  whole mechanism; the relaunch path itself was already right.
+- **The scan runs inside `claim`, not after it.** A free lock next to a worktree that
+  is dirty under an exclusive path with no claim is not taken — that would be a lock
+  on paper — so `claim` refuses with the scan's text. The owner is never refused on
+  that account: refusing the one party that followed the rules is how the deadlock
+  comes back. `session-commit.sh` therefore just runs `claim` and relays its output;
+  the "warning, not refusal" for the owner falls out of that.
+- **2b's caller-path argument** was not needed, for the reason 1b's was not.
+- **Shared primitives live in `db-lock-check.sh`**: `db_lock_dir`, `db_lock_log`,
+  `db_lock_read_owner`, `db_lock_owner_stale`, `db_lock_re` (the regex 2d asked to
+  share) and `db_lock_status_line` (the banner). `db-lock.sh` sources it.
+- **`status --porcelain`** exists for scripts: `free`, `unverifiable`, or
+  `held|stale <TAB> branch <TAB> claimed_at <TAB> worktree`.
+- **The dispatcher's proof was a scratch dry run**, not a test: a fixture consumer with
+  two ready tickets, the lock claimed by #44 and #40 parked on it, `--once`. Round 1
+  printed the holder, `waiting for it: #40 — relaunched when it frees`, and started #44
+  only; after `release --landed ticket/44` the next `--once` started both. There is no
+  `slice-run` test harness, and building one was out of scope.
+- **Both SKILL.md copies** edited identically, as in Phase 1.
+
+- [x] **2a. `scripts/db-lock.sh` — `claim | release | status | transfer`.**
   Executed, not sourced (`SHIMS` in `slice-init.ts:148` gets `{ name: "db-lock.sh",
   how: "exec" }`; `sliceInit.test.ts:237` checks the shim list). Contract:
 
@@ -174,7 +210,7 @@ the skill and the dispatcher.
   is idempotent, `release` by a non-owner is refused, `transfer` outside the main checkout
   is refused, missing owner file reads as UNVERIFIABLE, empty lock paths no-op.
 
-- [ ] **2b. `db_lock_holder` reads the claim first, scans second.**
+- [x] **2b. `db_lock_holder` reads the claim first, scans second.**
   Order: (1) owner file present and owner ≠ caller → holder is the owner; (2) owner file
   unreadable → UNVERIFIABLE, as now; (3) no claim → the existing scan, but a dirty
   worktree found this way is reported as *"… has uncommitted changes under
@@ -184,7 +220,7 @@ the skill and the dispatcher.
   *Proof:* extend the 1b test — with a claim present the scan is not consulted; with no
   claim and a dirty non-owner the message names the protocol.
 
-- [ ] **2c. `session-commit.sh`: a commit touching an exclusive path requires the claim.**
+- [x] **2c. `session-commit.sh`: a commit touching an exclusive path requires the claim.**
   At the block starting `session-commit.sh:190`: if the staged set matches `lock_re`, run
   `db-lock.sh claim` (idempotent for the owner; wins the lock if nobody had it — a slice
   that wrote a migration without claiming is not punished, it is just late). If the claim
@@ -196,7 +232,7 @@ the skill and the dispatcher.
   *Proof:* a test that stages a migration in a worktree that does not own the lock and
   asserts the refusal names the owner.
 
-- [ ] **2d. `slice-land.sh` releases the lock once the migration is on base.**
+- [x] **2d. `slice-land.sh` releases the lock once the migration is on base.**
   After `git push origin "$SLICE_BASE_BRANCH"` succeeds (`slice-land.sh:135`), if the
   landed range touched an exclusive path — reuse the `lock_re` construction from
   `session-commit.sh`, or move it into `db-lock-check.sh` as `db_lock_re` so both share it
@@ -207,7 +243,7 @@ the skill and the dispatcher.
   *Proof:* land a slice that owns the lock; `db-lock.sh status` reports free and the log
   has the release.
 
-- [ ] **2e. The skill: claim before you touch the database.**
+- [x] **2e. The skill: claim before you touch the database.**
   In `agent/skills/slice/SKILL.md` (and `.claude/skills/slice/SKILL.md`), a new section
   between "Build it" and "Commit":
 
@@ -224,7 +260,7 @@ the skill and the dispatcher.
   defined exit that is not "wait forever".
   *Proof:* read-through; `azelf init` regenerates the consumer's copy.
 
-- [ ] **2f. The dispatcher.**
+- [x] **2f. The dispatcher.**
   - Launch (`slice-session.sh:202`) and pre-wave (`slice-run.ts:1884`) keep calling
     `db_lock_holder`, now claim-aware via 2b. The pre-wave check must **not** block
     tickets that do not need the lock — today it stops the whole wave. Replace "lock held →
@@ -239,7 +275,7 @@ the skill and the dispatcher.
     one line, `DB lock: held by ticket/44 since 10:02` or `DB lock: free`.
   *Proof:* a dry run with a held lock starts the non-lock tickets and prints the holder.
 
-- [ ] **2g. README.** The `db-lock-check.sh` row in the scripts table gains a `db-lock.sh`
+- [x] **2g. README.** The `db-lock-check.sh` row in the scripts table gains a `db-lock.sh`
   row; the "Only one worktree may hold changes…" paragraph (README:591) describes the
   claim, when it is taken, when it is released, and `transfer`. Keep it to the length of
   what is there now.
@@ -272,9 +308,20 @@ day. Phase 3 is a morning once 2 exists. Do them in order; 2 depends on nothing 
 the shared `lock_re` (2d) and the mutual-case text (1b/2b), so 1 can also be folded into 2
 if the context allows.
 
-## Recovery until Phase 2 lands
+## Recovery
 
-If two slices deadlock again: in one worktree `git stash push -- <exclusive paths>`; let
-the other commit and land; `git stash pop`, renumber the migration's timestamp if it now
-sorts before the one that landed; and **check what each slice already applied to the
-live database** — the deadlock means both may have.
+With the claim in place the states that need a human are these, and each one's message
+names the command:
+
+- **Two slices both want the lock.** No deadlock: one holds it, the other was refused,
+  exited, and is parked. To reorder, from the main checkout:
+  `./scripts/db-lock.sh transfer <ticket> --reason "…"`. The loser finds out at its next
+  claim or commit; check what it has already applied.
+- **Two worktrees dirty under the exclusive paths and no claim** (the protocol was
+  skipped twice): in all but one, `git stash push -- <exclusive paths>`; in the one,
+  `./scripts/db-lock.sh claim`, commit, land; `git stash pop` in the others, renumber if
+  needed; and **check what each already applied to the live database**.
+- **STALE** (owner branch gone): check `.git/azelf-db.log` and the database, then from the
+  main checkout `./scripts/db-lock.sh release --landed <branch>`.
+- **UNVERIFIABLE** (lock dir with no readable owner): check the log; once nobody is
+  mid-migration, `rm -r .git/azelf-db.lock`.

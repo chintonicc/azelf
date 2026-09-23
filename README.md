@@ -123,7 +123,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes six marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes seven marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -146,12 +146,13 @@ saying so.
 | `scripts/slice-done.sh` | shim — a session marks itself ready to land |
 | `scripts/slice-land.sh` | shim — rebase, gate and fast-forward one branch |
 | `scripts/session-commit.sh` | shim — commit with explicit paths |
-| `scripts/db-lock-check.sh` | shim — the exclusive-path lock |
+| `scripts/db-lock-check.sh` | shim — the exclusive-path lock's check, sourced |
+| `scripts/db-lock.sh` | shim — claim, release, transfer the exclusive-path lock |
 | `scripts/format.sh` | shim — the write half of the formatter, run by hand |
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | six marker patterns, in a delimited block |
+| `.git/info/exclude` | seven marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf`. They are one line of real logic and safe to commit.
@@ -230,7 +231,8 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths
 ./scripts/slice-done.sh                                    # mark ready to land
 ./scripts/format.sh                                        # the write half, by hand
-./scripts/db-lock-check.sh                                 # may I touch locked paths?
+./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths
+./scripts/db-lock.sh status                                # who holds them, since when
 ```
 
 ## Configuration reference
@@ -588,9 +590,15 @@ against a single shared instance being the canonical case.
 exclusiveLockPaths: ["db/migrations"]
 ```
 
-Only one worktree may hold changes to these at a time. `db-lock-check.sh` diffs
-against the base branch to work out who holds it; a second slice that touches them
-cannot launch or commit until the first lands.
+Only one worktree may hold changes to these at a time, and the lock is a claim,
+not an inference: a slice runs `db-lock.sh claim` before it touches them, an atomic
+`mkdir` in the shared git dir that exactly one claimer wins. `session-commit.sh`
+refuses a commit under those paths without the claim, `slice-land.sh` releases it
+once the change is on the base branch, and a slice refused at `claim` exits and is
+parked by the dispatcher until the lock frees. The only override is the operator's,
+`db-lock.sh transfer <ticket> --reason "…"` from the main checkout, and it is logged
+in `.git/azelf-db.log`. A worktree found dirty under those paths with no claim is
+named as having skipped the protocol.
 
 **Set this to `[]` and the lock becomes a no-op, which is right almost everywhere.**
 It earns its place only when you have one live shared resource with no
