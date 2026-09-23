@@ -1,6 +1,6 @@
 # What consumer-a's 2026-09-23 friction log still has open
 
-**Status:** OPEN, nothing landed · **Written:** 2026-09-24
+**Status:** OPEN: Phase 1 LANDED 2026-09-24; Phases 2–3 open · **Written:** 2026-09-24
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), `docs/wave-friction-plan.md` (the part of the same log that has landed).
 
@@ -40,7 +40,7 @@ are in this plan.
 
 ## Phase 1 — a wave that survives a crash
 
-- [ ] **1a. A disk floor before every prep.**
+- [x] **1a. A disk floor before every prep.** (`56f02bf`)
   - **The config value.** `minFreeDiskGb` in `slice.config.ts`, defaulting to 10 in the
     loader.
   - **Checked before each prep.** Before each prep in the start loop
@@ -68,7 +68,7 @@ are in this plan.
   time. A number in the config is predictable and testable, and the README says how to
   pick one.
 
-- [ ] **1b. A failed prep cleans up after itself.**
+- [x] **1b. A failed prep cleans up after itself.** (`56f02bf`)
   - **A new worktree is removed.** When the worktree did not exist before this prep, and
     the prep failed, remove it with `git worktree remove --force <path>` and print:
     > removed the half-prepped worktree for #33 — it held nothing but a partial install
@@ -96,7 +96,7 @@ are in this plan.
   - **An existing worktree.** The same failing prep in a worktree that already existed
     (`worktrees: [40]`) leaves it in place.
 
-- [ ] **1c. A stale `.slice-live` is noticed.**
+- [x] **1c. A stale `.slice-live` is noticed.** (`b23273c`)
   - **How a session is judged alive.** `hasSession` (`slice-run.ts:547`) reads the pid on
     the marker's first line and checks that it is still this slice's session: `ps -o
     command= -p <pid>` has to contain `slice-session` and the ticket id as an argument.
@@ -118,7 +118,7 @@ are in this plan.
     is asked from several filters. The launch grace (`launchedAt`) still covers the
     moment before a new session has written its marker.
 
-- [ ] **1d. A crashed slice is relaunched, not landed.**
+- [x] **1d. A crashed slice is relaunched, not landed.** (`b23273c`)
   - **`autoFinished`** (`:1041`) also requires a clean worktree (`git status
     --porcelain` empty) and no `.slice-interrupted`. A dirty or interrupted worktree
     with no session then falls through to `runnable` (`:663`), which relaunches it in the
@@ -162,6 +162,43 @@ are in this plan.
   - **A real session.** One started by the dispatcher (the fake agent sleeps) is left
     alone across rounds (`startDispatcher`).
   - **The existing smoke test** (clean, committed, no session, no marker) still lands.
+
+**As landed, where it differs from the above:**
+- 1a: only a prep that creates a NEW worktree is held. A relaunch into an existing
+  worktree costs next to nothing on disk and leads to a land, which is what frees
+  space, so holding it could only stall the wave. `0` turns the check off, and a
+  statfs that fails counts as room. The first new worktree of a round is checked
+  before the `[round N] starting` line, so a held round does not announce starts it
+  won't make. "Nothing can advance" on the disk fires when nothing is running, nothing
+  was prepped this round, and every open ticket is parked (with no retry due) or has
+  nothing to land. It exits 1 even with nothing parked. Free space is in GB of 10⁹
+  bytes (statfs's `bavail`). The README's config table has the `minFreeDiskGb` row;
+  3f still owns the troubleshooting text.
+- 1a proof: the floor test runs the dispatcher in the background. As a blocking
+  `runDispatcher`, a run without the floor retries its prep forever and hangs the
+  suite instead of failing it (found by switching the check off).
+- 1b: a worktree that `git worktree remove --force` refuses is reported with its path
+  and left in place. `git worktree add` already removes its own partial directory
+  when it fails.
+- 1c: the check is `kill -0` first (no such process means gone), then
+  `ps -ww -o command= -p <pid>`. `-ww` because ps can cut the command to the
+  terminal's width, and the ticket id is at the end of a long `node_modules` path.
+  When `ps` cannot run at all, the session counts as live. Only the `ps` answer is
+  memoised per round; whether the marker exists is still read each time.
+- 1d: the relaunch prompt counts commits against the local base AND
+  `origin/<base>` when it exists, because a new worktree is cut from origin and a
+  local base that is behind it would make origin's commits look like the slice's own.
+- 1c/1d proof: the fixture gained `launch: true`, a launcher that spawns each
+  session's command detached, and `fakeSession(c, n)`, a process whose command line
+  passes the check. The two existing tests that wrote a made-up pid (`99999`) into
+  `.slice-live` use it now; under 1c that pid reads as a crash. The relaunch tests
+  assert that no land was even attempted ("marked done" never printed): with the
+  clean-tree check switched off, the land's own dirty check refused the slice, and
+  the relaunch still happened, so "not landed" alone did not catch it.
+- Found on the way, not fixed: under `--auto`, a slice that `autoFinished` and was
+  then parked (red gates, BLOCK) has no ready marker, so `runnable` also relaunches
+  it. That predates this plan. It is why the assertion above had to be "no land
+  attempted".
 
 ## Phase 2 — guards
 
