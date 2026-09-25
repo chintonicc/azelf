@@ -137,8 +137,12 @@ describe("the disk floor and a failed prep", () => {
     await d.until(
       "nothing can advance — nothing is running or left to land, and #40 cannot start",
     );
+    await d.exited;
 
     const out = d.output();
+    expect(out).toContain(
+      "and run again:\n\n    bunx azelf run --auto -y --interval 1 40\n",
+    );
     expect(out).toMatch(/· disk: \d+\.\d GB free where the worktrees go/);
     const hold =
       /disk: \d+\.\d GB free where the worktrees go, below minFreeDiskGb \(1000000000\) — starting nothing until there is more/g;
@@ -551,6 +555,10 @@ ${body}`;
     expect(git(c.wt(40), "rev-parse", "HEAD")).toBe(head);
     expect(rebaseInProgress(c.wt(40))).toBe(false);
     expect(existsSync(c.closeFile)).toBe(false);
+    // The same run's flags, without --once.
+    expect(r.out).toContain(
+      "To pick the run up again:\n\n    bunx azelf run --auto -y --no-review 40\n",
+    );
 
     // A second run gives up again, and the first attempt's report stays.
     expect(runDispatcher(c, auto).code).toBe(1);

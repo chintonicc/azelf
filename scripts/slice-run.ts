@@ -2959,7 +2959,7 @@ for (;;) {
         left === null
           ? "the disk is"
           : `${gb(left)} free where the worktrees go,`
-      } below minFreeDiskGb (${minFreeDiskGb}). Nothing in this run will free space; free some, or lower minFreeDiskGb in slice.config.ts, and run again.`,
+      } below minFreeDiskGb (${minFreeDiskGb}). Nothing in this run will free space; free some, or lower minFreeDiskGb in slice.config.ts, and run again:\n\n    ${resumeCommand()}`,
     );
     process.exitCode = 1;
     break;
@@ -2983,6 +2983,21 @@ if (landedOnRetry.size > 0) {
     "\n  Each failed first and passed on a re-run. Find the flaky test before it",
   );
   console.log("  hides a real failure the same way.");
+}
+
+/**
+ * The command that picks this run up where it stopped: its own flags, minus
+ * `--once`, and the tickets it left open, which are the parked ones when
+ * parking is what stopped it. Ids rather than none: a run of every ready
+ * ticket would plan again from the tracker, and that can be a different set.
+ */
+function resumeCommand(): string {
+  const flags = argv.filter(
+    (a, i) =>
+      a !== "--once" && !(isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? "")),
+  );
+  const open = tickets.filter((t) => t.open).map((t) => t.id);
+  return ["bunx azelf run", ...flags, ...open].join(" ");
 }
 
 /**
@@ -3012,5 +3027,6 @@ if (parked.size > 0) {
       parked.size > 1 ? "  (one at a time)" : ""
     }`,
   );
+  console.log(`  To pick the run up again:\n\n    ${resumeCommand()}`);
   process.exitCode = 1;
 }
