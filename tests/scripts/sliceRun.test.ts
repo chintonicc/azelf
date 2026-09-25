@@ -750,6 +750,60 @@ describe("azelf retry", () => {
   });
 });
 
+describe("the command line", () => {
+  /** The real CLI, from a directory with no slice.config.ts above it. */
+  const azelf = (cwd: string, ...args: string[]) => {
+    const env = Object.fromEntries(
+      Object.entries(process.env).filter(
+        ([k]) => k !== "SLICE_REPO_ROOT" && k !== "SLICE_CONFIG",
+      ),
+    );
+    const r = spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), ...args], {
+      cwd,
+      encoding: "utf8",
+      env,
+    });
+    return { code: r.status, stdout: r.stdout, stderr: r.stderr };
+  };
+
+  it("answers run --help with the flags, and plans nothing", () => {
+    c = makeConsumer({ worktrees: [40] });
+    const r = runDispatcher(c, ["--auto", "--help"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("-y ");
+    expect(r.out).toContain("--interval");
+    expect(r.out).not.toContain("reading the plan");
+  });
+
+  it("refuses a flag it does not know, and plans nothing", () => {
+    c = makeConsumer({ worktrees: [40] });
+    const r = runDispatcher(c, ["--hepl"]);
+    expect(r.code).toBe(64);
+    expect(r.out).toContain(
+      "unknown flag --hepl — azelf run --help lists them",
+    );
+    expect(r.out).not.toContain("reading the plan");
+  });
+
+  it("leaves a value flag's argument alone", () => {
+    c = makeConsumer({ worktrees: [40] });
+    const r = runDispatcher(c, ["--max", "-1", "--plan"]);
+    expect(r.out).not.toContain("unknown flag");
+    expect(r.out).toContain("reading the plan");
+  });
+
+  it("prints azelf's usage to stdout on -h, and run's without a config", () => {
+    c = makeConsumer({});
+    const top = azelf(c.root, "-h");
+    expect(top.code).toBe(0);
+    expect(top.stdout).toContain("azelf run --help lists every flag");
+
+    const run = azelf(c.root, "run", "--help");
+    expect(run.code).toBe(0);
+    expect(run.stdout).toContain("--no-auto-resolve");
+  });
+});
+
 /**
  * Two dispatchers on one repo: each gates one slice at a time already, and
  * the gate lock stops the second one's gates running on top of the first's.

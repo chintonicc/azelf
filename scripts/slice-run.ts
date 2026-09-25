@@ -2,19 +2,7 @@
 /**
  * Drive a whole plan's worth of slices from one command.
  *
- *   ./scripts/slice-run.ts                 # plan, confirm, then run to completion
- *   ./scripts/slice-run.ts --plan          # print the dependency tree and stop
- *   ./scripts/slice-run.ts 9 10 11 12      # an explicit ticket set
- *   ./scripts/slice-run.ts --max 2         # cap concurrent sessions
- *   ./scripts/slice-run.ts --once          # one round, then exit
- *   ./scripts/slice-run.ts --auto          # land without waiting for slice-done.sh
- *   ./scripts/slice-run.ts --no-start      # land at a bare prompt instead of starting work
- *   ./scripts/slice-run.ts --review        # review each slice before landing (implied by --auto)
- *   ./scripts/slice-run.ts --auto --no-review   # opt out of the review --auto implies
- *   ./scripts/slice-run.ts --no-auto-resolve    # never let an agent resolve a rebase conflict
- *   ./scripts/slice-run.ts --gates 12      # run the landing gates on slice 12, land nothing
- *   ./scripts/slice-run.ts --retry 12      # retry parked slice 12 in the running dispatcher
- *   ./scripts/slice-run.ts --sync-edges    # write the edges the bodies claim, then stop
+ *   azelf run --help      # every flag; the text is USAGE in slice-run-usage.ts
  *
  * Inside a finished slice, run ./scripts/slice-done.sh — this then re-runs the
  * gates, lands it, closes the ticket, and starts whatever that unblocked.
@@ -117,6 +105,9 @@ import {
   resolutionProblem,
   stopProblem,
 } from "./slice-resolve";
+// The flags, and the text `--help` prints: a module of its own so bin/azelf.ts
+// can print it where there is no slice.config.ts for this file to load.
+import { USAGE, VALUE_FLAGS, unknownFlag, wantsHelp } from "./slice-run-usage";
 // And the tracker: every ticket and every blocking edge below is read through
 // `tracker`, never through gh directly. Ids are strings the tracker defines
 // (`ref` writes one the way that tracker does — `#3`, or `ENG-3`); see
@@ -147,6 +138,18 @@ const value = (name: string) => {
   const i = argv.indexOf(name);
   return i >= 0 ? argv[i + 1] : undefined;
 };
+
+// Before anything reads a flag: --retry, the tracker and the plan all come
+// after this, so a mistyped flag costs nothing but the message.
+if (wantsHelp(argv)) {
+  console.log(USAGE);
+  process.exit(0);
+}
+const unknown = unknownFlag(argv);
+if (unknown !== null) {
+  console.error(`unknown flag ${unknown} — azelf run --help lists them`);
+  process.exit(64);
+}
 
 // Passed straight through to slice-session.sh, whose defaults these mirror —
 // autostart in particular (a tab that opens and then waits to be told the same
@@ -2429,7 +2432,6 @@ function reportOverlaps(all: Ticket[]): void {
 // A ticket id is whatever the tracker says one is — `^[0-9]+$` on GitHub, so
 // `--max 2` and `--interval 30` would read as tickets #2 and #30 if their
 // values were not skipped here.
-const VALUE_FLAGS = new Set(["--max", "--interval"]);
 const explicit: TicketId[] = argv.filter(
   (a, i) => isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? ""),
 );

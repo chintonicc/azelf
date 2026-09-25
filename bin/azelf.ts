@@ -16,12 +16,15 @@
 
 import { spawnSync } from "node:child_process";
 import { hookBlock, init, packageRoot } from "../scripts/slice-init";
+import { USAGE, wantsHelp } from "../scripts/slice-run-usage";
 
 const argv = process.argv.slice(2);
 const verb = argv[0];
 
-const usage = (): never => {
-  console.error(
+const usage = (asked = false): never => {
+  // Asked for, it is the answer and goes to stdout; after a mistake it is the
+  // error, on stderr, with the exit code that says so.
+  (asked ? console.log : console.error)(
     [
       "usage:",
       "  azelf init [--hook] [--codex]",
@@ -30,14 +33,14 @@ const usage = (): never => {
       "        --codex   also install /azelf into ~/.codex/prompts",
       "  azelf run [args…]",
       "        dispatch slices: --plan, --auto, or explicit ticket ids",
-      "        --sync-edges  record the blockers ticket bodies claim, then stop",
+      "        azelf run --help lists every flag",
       "  azelf retry <ticket>",
       "        retry a parked slice's land in the running dispatcher's next round",
       "  azelf hook",
       "        print the shell autostart block, for pasting by hand",
     ].join("\n"),
   );
-  process.exit(2);
+  process.exit(asked ? 0 : 2);
 };
 
 if (verb === "init") {
@@ -57,6 +60,12 @@ if (verb === "init") {
           wrote === 1 ? "" : "s"
         }. Edit slice.config.ts before the first run.`,
   );
+} else if (verb === "-h" || verb === "--help") {
+  usage(true);
+} else if (verb === "run" && wantsHelp(argv.slice(1))) {
+  // Here rather than in the dispatcher, which cannot start without a
+  // slice.config.ts; the help is for finding out what to put in one.
+  console.log(USAGE);
 } else if (verb === "run" || verb === "retry") {
   if (verb === "retry" && argv.length !== 2) usage();
   const args =
