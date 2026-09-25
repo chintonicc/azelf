@@ -87,6 +87,8 @@ export type FakeTicket = {
   title?: string;
   body?: string;
   state?: "open" | "closed";
+  /** Labels besides `ready`, which every fake ticket carries. */
+  labels?: string[];
 };
 
 export function makeConsumer(opts: {
@@ -211,7 +213,7 @@ import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringif
       join(AZELF, "index.ts"),
     )};
 const TICKETS = ${JSON.stringify(ticketsFile)};
-type Fake = { title?: string; body?: string; state?: "open" | "closed" };
+type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[] };
 const all = (): Record<string, Fake> => JSON.parse(readFileSync(TICKETS, "utf8"));
 const ticket = (id: string) => ({
   title: ${JSON.stringify(opts.title ?? "t")},
@@ -226,7 +228,13 @@ const tracker: Tracker = {
   listReady: () => [],
   get: (id) => {
     const t = ticket(id);
-    return { id, title: t.title, state: t.state, labels: ["ready"], url: "" };
+    return {
+      id,
+      title: t.title,
+      state: t.state,
+      labels: ["ready", ...(t.labels ?? [])],
+      url: "",
+    };
   },
   blockers: () => [],
   body: (id) => ticket(id).body,

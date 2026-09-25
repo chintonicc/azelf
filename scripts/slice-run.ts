@@ -225,6 +225,8 @@ type Ticket = {
   /** Blockers outside the set — reported, never scheduled around silently. */
   foreignBlockers: TicketId[];
   wave: number;
+  /** Carries `exclusiveLockLabel`: scheduled one at a time, see `runnable`. */
+  exclusive: boolean;
 };
 
 /**
@@ -285,6 +287,7 @@ function loadTickets(explicit: TicketId[]): {
 
   const tickets: Ticket[] = [];
   const missingEdges: MissingEdge[] = [];
+  const lockLabel = config.exclusiveLockLabel;
   for (const id of runnable) {
     const meta = tracker.get(id);
     const declared = tracker.blockers(id);
@@ -305,6 +308,7 @@ function loadTickets(explicit: TicketId[]): {
         .filter((b) => !inSet.has(b.id))
         .map((b) => b.id),
       wave: 0,
+      exclusive: lockLabel !== undefined && meta.labels.includes(lockLabel),
     });
   }
   return { tickets, epics, missingEdges };
@@ -502,15 +506,36 @@ function printTree(tickets: Ticket[]): number {
             .join(", ")} (outside this set)`
         : "";
       const done = t.open ? "" : "  ✓ closed";
-      console.log(`      ${ref(t.id)}  ${t.title}${blockers}${foreign}${done}`);
+      const label = t.exclusive ? `  [${config.exclusiveLockLabel}]` : "";
+      console.log(
+        `      ${ref(t.id)}  ${t.title}${label}${blockers}${foreign}${done}`,
+      );
     }
+  }
+
+  // Labelled tickets share one slot whatever their wave: two of them in one
+  // wave would both reach `db-lock.sh claim`, and one would only be refused.
+  const exclusive = tickets.filter((t) => t.exclusive && t.open);
+  if (exclusive.length > 1) {
+    console.log("");
+    console.log(
+      `  ${exclusive.map((t) => ref(t.id)).join(", ")} carry [${
+        config.exclusiveLockLabel
+      }] (exclusiveLockLabel): they run one at a time, in this order, whatever their wave says — each one touches ${config.exclusiveLockPaths.join(
+        ", ",
+      )}, and only one slice may hold the DB lock.`,
+    );
   }
 
   // The widest wave is the most sessions that can ever be useful at once.
   // Running more than this cannot go faster; it only burns tokens on tickets
-  // whose blockers haven't landed.
+  // whose blockers haven't landed. A wave's labelled tickets count as one.
   const width = Math.max(
-    ...ordered.map((w) => (waves.get(w) as Ticket[]).length),
+    ...ordered.map((w) => {
+      const inWave = waves.get(w) as Ticket[];
+      const labelled = inWave.filter((t) => t.exclusive).length;
+      return inWave.length - labelled + Math.min(labelled, 1);
+    }),
   );
   console.log("");
   console.log(`  ${tickets.length} tickets, ${ordered.length} waves deep`);
@@ -780,10 +805,18 @@ function unparkClosed(tickets: Ticket[]): void {
  * And not while a rebase or merge is in progress in its worktree
  * (`inProgress`): a session opened there would work on top of someone's
  * half-finished fix.
+ *
+ * Last, `exclusiveLockLabel` tickets are a group of size one: while one is in
+ * flight (see `exclusiveInFlight`) only that one may be relaunched, and with
+ * none in flight only the first of them may start. Without this, two
+ * labelled tickets in one round both open a session, both reach `db-lock.sh
+ * claim`, and the loser exits having done nothing but be refused.
  */
 function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
   const closed = new Set(tickets.filter((t) => !t.open).map((t) => t.id));
-  return tickets.filter(
+  const flying = exclusiveInFlight(tickets);
+  let exclusiveTaken = false;
+  const ready = tickets.filter(
     (t) =>
       t.open &&
       !occupied(t.id) &&
@@ -794,7 +827,27 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       t.foreignBlockers.length === 0 &&
       t.blockedBy.every((b) => closed.has(b)),
   );
+  return ready.filter((t) => {
+    if (!t.exclusive) return true;
+    if (flying) return t.id === flying.id;
+    if (exclusiveTaken) return false;
+    exclusiveTaken = true;
+    return true;
+  });
 }
+
+/**
+ * The labelled ticket holding the group's one slot: open, and occupied or
+ * with a worktree. A worktree is the test, not a session, because every state
+ * between the first launch and the land counts — running, done and waiting
+ * on a land, parked, crashed, refused at the claim — and in all of them its
+ * migration is not on the base branch yet. A land removes the worktree and
+ * closes the ticket, which is what frees the slot.
+ */
+const exclusiveInFlight = (tickets: Ticket[]): Ticket | undefined =>
+  tickets.find(
+    (t) => t.exclusive && t.open && (occupied(t.id) || hasWorktree(t.id)),
+  );
 
 // ─── disk ─────────────────────────────────────────────────────────────────
 
@@ -2672,7 +2725,11 @@ if (lockEnabled) {
   console.log(
     `  ${dbLockStatusLine()} — ${config.exclusiveLockPaths.join(
       ", ",
-    )}; a slice claims it before touching them, and parks if refused.`,
+    )}; a slice claims it before touching them, and parks if refused${
+      config.exclusiveLockLabel
+        ? `. Tickets labelled [${config.exclusiveLockLabel}] start one at a time`
+        : ""
+    }.`,
   );
 }
 console.log(
@@ -2726,6 +2783,8 @@ let round = 0;
 // The round line last printed, without its round number, and when.
 let lastRoundLine = "";
 let lastRoundLineAt = 0;
+// The exclusiveLockLabel line last printed, so a long wait says it once.
+let lastLabelLine = "";
 for (;;) {
   round += 1;
   sessionAnswers.clear();
@@ -2806,6 +2865,23 @@ for (;;) {
   const up = tickets.filter((t) => t.open && occupied(t.id));
   const free = maxParallel - up.length;
   const ready = runnable(tickets, holder !== "");
+
+  // Once when it changes: a label wait lasts as long as a whole slice does.
+  const flying = exclusiveInFlight(tickets);
+  const labelWaiting = flying
+    ? tickets.filter((t) => t.open && t.exclusive && t.id !== flying.id)
+    : [];
+  const labelLine = labelWaiting.length
+    ? `[${config.exclusiveLockLabel}] one at a time: ${ref(
+        (flying as Ticket).id,
+      )} in flight; waiting on it: ${labelWaiting
+        .map((t) => ref(t.id))
+        .join(", ")}`
+    : "";
+  if (labelLine && labelLine !== lastLabelLine) {
+    console.log(`\n[round ${round}] ${labelLine}`);
+  }
+  lastLabelLine = labelLine;
 
   // Below minFreeDiskGb, a slice that needs a NEW worktree waits. A relaunch
   // reuses its worktree, costs next to nothing on disk, and leads to a land,

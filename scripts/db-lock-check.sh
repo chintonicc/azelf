@@ -81,7 +81,10 @@
 # the holder and waited, forever, for a condition that could not become true.
 # The claim (docs/db-lock-plan.md) is what fixes both: a lock taken before the
 # DDL, with exactly one owner. The mutual-case diagnosis below is kept for the
-# path where nobody claimed, and its advice now ends in a claim.
+# path where nobody claimed, and its advice now ends in a claim. And
+# `exclusiveLockLabel` is how the dispatcher avoids scheduling the race the
+# claim resolves: labelled tickets are started one at a time (slice-run.ts,
+# `runnable`).
 #
 # The commit-time call runs under session-commit.sh's mkdir mutex, which lives
 # in the COMMON git dir and so serializes commits across worktrees. That stops

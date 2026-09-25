@@ -72,6 +72,19 @@ export type SliceConfig = {
   readyLabel: string;
   /** Paths only one worktree may hold changes to at a time. `[]` disables. */
   exclusiveLockPaths: string[];
+  /**
+   * The tracker label on tickets that will touch `exclusiveLockPaths`.
+   * Optional; unset means no ticket is known to need the lock ahead of time.
+   *
+   * The DB lock makes two migration-bearing slices safe: one claims it, and
+   * the other is refused at `db-lock.sh claim` and exits, to be relaunched
+   * once it frees. That still opens a session only for it to stop again. A
+   * labelled ticket is scheduled as a group of one instead: while any
+   * labelled ticket is in flight (it has a worktree and is not landed), no
+   * other labelled ticket starts. Setting it with no `exclusiveLockPaths` is
+   * an error, since a label with nothing to protect is a typo.
+   */
+  exclusiveLockLabel?: string;
   /** Gitignored files copied into each new worktree. */
   provisionCopy: string[];
   /**
@@ -298,6 +311,16 @@ function validate(c: SliceConfig): SliceConfig {
     bad("branchPattern must contain {n} exactly once, or it cannot round-trip");
   }
   if (!c.readyLabel) bad("readyLabel must be a non-empty label name");
+  if (c.exclusiveLockLabel !== undefined) {
+    if (typeof c.exclusiveLockLabel !== "string" || !c.exclusiveLockLabel) {
+      bad("exclusiveLockLabel must be a non-empty label name, or left out");
+    }
+    if (!c.exclusiveLockPaths?.length) {
+      bad(
+        "exclusiveLockLabel is set but exclusiveLockPaths is empty — the label has nothing to protect",
+      );
+    }
+  }
   if (c.overlapIgnore !== undefined) {
     if (!Array.isArray(c.overlapIgnore)) {
       bad("overlapIgnore must be an array of path patterns, or left out");
@@ -562,6 +585,7 @@ export function shellAssignments(): string {
     // what used to be here instead.
     shArray("SLICE_WRAP_COMMAND", config.wrapCommand ?? []),
     shArray("SLICE_EXCLUSIVE_LOCK_PATHS", config.exclusiveLockPaths),
+    `SLICE_EXCLUSIVE_LOCK_LABEL=${shq(config.exclusiveLockLabel ?? "")}`,
     shArray("SLICE_PROVISION_COPY", config.provisionCopy),
   ].join("\n");
 }

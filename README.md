@@ -311,6 +311,7 @@ export default {
 | `worktreeDir` | `string` | worktree location relative to repo root; `{repo}` and `{n}` |
 | `readyLabel` | `string` | issue label marking a ticket runnable |
 | `exclusiveLockPaths` | `string[]` | paths only one worktree may hold changes to; `[]` disables |
+| `exclusiveLockLabel` | `string?` | tracker label on tickets that will touch `exclusiveLockPaths`; they are started one at a time. Needs `exclusiveLockPaths` |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
@@ -704,6 +705,18 @@ parked by the dispatcher until the lock frees. The only override is the operator
 `db-lock.sh transfer <ticket> --reason "…"` from the main checkout, and it is logged
 in `.git/azelf-db.log`. A worktree found dirty under those paths with no claim is
 named as having skipped the protocol.
+
+The claim makes the collision safe; a label keeps it from being scheduled at all.
+
+```ts
+exclusiveLockLabel: "db"
+```
+
+A ticket carrying that label is known to need the lock, so the dispatcher starts
+labelled tickets one at a time: while one has a worktree and has not landed, the
+others wait, and the plan marks them `[db]` and counts them as one slot in the widest
+wave. Without it, two such tickets in one wave both open a session, and one of them
+is refused at `claim` and exits having done nothing.
 
 **Set this to `[]` and the lock becomes a no-op, which is right almost everywhere.**
 It earns its place only when you have one live shared resource with no

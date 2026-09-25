@@ -1,6 +1,6 @@
 # The exclusive-path lock: from a scan to a claim
 
-**Status:** Phase 1 LANDED 2026-09-23 · Phase 2 LANDED 2026-09-23 · Phase 3 open · **Written:** 2026-09-23
+**Status:** Phase 1 LANDED 2026-09-23 · Phase 2 LANDED 2026-09-23 · Phase 3 LANDED 2026-09-25 · **Written:** 2026-09-23
 **Companion:** `scripts/db-lock-check.sh` header (the current design and its known
 limitation), `docs/extraction-plan.md` (how the scripts got here).
 
@@ -280,21 +280,42 @@ Deviations from the plan below, all deliberate:
   claim, when it is taken, when it is released, and `transfer`. Keep it to the length of
   what is there now.
 
+## Phase 3 — landed
+
+One commit (3a–3d and the tests).
+
+Deviations from the plan below, all deliberate:
+
+- **"In flight" is "has a worktree", not "occupied or ready-to-land".** Every state
+  between the first launch and the land holds a migration that is not on base yet:
+  running, done, parked, crashed, refused at the claim. A worktree covers all of
+  them, and a land removes it. The first labelled ticket in the run's order starts;
+  the rest wait.
+- **The plan's widest wave counts a wave's labelled tickets as one slot**, so the
+  default `--max` does not open sessions that could only wait.
+- **The waiting line is printed when it changes**, like the round line since
+  `fe8664b`: `[db] one at a time: #40 in flight; waiting on it: #44`.
+- **The proof is three dispatcher tests** in `sliceRun.test.ts` (plan marks and width,
+  one-at-a-time then the next after the land, the validation error), on the fixture's
+  fake tracker, which now takes labels per ticket. With the grouping disabled the
+  second test fails: #44 is prepped next to #40.
+- **Both `azelf.md` copies** got the same paragraph.
+
 ## Phase 3 — stop scheduling the collision
 
 Phases 1–2 make the collision safe and self-resolving; this makes it not happen, so a
 migration-bearing slice is not started only to exit again.
 
-- [ ] **3a. `exclusiveLockLabel?: string` in `SliceConfig`** (`slice-config.ts:63`), carried
+- [x] **3a. `exclusiveLockLabel?: string` in `SliceConfig`** (`slice-config.ts:63`), carried
   through `--sh` as `SLICE_EXCLUSIVE_LOCK_LABEL`; default unset. Validation: setting it
   with empty `exclusiveLockPaths` is an error (a label with nothing to protect is a typo).
-- [ ] **3b. `runnable()` (`slice-run.ts:583`)** treats labelled tickets as a group of size
+- [x] **3b. `runnable()` (`slice-run.ts:583`)** treats labelled tickets as a group of size
   one: if any labelled ticket is in flight (occupied, or ready-to-land and not yet landed),
   no other labelled ticket is runnable. `Ticket` already carries `labels` from the tracker
   (`slice-tracker.ts:75`).
-- [ ] **3c. The plan output** (`agent/commands/azelf.md`, the wave listing in `slice-run.ts`)
+- [x] **3c. The plan output** (`agent/commands/azelf.md`, the wave listing in `slice-run.ts`)
   marks labelled tickets and says why two of them sit in different waves.
-- [ ] **3d. The `db-lock-check.sh` header** gets one sentence pointing here: the label is
+- [x] **3d. The `db-lock-check.sh` header** gets one sentence pointing here: the label is
   how the dispatcher avoids the race the claim resolves.
   *Proof:* `sliceRun`-level test or a dry run with two labelled ready tickets and
   `maxParallel 3`: the second is listed as waiting on the first, not started.

@@ -813,6 +813,77 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
   }, 60_000);
 });
 
+/**
+ * Two tickets that both need the DB lock, in one wave. The claim makes that
+ * safe, but a session opened only to be refused at `db-lock.sh claim` is
+ * wasted; the label keeps the second from starting at all.
+ */
+describe("exclusiveLockLabel", () => {
+  const labelled = () => {
+    const fx = makeConsumer({
+      lockPaths: ["db"],
+      remote: true,
+      agent: ["true"],
+      configExtra: 'exclusiveLockLabel: "db",',
+    });
+    fx.setTicket("40", { labels: ["db"] });
+    fx.setTicket("44", { labels: ["db"] });
+    return fx;
+  };
+
+  it("marks labelled tickets in the plan and counts them as one slot", () => {
+    c = labelled();
+    const r = runDispatcher(c, ["--plan", "40", "41", "44"]);
+
+    expect(r.out).toContain("#40  t  [db]");
+    expect(r.out).toContain("#44  t  [db]");
+    expect(r.out).not.toContain("#41  t  [db]");
+    expect(r.out).toContain(
+      "#40, #44 carry [db] (exclusiveLockLabel): they run one at a time, in this order, whatever their wave says",
+    );
+    expect(r.out).toContain("widest wave: 2");
+  });
+
+  it("starts one labelled ticket at a time, and the next once it lands", async () => {
+    c = labelled();
+    d = startDispatcher(c, [
+      "--auto",
+      "-y",
+      "--no-review",
+      "--max",
+      "3",
+      "--interval",
+      "1",
+      "40",
+      "41",
+      "44",
+    ]);
+    await d.until("[db] one at a time: #40 in flight; waiting on it: #44");
+    expect(d.output()).toContain("starting #40, #41");
+    expect(d.output()).not.toContain("prepping #44");
+
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    await d.until("landing #40");
+    await d.until("starting #44");
+
+    expect(
+      d.output().split("waiting on it: #44").length - 1,
+      "said once, not every round",
+    ).toBe(1);
+  }, 60_000);
+
+  it("is refused with no exclusiveLockPaths to protect", () => {
+    c = makeConsumer({ configExtra: 'exclusiveLockLabel: "db",' });
+    const r = runDispatcher(c, ["--plan", "40"]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain(
+      "exclusiveLockLabel is set but exclusiveLockPaths is empty",
+    );
+  });
+});
+
 /** `azelf retry <id>` through the real CLI, from the consumer's main checkout. */
 const azelfRetry = (fx: Consumer, id: string) => {
   const r = spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), "retry", id], {

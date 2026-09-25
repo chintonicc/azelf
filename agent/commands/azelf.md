@@ -76,6 +76,13 @@ stops instead of sleeping in a circle. The run ends with a list of what is parke
 why, and the command that picks the run up again, and exits non-zero. Every attempt's
 review and resolution is kept in `.slice-reviews/`.
 
+**Tickets that need the DB lock run one at a time** when `exclusiveLockLabel` is set:
+the plan marks them with the label and says so, and the dispatcher starts the next only
+once the one in flight has landed. That is why two of them in one wave do not start
+together. A ticket that touches `exclusiveLockPaths` without the label still works (it
+is refused at `db-lock.sh claim` and relaunched when the lock frees), so label them
+when you file them.
+
 **A session that crashed is relaunched, not landed.** A restart or a killed tab leaves
 a `.slice-live` whose pid is no longer the session; the dispatcher notices, marks the
 worktree `.slice-interrupted`, and opens a new session there.
