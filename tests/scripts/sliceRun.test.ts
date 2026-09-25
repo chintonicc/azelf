@@ -771,6 +771,25 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
     expect(d.output()).not.toContain("── parked");
   }, 60_000);
 
+  it("does not relaunch a slice --auto read as finished once it has parked", async () => {
+    // No slice-done.sh: under --auto, commits and no session read as done.
+    c = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      agent: ["true"],
+      gate: ["false"],
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sessions.push(fakeSession(c, 41));
+    d = startDispatcher(c, ["--auto", "-y", "--interval", "1", "40", "41"]);
+    await d.until(RED);
+    await d.until(seen(RED, 1, 3));
+
+    expect(d.output()).not.toContain("starting #40");
+    expect(d.output()).not.toContain("prepping #40");
+    expect(count(d.output(), RED)).toBe(1);
+  }, 60_000);
+
   it("retries red gates twice as main moves, then stays parked", async () => {
     const { c, d } = parkedRun({ gate: ["false"] });
     await d.until(RED);

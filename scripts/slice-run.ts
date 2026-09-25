@@ -766,6 +766,13 @@ function unparkClosed(tickets: Ticket[]): void {
  * one may still be sitting in, to redo work that is already committed. The
  * ticket is finished; what it is waiting for is a land, not an agent.
  *
+ * And not parked. Under --auto a slice can be finished with no marker at all
+ * (`autoFinished`), so when its land parked, nothing above held it back: it
+ * was relaunched the same round, into the worktree whose land had just
+ * failed. A parked ticket comes back through `isParked`, which the landing
+ * filter asks earlier in the round, so one that is due a retry has already
+ * been taken off `parked` by the time this reads it.
+ *
  * And not parked on the DB lock while it is held (`lockHeld` is this round's
  * reading of it): see `isWaitingOnLock`. A slice that exited on a refused
  * claim is relaunched the round the lock frees, not every round until then.
@@ -781,6 +788,7 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       t.open &&
       !occupied(t.id) &&
       !isReadyToLand(t.id) &&
+      !parked.has(t.id) &&
       !inProgress.has(t.id) &&
       !(lockHeld && isWaitingOnLock(t.id)) &&
       t.foreignBlockers.length === 0 &&
