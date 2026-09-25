@@ -224,15 +224,40 @@ Installs into the repo you are standing in.
 | `--gates <ids…>` | run only the landing gates against existing worktrees, and exit |
 | `--sync-edges` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
 | `--max <n>` | cap concurrent slices (default: the widest wave in the plan) |
-| `--interval <s>` | seconds between polls under `--auto` (default 30) |
+| `--interval <s>` | seconds between rounds (default 30) |
 | `--no-start` | prep the worktree but do not open a session |
 | `--review` | ask the agent to review the diff before landing (implied by `--auto`) |
 | `--no-review` | never review, even under `--auto` |
 | `--no-auto-resolve` | never let an agent resolve a rebase conflict — park it, as before |
 | `-y`, `--yes` | non-interactive: park on any failure instead of asking |
+| `--retry <id>` | what `azelf retry` runs |
+| `-h`, `--help` | print every flag and exit |
 
 `--gates` is how you check a slice by hand — no tracker call, no rebase, no land.
 The worktree is judged exactly as it sits.
+
+A flag it does not know exits 64 (`unknown flag --hepl — azelf run --help lists them`)
+instead of being ignored, which is how `--help` once turned into a full plan and a
+`proceed?`.
+
+While a run waits, its round line is printed only when its counts change, and again
+every ten minutes so a quiet run is not mistaken for a hung one:
+
+```
+[round 12] 2 running · 1 blocked · 5 open — land one to advance
+```
+
+`SLICE_HEARTBEAT_SECONDS` sets that interval, and `0` prints it every round.
+
+A run that stops with work left (everything parked, or the disk below
+`minFreeDiskGb`) ends with the command that picks it up again: the same flags minus
+`--once`, and the tickets it left open.
+
+```
+  To pick the run up again:
+
+    bunx azelf run --auto -y 43 55
+```
 
 ### `azelf retry <ticket>`
 
@@ -772,6 +797,12 @@ blocking review, or `slice-land.sh` refusing a branch that is not fast-forwardab
 Non-interactive runs (`-y`, or no TTY) park automatically, which loses nothing and
 lands nothing unreviewed.
 
+Every review and every conflict resolution is saved in `.slice-reviews/`, one file per
+slice: `ticket-<n>.md` for its reviews, `conflict-<n>.md` for its resolutions. Each
+attempt is added as `## Attempt k — <date> HH:MM`, newest last, so the BLOCK that
+parked a slice is still there after the review that later passed it. A blocked land
+names its file on the line under the ✗, as `review: /…/.slice-reviews/ticket-14.md`.
+
 ### Letting an agent resolve a rebase conflict
 
 One of those four is mechanical, and it is the one a wave produces by construction:
@@ -1026,6 +1057,38 @@ It has an open blocker. `azelf run --plan` prints the reason for every held tick
 Another process holds the land or gate lock, and the line names it by ticket and pid.
 If that process is stuck, end it: a lock whose holder has exited is taken over. See
 [Two dispatchers on one repo](#two-dispatchers-on-one-repo).
+
+**A session crashed, or the machine restarted mid-wave.**
+Nothing to do. The next round finds that the pid in the slice's `.slice-live` is no
+longer its session, and relaunches it in the same worktree:
+
+```
+  #41: its session (pid 52220) ended without clearing .slice-live — a crash, a restart, or a killed tab. Relaunching it.
+```
+
+It also writes `.slice-interrupted` there, which the next session deletes. While that
+marker is there, or the tree is dirty, `--auto` does not read a slice with commits and
+no session as finished, so a crashed slice goes back to a session and is never landed
+half-done.
+
+**The run stops with "nothing can advance" and names the disk.**
+Free space where the worktrees go is below `minFreeDiskGb` (default 10 GB). Only new
+worktrees wait. Relaunches and lands carry on, and each land removes a worktree. Once
+nothing is left running or to land, the run stops, because nothing inside it will free
+space, and prints the command to run again. Free some space, or lower `minFreeDiskGb`,
+and run it. A prep that fails partway, usually for lack of space, removes the worktree
+it created and keeps the branch.
+
+**You want to fix a slice yourself while the dispatcher runs.**
+Do it inside a rebase or merge: the dispatcher leaves a worktree alone while one is in
+progress, and picks it up again once it is finished or aborted. See
+[Fixing a slice by hand while the dispatcher runs](#fixing-a-slice-by-hand-while-the-dispatcher-runs).
+
+**The dispatcher says "azelf changed under this run".**
+azelf was bumped in the main checkout during a wave. The dispatcher keeps running the
+version it started with, and every session and land it starts from then on runs the
+new one. Restart it with the same command when nothing is landing. See
+[Install](#install).
 
 **Marker files show up as untracked.**
 `init` writes them to `.git/info/exclude`, which is per-checkout and not inherited

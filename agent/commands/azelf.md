@@ -30,6 +30,7 @@ file rather than making a network call.
 bunx azelf run 12 14      # prep and open exactly these
 bunx azelf run            # the whole first wave
 bunx azelf run --auto     # dispatch, then land each slice as it finishes
+bunx azelf run --help     # every flag
 ```
 
 Each ticket gets a git worktree outside the repo, its ticket text written to
@@ -72,7 +73,16 @@ optimism. A parked ticket closed some other way — landed by hand — stops cou
 
 If every open slice is parked and nothing is running, the dispatcher says so and
 stops instead of sleeping in a circle. The run ends with a list of what is parked and
-why, and exits non-zero.
+why, and the command that picks the run up again, and exits non-zero. Every attempt's
+review and resolution is kept in `.slice-reviews/`.
+
+**A session that crashed is relaunched, not landed.** A restart or a killed tab leaves
+a `.slice-live` whose pid is no longer the session; the dispatcher notices, marks the
+worktree `.slice-interrupted`, and opens a new session there.
+
+**Bumping azelf mid-wave splits the wave.** The dispatcher keeps the version it
+started with, says `azelf changed under this run`, and every session and land it starts
+from then on runs the new one. Restart it when nothing is landing.
 
 **Two dispatchers on one repo are fine**, each with its own tickets. `slice-land.sh`
 takes a land lock and a dispatcher's gate run takes a gate lock, both in the common
