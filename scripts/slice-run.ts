@@ -1015,10 +1015,39 @@ function askAgent(prompt: string, cwd: string): string | null {
   return ok && out.trim() ? out.trim() : null;
 }
 
-function saveReport(name: string, body: string): string {
+/**
+ * `body` into `.slice-reviews/<name>`, replacing it; or, given a `heading`,
+ * added to it as the next `## Attempt k — <date> HH:MM`, newest last, under
+ * that heading, written once. The appending is for the files one slice is
+ * written to again and again, its review and its conflict resolution: the
+ * attempt that explains why it was parked must survive the attempt after it,
+ * and since a BLOCK is re-reviewed routinely, the passing review would
+ * otherwise replace the one that says why.
+ */
+function saveReport(name: string, body: string, heading?: string): string {
   mkdirSync(REVIEW_DIR, { recursive: true });
   const path = join(REVIEW_DIR, name);
-  writeFileSync(path, body);
+  if (heading === undefined) {
+    writeFileSync(path, body);
+    return path;
+  }
+  let before = "";
+  try {
+    before = readFileSync(path, "utf8");
+  } catch {
+    // The first attempt.
+  }
+  if (!before) before = `${heading}\n`;
+  const k = (before.match(/^## Attempt \d+/gm) ?? []).length + 1;
+  const now = new Date();
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const at = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
+    now.getDate(),
+  )} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  writeFileSync(
+    path,
+    `${before.trimEnd()}\n\n## Attempt ${k} — ${at}\n\n${body.trim()}\n`,
+  );
   return path;
 }
 
@@ -1139,12 +1168,11 @@ function reviewSlice(t: Ticket): boolean {
   );
   const standards = reviewStandards(scope, commits, diff, wt);
 
-  const body = `# Review — ${ref(t.id)} ${t.title}\n\n## Spec\n\n${
-    spec.report
-  }\n\n## Standards\n\n${standards}\n`;
-  const path = saveReport(`ticket-${t.id}.md`, body);
+  const heading = `# Review — ${ref(t.id)} ${t.title}`;
+  const body = `### Spec\n\n${spec.report}\n\n### Standards\n\n${standards}\n`;
+  const path = saveReport(`ticket-${t.id}.md`, body, heading);
 
-  console.log(`\n${body}`);
+  console.log(`\n${heading}\n\n${body}`);
   console.log(`  report saved: ${path}`);
 
   if (spec.block && reviewBlocks) {
@@ -1155,6 +1183,9 @@ function reviewSlice(t: Ticket): boolean {
         t.id
       }.`,
     );
+    // The path is printed above too, as `report saved:`, but the review's text
+    // comes between, and a log cut short at the ✗ line lost it.
+    console.log(`     review: ${path}`);
     return false;
   }
   if (spec.block) {
@@ -1767,20 +1798,21 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
   const report = (verdict: string): string =>
     saveReport(
       `conflict-${t.id}.md`,
-      `# Conflict resolution — ${ref(t.id)} ${t.title}\n\n${verdict}\n\n${
+      `${verdict}\n\n${
         stops.length
           ? stops
               .map(
                 (s, i) =>
-                  `## Stop ${i + 1}: ${s.files.join(", ")}\n\n${
+                  `### Stop ${i + 1}: ${s.files.join(", ")}\n\n${
                     s.out.trim() || "(the agent printed nothing)"
                   }`,
               )
               .join("\n\n")
-          : `## Conflicted files\n\n${conflicted
+          : `### Conflicted files\n\n${conflicted
               .map((f) => `- ${f}`)
               .join("\n")}\n\n(the agent was not run)`
       }\n`,
+      `# Conflict resolution — ${ref(t.id)} ${t.title}`,
     );
 
   const give = (why: string): boolean => {

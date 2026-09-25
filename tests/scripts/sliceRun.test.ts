@@ -551,6 +551,17 @@ ${body}`;
     expect(git(c.wt(40), "rev-parse", "HEAD")).toBe(head);
     expect(rebaseInProgress(c.wt(40))).toBe(false);
     expect(existsSync(c.closeFile)).toBe(false);
+
+    // A second run gives up again, and the first attempt's report stays.
+    expect(runDispatcher(c, auto).code).toBe(1);
+    const report = readFileSync(
+      join(c.main, ".slice-reviews", "conflict-40.md"),
+      "utf8",
+    );
+    expect(report.split("# Conflict resolution — #40").length).toBe(2);
+    expect(report).toMatch(
+      /## Attempt 1 — .*\n\nREJECTED: [\s\S]*### Stop 1: a\.txt[\s\S]*## Attempt 2 — .*\n\nREJECTED: [\s\S]*### Stop 1: a\.txt/,
+    );
   });
 
   it("rejects a resolution that edits a file it was not given", () => {
@@ -670,6 +681,10 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
     const reviews = () =>
       readFileSync(join(c.root, "reviews"), "utf8").trim().split("\n").length;
     expect(reviews()).toBe(2);
+    // The ✗ line names the review file, right under it.
+    expect(d.output()).toMatch(
+      /#40 not landed — spec review says BLOCK\..*\n {5}review: \S+\/\.slice-reviews\/ticket-40\.md\n/,
+    );
 
     c.setTicket("40", { body: "build a — FIXED" });
     await d.until("#40: the ticket was edited since the BLOCK — retrying.");
@@ -677,6 +692,15 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
 
     expect(reviews()).toBe(4);
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    // The passing review did not replace the BLOCK that parked it.
+    const report = readFileSync(
+      join(c.main, ".slice-reviews", "ticket-40.md"),
+      "utf8",
+    );
+    expect(count(report, "# Review — #40")).toBe(1);
+    expect(report).toMatch(
+      /## Attempt 1 — [\d-]+ \d\d:\d\d\n\n### Spec\n[\s\S]*VERDICT: BLOCK[\s\S]*## Attempt 2 — [\d-]+ \d\d:\d\d\n\n### Spec\n[\s\S]*VERDICT: PASS/,
+    );
   }, 60_000);
 
   it("does not stop the run while a parked slice is due a retry", () => {
