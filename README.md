@@ -39,6 +39,7 @@ session in each, and lands the finished ones — re-running the gates itself, be
 - [When a slice will not land](#when-a-slice-will-not-land)
   - [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict)
   - [What retries a parked slice](#what-retries-a-parked-slice)
+  - [Fixing a slice by hand while the dispatcher runs](#fixing-a-slice-by-hand-while-the-dispatcher-runs)
 - [Two dispatchers on one repo](#two-dispatchers-on-one-repo)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
@@ -879,6 +880,25 @@ stops rather than poll: every trigger is an outside event, and starting the
 dispatcher again is the retry — a new run starts with nothing parked. It ends by
 naming every parked slice and exits non-zero, because "the run ended" and "the work
 is done" are different things.
+
+### Fixing a slice by hand while the dispatcher runs
+
+A running dispatcher leaves a worktree alone while a rebase, merge, cherry-pick or
+revert is in progress in it. It does not land it, relaunch it, or stop the run on its
+account, and it says so once:
+
+```
+  #54: a rebase is in progress in its worktree, with no session running there — someone is fixing it by hand, most likely. Not landing or relaunching it until the rebase is finished or aborted.
+```
+
+Without that, a land that found the branch behind the base started its own rebase,
+failed on yours, and ran `git rebase --abort`, which threw your resolution away.
+
+One gap is left: the seconds between a commit and the rebase you run after it. The
+commit moves the branch, which retries a parked land, and a land that starts in that
+gap rebases first. Your `git rebase` then fails with git's "already a rebase-merge
+directory" message; nothing is lost. So start the rebase before you commit, or leave
+the rebase to the dispatcher: commit your fix, and the land it triggers rebases it.
 
 ## Two dispatchers on one repo
 

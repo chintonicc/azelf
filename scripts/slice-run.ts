@@ -764,6 +764,10 @@ function unparkClosed(tickets: Ticket[]): void {
  * And not parked on the DB lock while it is held (`lockHeld` is this round's
  * reading of it): see `isWaitingOnLock`. A slice that exited on a refused
  * claim is relaunched the round the lock frees, not every round until then.
+ *
+ * And not while a rebase or merge is in progress in its worktree
+ * (`inProgress`): a session opened there would work on top of someone's
+ * half-finished fix.
  */
 function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
   const closed = new Set(tickets.filter((t) => !t.open).map((t) => t.id));
@@ -772,6 +776,7 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       t.open &&
       !occupied(t.id) &&
       !isReadyToLand(t.id) &&
+      !inProgress.has(t.id) &&
       !(lockHeld && isWaitingOnLock(t.id)) &&
       t.foreignBlockers.length === 0 &&
       t.blockedBy.every((b) => closed.has(b)),
@@ -1257,8 +1262,11 @@ const isClean = (n: TicketId) =>
  *    that finished commits its work.
  * A crashed slice with a clean tree and no marker still reads as finished.
  * There, the review is what catches half a ticket.
+ *
+ * Nor with a git operation in progress in its worktree: see `inProgress`.
  */
 const autoFinished = (n: TicketId) =>
+  !inProgress.has(n) &&
   !occupied(n) &&
   !isWaitingOnLock(n) &&
   !wasInterrupted(n) &&
@@ -1518,6 +1526,91 @@ const unmergedIn = (wt: string): string[] =>
 const rebaseInProgress = (wt: string): boolean =>
   existsSync(gitPath(wt, "rebase-merge")) ||
   existsSync(gitPath(wt, "rebase-apply"));
+
+/** What each git-dir entry means is in progress, in the order `handWork` asks. */
+const IN_PROGRESS: [string, string][] = [
+  ["rebase-merge", "rebase"],
+  ["rebase-apply", "rebase"],
+  ["MERGE_HEAD", "merge"],
+  ["CHERRY_PICK_HEAD", "cherry-pick"],
+  ["REVERT_HEAD", "revert"],
+];
+
+/**
+ * The git operation left in progress in a worktree ("rebase", "merge", …),
+ * or null when there is none. One `rev-parse` for all five paths, because
+ * this is asked for every open worktree every round.
+ */
+function handWork(wt: string): string | null {
+  const { ok, out } = run(
+    ["git", "rev-parse", ...IN_PROGRESS.flatMap(([p]) => ["--git-path", p])],
+    { cwd: wt, allowFail: true },
+  );
+  const paths = out.split("\n").map((l) => l.trim());
+  // A worktree git cannot read has nothing in progress that git would know
+  // about either; the land's own checks say what is wrong with it.
+  if (!ok || paths.length < IN_PROGRESS.length) return null;
+  for (const [i, [, what]] of IN_PROGRESS.entries()) {
+    const p = paths[i] as string;
+    if (existsSync(isAbsolute(p) ? p : join(wt, p))) return what;
+  }
+  return null;
+}
+
+/**
+ * Worktrees with a git operation in progress, by ticket, read at the top of
+ * every round by `noteHandWork`. Such a slice is not landed, not relaunched,
+ * and not finished under --auto. It is not parked either, and it keeps the
+ * run from stopping: it waits on a person, and is back in the run the round
+ * the operation ends.
+ *
+ * The land is why. `rebaseOntoBase` starts its own rebase when the branch is
+ * behind the base. With someone's rebase already in progress that one fails,
+ * and its cleanup `git rebase --abort` aborts THEIRS and throws their
+ * resolution away. That happens whenever the base moved after they started,
+ * which two dispatchers landing onto one base make routine; it was reproduced
+ * in a scratch repo on 2026-09-24. While the base stands still the symptom is
+ * milder: the gates refuse a dirty tree and blame the slice for it.
+ *
+ * Not closed: the seconds between a hand commit and the hand rebase after it.
+ * The commit moves the branch, which un-parks the slice, and a land in that
+ * gap starts its own rebase first. The person's `git rebase` then fails with
+ * git's "already a rebase-merge directory": seen, and nothing lost.
+ */
+const inProgress = new Map<TicketId, string>();
+/** The ones announced, so each is printed once when seen and once when it ends. */
+const announced = new Set<TicketId>();
+
+function noteHandWork(tickets: Ticket[]): void {
+  for (const t of tickets) {
+    if (!t.open) {
+      inProgress.delete(t.id);
+      announced.delete(t.id);
+      continue;
+    }
+    const what = hasWorktree(t.id) ? handWork(worktreeFor(t.id)) : null;
+    if (what) inProgress.set(t.id, what);
+    else inProgress.delete(t.id);
+    // Recorded but not announced while a session runs there: that is the
+    // agent's own rebase, and a running session is neither landed nor
+    // relaunched anyway. Recording it still covers the session ending
+    // mid-operation, which leaves the same state a person would.
+    if (what && !announced.has(t.id) && !occupied(t.id)) {
+      announced.add(t.id);
+      console.log(
+        `  ${ref(
+          t.id,
+        )}: a ${what} is in progress in its worktree, with no session running there — someone is fixing it by hand, most likely. Not landing or relaunching it until the ${what} is finished or aborted.`,
+      );
+    } else if (!what && announced.delete(t.id)) {
+      console.log(
+        `  ${ref(
+          t.id,
+        )}: nothing is in progress in its worktree any more — back in the run.`,
+      );
+    }
+  }
+}
 
 /** Which of these files, relative to the worktree, hold conflict markers. */
 const withMarkers = (wt: string, files: string[]): string[] =>
@@ -2573,6 +2666,7 @@ for (;;) {
   }
 
   reportOverlaps(tickets);
+  noteHandWork(tickets);
 
   // Land before launching, so a slot freed this round is refilled this round.
   // One per round: every land fast-forwards the same master in the same main
@@ -2581,6 +2675,10 @@ for (;;) {
     (t) =>
       t.open &&
       hasWorktree(t.id) &&
+      // Before `isParked`, which would consume a retry that is due: a base
+      // that moved during someone's rebase is exactly when a land destroys
+      // it. The retry waits for the rebase to end instead.
+      !inProgress.has(t.id) &&
       // Parked slices are skipped until what they failed on changes. Without
       // this the same failing land is re-attempted every round for the life
       // of the run.
@@ -2739,6 +2837,10 @@ for (;;) {
    * Not while a parked slice is already due a retry. Its triggers are outside
    * events, except one: this round's own land moved the base branch, and a
    * `gates` park waiting on exactly that must get its next round.
+   *
+   * Nor while someone has a rebase or merge in progress in a parked slice's
+   * worktree: finishing it moves the branch, which retries the land, so this
+   * run still has something coming.
    */
   if (
     up.length === 0 &&
@@ -2746,7 +2848,9 @@ for (;;) {
     remaining.length > 0 &&
     remaining.every((t) => {
       const p = parked.get(t.id);
-      return p !== undefined && retryDue(t.id, p) === null;
+      return (
+        p !== undefined && !inProgress.has(t.id) && retryDue(t.id, p) === null
+      );
     })
   ) {
     console.log("\n  nothing can advance — every open slice is parked.");
@@ -2764,6 +2868,7 @@ for (;;) {
     up.length === 0 &&
     prepped.length === 0 &&
     remaining.every((t) => {
+      if (inProgress.has(t.id)) return false;
       const p = parked.get(t.id);
       if (p) return retryDue(t.id, p) === null;
       return !(

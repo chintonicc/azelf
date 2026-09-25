@@ -298,6 +298,98 @@ describe("a session that crashed", () => {
 });
 
 /**
+ * Someone fixing a slice by hand while the dispatcher runs. Its land used to
+ * start a rebase of its own when the base had moved, fail on theirs, and
+ * `git rebase --abort` it, resolution and all.
+ */
+describe("a hand fix in progress", () => {
+  /**
+   * ticket/40 marked done, conflicting with main in a.txt, and stopped
+   * mid-rebase with the conflict resolved and staged but not continued. Then
+   * main moves again, so the branch is behind it and a land would rebase.
+   */
+  const midRebase = () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true });
+    commitIn(fx.wt(40), "a.txt", "branch\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    commitIn(fx.main, "a.txt", "main\n", "main: a");
+    expect(() => git(fx.wt(40), "rebase", "main")).toThrow();
+    writeFileSync(join(fx.wt(40), "a.txt"), "resolved\n");
+    git(fx.wt(40), "add", "a.txt");
+    commitIn(fx.main, "b.txt", "b\n", "main: b");
+    return fx;
+  };
+
+  const SEEN =
+    "#40: a rebase is in progress in its worktree, with no session running there — someone is fixing it by hand, most likely. Not landing or relaunching it until the rebase is finished or aborted.";
+
+  it("leaves a hand rebase alone when main has moved", () => {
+    c = midRebase();
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(SEEN);
+    expect(r.out).not.toContain("marked done");
+    expect(r.out).not.toContain("rebasing before the gates");
+    expect(rebaseInProgress(c.wt(40))).toBe(true);
+    expect(readFileSync(join(c.wt(40), "a.txt"), "utf8")).toBe("resolved\n");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("main: b");
+  });
+
+  it("says so once, and lands it once the rebase is finished", async () => {
+    c = midRebase();
+    d = startDispatcher(c, [
+      "--auto",
+      "-y",
+      "--no-review",
+      "--interval",
+      "1",
+      "40",
+    ]);
+    await d.until(SEEN);
+    await d.until(/\[round 3\]/);
+
+    git(c.wt(40), "-c", "core.editor=true", "rebase", "--continue");
+    await d.until("plan complete");
+
+    const out = d.output();
+    expect(out.split(SEEN).length - 1).toBe(1);
+    expect(out).toContain(
+      "#40: nothing is in progress in its worktree any more — back in the run.",
+    );
+    expect(await d.exited).toBe(0);
+    expect(readFileSync(join(c.main, "a.txt"), "utf8")).toBe("resolved\n");
+    expect(git(c.main, "log", "--format=%s", "-3")).toBe(
+      "feat: a\nmain: b\nmain: a",
+    );
+  }, 60_000);
+
+  it("names a merge in progress, and leaves it alone too", () => {
+    c = makeConsumer({ worktrees: [40], remote: true });
+    commitIn(c.wt(40), "a.txt", "branch\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    commitIn(c.main, "a.txt", "main\n", "main: a");
+    expect(() => git(c?.wt(40) as string, "merge", "main")).toThrow();
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain("#40: a merge is in progress in its worktree");
+    expect(r.out).not.toContain("marked done");
+    expect(
+      existsSync(
+        git(
+          c.wt(40),
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "MERGE_HEAD",
+        ),
+      ),
+    ).toBe(true);
+  });
+});
+
+/**
  * The resolver edits and azelf runs the git. The fake resolver below keeps
  * both sides of every hunk — the conflicts here are line-level, so that is a
  * correct resolution — and logs each call.
