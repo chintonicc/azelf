@@ -1,6 +1,6 @@
 # What consumer-a's 2026-09-23 friction log still has open
 
-**Status:** OPEN: Phase 1 LANDED 2026-09-24; Phases 2–3 open · **Written:** 2026-09-24
+**Status:** OPEN: Phase 1 LANDED 2026-09-24; Phase 2 LANDED 2026-09-25; Phase 3 open · **Written:** 2026-09-24
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), `docs/wave-friction-plan.md` (the part of the same log that has landed).
 
@@ -202,7 +202,7 @@ are in this plan.
 
 ## Phase 2 — guards
 
-- [ ] **2a. The dispatcher leaves a hand fix alone.**
+- [x] **2a. The dispatcher leaves a hand fix alone.** (`6097c8b`)
   - **The check.** A `handWork(wt)` next to `rebaseInProgress` (`slice-run.ts:1294`),
     read through `gitPath` (`:1260`), names the operation in progress:
     - a rebase (`rebase-merge` or `rebase-apply`);
@@ -239,7 +239,7 @@ are in this plan.
 
   With the guard switched off, the test must fail.
 
-- [ ] **2b. A warning when azelf changes under a running dispatcher.**
+- [x] **2b. A warning when azelf changes under a running dispatcher.** (`383b608`)
   - **What counts as the version.** At start, the dispatcher records its own package's
     installed version:
     - `.bun-tag` in the package root, where bun writes `chintonicc-azelf-<sha>` on a git
@@ -264,7 +264,7 @@ are in this plan.
     `index.ts`, `package.json`; azelf has no runtime dependencies, so a copy runs) with a
     `.bun-tag`. The test rewrites the tag mid-run and expects the line once.
 
-- [ ] **2c. Headless runs don't load the consumer's MCP servers.**
+- [x] **2c. Headless runs don't load the consumer's MCP servers.** (`32bdb66`)
   - **The change.** In `claude()` (`slice-agent.ts:144-151`), `review` and `resolve`
     get `--strict-mcp-config` and no `--mcp-config`, which means no MCP servers. The doc
     comment above already says the reviews need none, and the resolver edits files with
@@ -277,6 +277,46 @@ are in this plan.
 
   *Proof:* `sliceAgent.test.ts`. The claude preset's `review` and `resolve` argv
   include the flag, and its `sessionCommand` doesn't.
+
+**As landed, where it differs from the above:**
+- 2a: the operations are read with one `git rev-parse` of five `--git-path`s per open
+  worktree per round, at the top of the round (`noteHandWork`), not through
+  `gitPath` five times. The check is before `isParked` in the land filter, so a retry
+  that falls due during someone's rebase (the base moved) is not consumed; it fires
+  once the rebase ends. A slice with an operation in progress also keeps both
+  "nothing can advance" exits from firing, parked or not: finishing it moves the
+  branch, so the run still has something coming. It is recorded but not announced
+  while a session is running there (the agent's own rebase), so a session that dies
+  mid-rebase is covered too; the crash line's "Relaunching it." is then followed by
+  this line, and no relaunch. The line reads:
+  > #54: a rebase is in progress in its worktree, with no session running there —
+  > someone is fixing it by hand, most likely. Not landing or relaunching it until
+  > the rebase is finished or aborted.
+
+  and when it ends, "nothing is in progress in its worktree any more — back in the
+  run." The README has a "Fixing a slice by hand while the dispatcher runs"
+  subsection. Its advice for the gap: start the rebase before you commit, or commit
+  the fix and let the land rebase it.
+- 2a proof: three tests. Beside the plan's (mid-rebase, main moved, `--once`), one
+  finishes the rebase under a running dispatcher and expects the line once, the
+  "back in the run" line, and a land carrying the resolution. One covers a merge.
+  With the guard switched off, the fixture's resolver rebased over the hand fix and
+  landed without it.
+- 2b: the reader is `scripts/slice-version.ts` (`installedVersion`), a module of its
+  own so the dispatcher doesn't import `slice-init.ts`. The tag's sha is what is
+  shown. Without a tag, the label is `scripts of <UTC time>`, and "unknown" (nothing
+  readable) never counts as a change. The banner line is `azelf: <version>`. The
+  warning says "the sessions and lands it starts run X from now on", since a land
+  runs through the shims too. The README's shim paragraph shows the line.
+- 2b proof: `startDispatcher` takes an optional path to another `slice-run.ts`. The
+  harness test waits for three rounds after the warning and counts it once. Switching
+  off the per-round read, or the once-only flag, fails it.
+- 2c: checked on claude 2.1.282 on 2026-09-25 with `--debug-file` in a directory with
+  a `.mcp.json`: without the flag nine servers connected (the claude.ai connectors,
+  a user-configured one, and the project's), and the project's server started; with
+  it, none connected and the project's server never started. claude still fetches
+  the connector LIST once, but connects to none. No other switch was needed. The
+  docs never quoted the headless argv, so there was nothing to update there.
 
 ## Phase 3 — the run log
 
