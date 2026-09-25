@@ -1,6 +1,6 @@
 # What consumer-a's 2026-09-23 friction log still has open
 
-**Status:** OPEN: Phase 1 LANDED 2026-09-24; Phase 2 LANDED 2026-09-25; Phase 3 open · **Written:** 2026-09-24
+**Status:** COMPLETE: Phase 1 LANDED 2026-09-24, Phases 2–3 LANDED 2026-09-25 · **Written:** 2026-09-24
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), `docs/wave-friction-plan.md` (the part of the same log that has landed).
 
@@ -320,7 +320,7 @@ are in this plan.
 
 ## Phase 3 — the run log
 
-- [ ] **3a. `azelf run --help`.**
+- [x] **3a. `azelf run --help`.** (`13e4444`)
   - **`slice-run.ts` handles `-h`/`--help` before anything else,** before `--retry` and
     before the tracker. It prints the usage from its header (`:5-17`), which moves into a
     `USAGE` constant, and exits 0. It also adds the two flags the header lacks: `-y`/`--yes`
@@ -339,7 +339,7 @@ are in this plan.
   - `run --hepl` exits 64;
   - `azelf -h` exits 0.
 
-- [ ] **3b. The round line only when something changed.** `[round N] … — land one to
+- [x] **3b. The round line only when something changed.** (`fe8664b`) `[round N] … — land one to
   advance` (`slice-run.ts:2453`) is printed when its counts differ from the last one
   printed, and ten minutes after that as a heartbeat. Its text doesn't change, so a
   watcher that matches it keeps working.
@@ -347,7 +347,7 @@ are in this plan.
   *Proof:* a background run with `--interval 1` and nothing changing prints it once over
   five rounds.
 
-- [ ] **3c. The BLOCK line names the review.** After the ✗ line (`:944`), print
+- [x] **3c. The BLOCK line names the review.** (`02718e2`) After the ✗ line (`:944`), print
   `     review: <path>`, the way a failed resolution prints `transcript:`.
 
   The path is already printed as `report saved:`, above the review text. The log's
@@ -356,7 +356,7 @@ are in this plan.
 
   *Proof:* the existing BLOCK harness test checks for the line.
 
-- [ ] **3d. Every attempt's report is kept.**
+- [x] **3d. Every attempt's report is kept.** (`02718e2`)
   - **Appended, not replaced.** `saveReport` (`:808`) gains an append mode.
     `conflict-<n>.md` (`:1446`) and `ticket-<n>.md` add each attempt as a new
     `## Attempt k — HH:MM` section, newest last, instead of replacing the file. A
@@ -370,7 +370,7 @@ are in this plan.
     `IRRECONCILABLE:`) leave one file holding two attempts;
   - a BLOCK then a PASS leave both in `ticket-<n>.md`.
 
-- [ ] **3e. The end of a run prints the command to resume.** The parked summary
+- [x] **3e. The end of a run prints the command to resume.** (`33ee214`) The parked summary
   (`:2516`) and the "nothing can advance" line end with the exact command:
   `bunx azelf run <this run's flags> <parked ids>`, for example
   `bunx azelf run --auto -y 43 55`. The flags are this run's argv minus its ticket ids
@@ -378,7 +378,7 @@ are in this plan.
 
   *Proof:* the existing parked-exit harness tests check for the line.
 
-- [ ] **3f. README and the `/azelf` command copies.**
+- [x] **3f. README and the `/azelf` command copies.** (`dc47f0f`)
   - **Troubleshooting:**
     - a slice whose session crashed (1c, 1d);
     - a disk below the floor (1a);
@@ -387,6 +387,44 @@ are in this plan.
   - **Config reference:** `minFreeDiskGb`.
   - **The command copies** (`agent/commands/`, `.claude/commands/`): one sentence each
     on crash recovery and on the version warning.
+
+**As landed, where it differs from the above:**
+- 3a: the usage and the flag list are in `scripts/slice-run-usage.ts`, not a constant in
+  `slice-run.ts`, because `slice-run.ts` loads `slice.config.ts` at import time. From
+  there `bin/azelf.ts` answers `azelf run -h`/`--help` itself, so it works in a repo
+  with no config. `slice-run.ts` answers the same flags for its shim, right after argv
+  is read. `--retry` joined `VALUE_FLAGS`, so `--max -1` and `--retry 12` pass the
+  unknown-flag check. `azelf -h` prints to stdout and exits 0.
+- 3a proof: four tests: `run --auto --help`, `--hepl`, `--max -1 --plan`, and the real
+  CLI's `-h` and `run --help` from a directory with no config above it. Each fails with
+  its check switched off.
+- 3b: the heartbeat is `SLICE_HEARTBEAT_SECONDS` (default 600, `0` prints every round).
+  The tests count rounds by the line, so the fixture sets it to 0, and
+  `startDispatcher`'s third argument became `{ dispatcher?, env? }`.
+- 3b proof: with a 6s heartbeat and `--interval 1`, the second line comes three or more
+  rounds after the first, and a session ending is printed within 3.5s. Printing every
+  round fails the first half; printing only on the heartbeat fails the second.
+- 3d: an attempt's heading is `## Attempt k — YYYY-MM-DD HH:MM`, local time. The date
+  is there because attempts pile up across runs and days. The `# heading` is written
+  when the file is created; a review's `## Spec`/`## Standards` and a resolution's
+  `## Stop` move to `###`. A file from before this change keeps its old text above
+  the first `## Attempt`.
+- 3c/3d proof: the BLOCK test checks the `review:` line right under the ✗, and after
+  the ticket edit one `# Review` heading over a BLOCK attempt then a PASS attempt. The
+  give-up test runs a second `--once` and finds two REJECTED attempts.
+- 3e: the ids are the tickets the run left open, not only the parked ones. When
+  everything left is parked that is the same set, and it also covers the disk exit
+  (which may have nothing parked) and a stopped run. The command is printed at the end
+  of the parked summary ("To pick the run up again:") and of the disk's "nothing can
+  advance" line, not twice when both apply. Checked on the disk-floor test and the
+  give-up test (a `--once` run, so `--once` is dropped).
+- 3f: `minFreeDiskGb` was already in the config table (1a). The two command copies
+  already differed (the `.claude/` one lacks the resolver paragraph); each got the same
+  additions, and they were not otherwise synced.
+- Found on the way, not ours: a test "does not relaunch a slice --auto read as finished
+  once it has parked" appeared in the working tree during this phase, uncommitted and
+  failing. It is the autoFinished-then-parked relaunch gap noted under Phase 1. It was
+  left uncommitted.
 
 ## Order and cost
 
