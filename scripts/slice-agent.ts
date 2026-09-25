@@ -123,6 +123,15 @@ export type ClaudeOptions = {
  * The review prompts ask for a verdict line and nothing else, which is why they
  * need no tools and no MCP servers.
  *
+ * So both headless runs get `--strict-mcp-config` and no `--mcp-config`,
+ * which is no MCP servers at all. Without it every review and every resolver
+ * run started all of the consumer's servers, the project's `.mcp.json`, the
+ * user's own and the claude.ai connectors, for a prompt that uses none of
+ * them. Checked on claude 2.1.282 on 2026-09-25: nine servers connected
+ * without the flag, none with it, connectors included. The resolver edits
+ * files with the built-in tools. The session keeps every server: that is
+ * where the work is done.
+ *
  * `resolve` is the same `-p` plus `--permission-mode acceptEdits`, which is the
  * whole difference: the resolution has to edit the conflicted files, and a run
  * that stops to ask about every edit is a run that hangs until its timeout
@@ -141,10 +150,11 @@ export function claude(opts: ClaudeOptions = {}): Agent {
     name: "claude",
     problem: () => (which(bin) ? null : missing("claude", bin)),
     sessionCommand: [bin, ...(opts.sessionFlags ?? [])],
-    review: (prompt) => [bin, "-p", prompt],
+    review: (prompt) => [bin, "-p", "--strict-mcp-config", prompt],
     resolve: (prompt) => [
       bin,
       "-p",
+      "--strict-mcp-config",
       "--permission-mode",
       "acceptEdits",
       prompt,

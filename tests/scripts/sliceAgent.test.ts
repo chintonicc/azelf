@@ -18,10 +18,11 @@ describe("claude", () => {
     ).toEqual(["claude", "--permission-mode", "acceptEdits"]);
   });
 
-  it("reviews headlessly with -p", () => {
+  it("reviews headlessly with -p, and no MCP servers", () => {
     expect(claude({ which: present }).review("why")).toEqual([
       "claude",
       "-p",
+      "--strict-mcp-config",
       "why",
     ]);
   });
@@ -30,6 +31,7 @@ describe("claude", () => {
     expect(claude({ which: present }).resolve?.("fix it")).toEqual([
       "claude",
       "-p",
+      "--strict-mcp-config",
       "--permission-mode",
       "acceptEdits",
       "fix it",
@@ -41,6 +43,17 @@ describe("claude", () => {
    * edit the tree is a reviewer that can make its own findings go away, so the
    * review argv must stay the one without write permission.
    */
+  /**
+   * Neither headless run uses an MCP server, and the session is where the
+   * consumer's servers are wanted.
+   */
+  it("loads no MCP servers headlessly, and every one in the session", () => {
+    const a = claude({ which: present });
+    expect(a.review("why")).not.toContain("--mcp-config");
+    expect(a.resolve?.("fix it")).not.toContain("--mcp-config");
+    expect(a.sessionCommand).not.toContain("--strict-mcp-config");
+  });
+
   it("keeps the review argv free of the write permission", () => {
     expect(claude({ which: present }).review("why")).not.toContain(
       "--permission-mode",
