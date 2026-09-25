@@ -324,11 +324,14 @@ const DISPATCHER = join(AZELF, "scripts", "slice-run.ts");
 /**
  * The dispatcher's environment: this one, with the repo root pinned to the
  * consumer so nothing inherited from the shell running the tests can point it
- * at another checkout.
+ * at another checkout. The round line prints every round, because tests
+ * count rounds by it; the one test of its quiet mode sets its own.
  */
-const dispatcherEnv = (c: Consumer) => ({
+const dispatcherEnv = (c: Consumer, env: Record<string, string> = {}) => ({
   ...process.env,
   SLICE_REPO_ROOT: c.main,
+  SLICE_HEARTBEAT_SECONDS: "0",
+  ...env,
 });
 
 /**
@@ -370,14 +373,18 @@ export type Dispatcher = {
 export function startDispatcher(
   c: Consumer,
   args: string[],
-  /** Another copy of slice-run.ts, for a test that changes its install. */
-  dispatcher = DISPATCHER,
+  opts: {
+    /** Another copy of slice-run.ts, for a test that changes its install. */
+    dispatcher?: string;
+    /** Added to its environment. */
+    env?: Record<string, string>;
+  } = {},
 ): Dispatcher {
   return watch(
-    spawn("bun", [dispatcher, ...args], {
+    spawn("bun", [opts.dispatcher ?? DISPATCHER, ...args], {
       cwd: c.main,
       stdio: ["ignore", "pipe", "pipe"],
-      env: dispatcherEnv(c),
+      env: dispatcherEnv(c, opts.env),
     }),
     "the dispatcher",
   );

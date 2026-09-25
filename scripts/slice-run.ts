@@ -2451,6 +2451,12 @@ const autoLand = flag("--auto");
 // heuristic on top of it.
 const autoResolve = !flag("--no-auto-resolve");
 const intervalMs = Number(value("--interval") ?? 30) * 1000;
+// How long the round line stays quiet while nothing changes. A run that waits
+// on one long slice otherwise prints the same line every 30 seconds for
+// hours, and whoever reads the log later has to scroll past all of it. It
+// still comes back this often, so a quiet run is not mistaken for a hung one.
+// 0 prints it every round, as before; the tests use that as their clock.
+const heartbeatMs = Number(process.env.SLICE_HEARTBEAT_SECONDS ?? 600) * 1000;
 
 // `--retry <n>`: what `azelf retry` runs. It only writes the marker; the
 // dispatcher that parked the slice consumes it next round (see `isParked`).
@@ -2677,6 +2683,9 @@ function noteAzelfChange(): void {
 }
 
 let round = 0;
+// The round line last printed, without its round number, and when.
+let lastRoundLine = "";
+let lastRoundLineAt = 0;
 for (;;) {
   round += 1;
   sessionAnswers.clear();
@@ -2843,15 +2852,20 @@ for (;;) {
     for (const t of idle) launchedAt.delete(t.id);
   }
 
+  // Only when its counts change, or once a heartbeat, and word for word as it
+  // always was, so a watcher that matches it keeps working.
   const blocked = remaining.length - up.length - ready.length;
-  console.log(
-    `[round ${round}] ${up.length} running · ${Math.max(
-      0,
-      blocked,
-    )} blocked · ${remaining.length} open${
-      parked.size ? ` · ${parked.size} parked` : ""
-    } — land one to advance`,
-  );
+  const roundLine = `${up.length} running · ${Math.max(0, blocked)} blocked · ${
+    remaining.length
+  } open${parked.size ? ` · ${parked.size} parked` : ""} — land one to advance`;
+  if (
+    roundLine !== lastRoundLine ||
+    Date.now() - lastRoundLineAt >= heartbeatMs
+  ) {
+    console.log(`[round ${round}] ${roundLine}`);
+    lastRoundLine = roundLine;
+    lastRoundLineAt = Date.now();
+  }
 
   /**
    * Nothing running, nothing startable, and everything left is parked: the run

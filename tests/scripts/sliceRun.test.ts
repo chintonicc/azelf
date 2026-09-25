@@ -82,6 +82,39 @@ describe("the dispatcher", () => {
   });
 });
 
+describe("the round line", () => {
+  it("is printed when its counts change, and otherwise once a heartbeat", async () => {
+    c = makeConsumer({ worktrees: [40] });
+    const session = fakeSession(c, 40);
+    sessions.push(session);
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"], {
+      env: { SLICE_HEARTBEAT_SECONDS: "6" },
+    });
+    const RUNNING = "1 running · 0 blocked · 1 open — land one to advance";
+    const printedAt = () =>
+      [...(d?.output() ?? "").matchAll(/\[round (\d+)\] (.*)/g)]
+        .filter((m) => m[2]?.endsWith("land one to advance"))
+        .map((m) => [Number(m[1]), m[2]] as const);
+    await d.until(`[round 1] ${RUNNING}`);
+    await d.until(/\[round \d+\] 1 running[\s\S]*\[round \d+\] 1 running/);
+
+    // Nothing changed in between: the second one is the heartbeat, rounds
+    // later, and none of the rounds between said anything.
+    const [first, second] = printedAt();
+    expect(first?.[0]).toBe(1);
+    expect(second?.[1]).toBe(RUNNING);
+    expect((second?.[0] ?? 0) - (first?.[0] ?? 0)).toBeGreaterThanOrEqual(3);
+
+    // A change is printed the round it happens, not at the next heartbeat.
+    const before = printedAt().length;
+    const stoppedAt = Date.now();
+    await session.stop();
+    await d.until(/0 running[^\n]*land one to advance/);
+    expect(Date.now() - stoppedAt).toBeLessThan(3_500);
+    expect(printedAt().length).toBe(before + 1);
+  }, 60_000);
+});
+
 /**
  * A prep that ran out of space partway was retried every round, and each
  * retry left another half-built worktree. The floor holds new worktrees
@@ -414,11 +447,9 @@ describe("azelf changing under a running dispatcher", () => {
     tag("a3899a5");
     sessions.push(fakeSession(c, 40));
 
-    d = startDispatcher(
-      c,
-      ["-y", "--interval", "1", "40"],
-      join(pkg, "scripts", "slice-run.ts"),
-    );
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"], {
+      dispatcher: join(pkg, "scripts", "slice-run.ts"),
+    });
     await d.until("  azelf: a3899a5");
     await d.until("[round 1]");
     tag("6383445");
