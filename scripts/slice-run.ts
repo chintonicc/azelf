@@ -129,6 +129,8 @@ import {
   findEpics,
   openBlockers,
 } from "./slice-tracker";
+// Which azelf this is, read again every round: see the version check below.
+import { installedVersion } from "./slice-version";
 
 // NOT named `base`: reviewPlan already takes a `base` parameter — the commit
 // the run started from — and a module const of the same name would be shadowed
@@ -2538,6 +2540,11 @@ console.log(
         }`
   }`,
 );
+// Read now and every round after: a bump in the main checkout during a wave
+// replaces the scripts every slice runs, but not this process's modules.
+const azelfAtStart = installedVersion();
+let azelfChangeNoted = false;
+console.log(`  azelf: ${azelfAtStart}`);
 console.log(
   `  note: ${maxParallel} slices means ${maxParallel} ${agent.name} sessions running at once.`,
 );
@@ -2649,10 +2656,29 @@ for (const t of tickets) {
   rmSync(join(worktreeFor(t.id), RETRY_MARKER), { force: true });
 }
 
+/**
+ * Said once, the first round the installed azelf differs from the one this
+ * run started with. The dispatcher keeps its own code, but the sessions,
+ * lands and `slice-done.sh` it runs from then on come from the shims, which
+ * resolve to the new install. A warning only: the shims pin one version per
+ * wave on purpose, and giving a wave its own copy of azelf is a bigger change
+ * than the harm seen so far. Restarting between lands is what ends the mix.
+ */
+function noteAzelfChange(): void {
+  if (azelfChangeNoted) return;
+  const now = installedVersion();
+  if (now === azelfAtStart || now === "unknown") return;
+  azelfChangeNoted = true;
+  console.log(
+    `\n  azelf changed under this run: ${azelfAtStart} → ${now}. This dispatcher is still running ${azelfAtStart}; the sessions and lands it starts run ${now} from now on. Restart it (the same command) when nothing is landing.`,
+  );
+}
+
 let round = 0;
 for (;;) {
   round += 1;
   sessionAnswers.clear();
+  noteAzelfChange();
   if (round > 1) {
     refreshOpenState(tickets);
     unparkClosed(tickets);

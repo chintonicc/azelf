@@ -367,9 +367,14 @@ export type Dispatcher = {
  * something between its rounds: pass `--interval 1` and wait on `until`.
  * Every test that starts one stops it, finished or not.
  */
-export function startDispatcher(c: Consumer, args: string[]): Dispatcher {
+export function startDispatcher(
+  c: Consumer,
+  args: string[],
+  /** Another copy of slice-run.ts, for a test that changes its install. */
+  dispatcher = DISPATCHER,
+): Dispatcher {
   return watch(
-    spawn("bun", [DISPATCHER, ...args], {
+    spawn("bun", [dispatcher, ...args], {
       cwd: c.main,
       stdio: ["ignore", "pipe", "pipe"],
       env: dispatcherEnv(c),

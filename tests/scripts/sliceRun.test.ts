@@ -1,5 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -387,6 +393,43 @@ describe("a hand fix in progress", () => {
       ),
     ).toBe(true);
   });
+});
+
+/**
+ * Bumping azelf in the main checkout mid-wave: the dispatcher keeps its own
+ * code, and everything it starts from then on runs the new scripts. It runs
+ * here from a copy of the package, with a `.bun-tag` as bun writes one, so
+ * the test can replace the install under it; azelf has no runtime
+ * dependencies, so a copy runs.
+ */
+describe("azelf changing under a running dispatcher", () => {
+  it("says so once, naming both versions", async () => {
+    c = makeConsumer({ worktrees: [40] });
+    const pkg = join(c.root, "pkg");
+    for (const f of ["scripts", "index.ts", "package.json"]) {
+      cpSync(join(AZELF, f), join(pkg, f), { recursive: true });
+    }
+    const tag = (sha: string) =>
+      writeFileSync(join(pkg, ".bun-tag"), `chintonicc-azelf-${sha}\n`);
+    tag("a3899a5");
+    sessions.push(fakeSession(c, 40));
+
+    d = startDispatcher(
+      c,
+      ["-y", "--interval", "1", "40"],
+      join(pkg, "scripts", "slice-run.ts"),
+    );
+    await d.until("  azelf: a3899a5");
+    await d.until("[round 1]");
+    tag("6383445");
+    const CHANGED =
+      "azelf changed under this run: a3899a5 → 6383445. This dispatcher is still running a3899a5; the sessions and lands it starts run 6383445 from now on. Restart it (the same command) when nothing is landing.";
+    await d.until(CHANGED);
+    // Three more rounds, each of which reads the version again.
+    await d.until(/6383445 from now on[\s\S]*(\[round \d+\][\s\S]*){3}/);
+
+    expect(d.output().split(CHANGED).length - 1).toBe(1);
+  }, 60_000);
 });
 
 /**

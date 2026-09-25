@@ -165,6 +165,14 @@ the tree they were run in either way, and are a few lines of logic, safe to comm
 After a pin bump, `bun install --force` and `azelf init` in the main checkout, and
 commit and push, so new worktrees get the new shims.
 
+A bump during a wave splits it: a running dispatcher keeps the code it started with,
+and every session and land it starts after that runs the new scripts. It shows its
+version at the start and says so the first round the install differs:
+
+```
+  azelf changed under this run: a3899a5 → 6383445. This dispatcher is still running a3899a5; the sessions and lands it starts run 6383445 from now on. Restart it (the same command) when nothing is landing.
+```
+
 ## Quick start
 
 ```sh
