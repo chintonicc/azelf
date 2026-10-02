@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type Consumer, git, makeConsumer, shResult } from "./fixture";
+import { type Consumer, git, makeConsumer, sh, shResult } from "./fixture";
 
 /**
  * session-commit.sh and the DB lock: a commit that touches an exclusive path
@@ -146,5 +146,133 @@ describe("session-commit.sh with removals, renames and no terminal", () => {
     expect(r.out).toContain("Pass -y to confirm");
     expect(r.out).toContain("Nothing was staged.");
     expect(git(wt, "diff", "--cached", "--name-only")).toBe("");
+  });
+});
+
+/**
+ * `--push` with no message and no paths pushes what is already committed:
+ * the same lock, fetch and fast-forward check as a commit's push.
+ */
+describe("session-commit.sh --push alone", () => {
+  let c: Consumer;
+  const remoteLog = () =>
+    git(join(c.root, "remote"), "log", "--format=%s", "main");
+  const commitHere = (file: string, msg: string) => {
+    writeFileSync(join(c.main, file), `${file}\n`);
+    git(c.main, "add", file);
+    git(c.main, "commit", "-qm", msg);
+  };
+  beforeEach(() => {
+    c = makeConsumer({ remote: true });
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("pushes the commits that exist, and lists them first", () => {
+    commitHere("a.txt", "feat: a");
+    commitHere("b.txt", "feat: b");
+    const r = shResult(c.main, "./scripts/session-commit.sh --push -y");
+    expect(r.ok, r.out).toBe(true);
+    expect(r.out).toMatch(/[0-9a-f]+ feat: b\n[0-9a-f]+ feat: a\n/);
+    expect(r.out).toContain("✓ pushed to origin/main");
+    expect(remoteLog()).toBe("feat: b\nfeat: a\ninit");
+    expect(existsSync(join(c.main, ".git", "session-commit.lock"))).toBe(false);
+  });
+
+  it("refuses when the remote is ahead", () => {
+    sh(
+      c.root,
+      `git clone -q remote other && cd other && git -c user.email=t@t -c user.name=t commit -q --allow-empty -m "feat: theirs" && git push -q origin main`,
+    );
+    commitHere("a.txt", "feat: a");
+    const r = shResult(c.main, "./scripts/session-commit.sh --push -y");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain(
+      "origin/main has commits you don't have — pull/rebase before pushing.",
+    );
+    expect(remoteLog()).toBe("feat: theirs\ninit");
+  });
+
+  it("exits 0 with nothing to push", () => {
+    const r = shResult(c.main, "./scripts/session-commit.sh --push -y");
+    expect(r.ok).toBe(true);
+    expect(r.out).toContain("nothing to push — origin/main already has HEAD.");
+  });
+
+  it("refuses without -y and without a terminal, before fetching", () => {
+    commitHere("a.txt", "feat: a");
+    // A remote that cannot be fetched: reaching it would print git's error.
+    git(c.main, "remote", "set-url", "origin", join(c.root, "nowhere"));
+    const r = shResult(c.main, "./scripts/session-commit.sh --push");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("Pass -y to confirm");
+    expect(r.out).not.toContain("nowhere");
+  });
+
+  it("still wants a message when paths are named", () => {
+    writeFileSync(join(c.main, "a.txt"), "a\n");
+    const r = shResult(c.main, "./scripts/session-commit.sh --push -y a.txt");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("-m/--message or -F/--file is required");
+  });
+});
+
+describe("session-commit.sh -F", () => {
+  let c: Consumer;
+  const MESSAGE = "feat: a\n\nA body, over\ntwo lines.\n\n- and a list";
+  beforeEach(() => {
+    c = makeConsumer({});
+    writeFileSync(join(c.main, "a.txt"), "a\n");
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("takes the message from a file, verbatim", () => {
+    writeFileSync(join(c.root, "msg.txt"), `${MESSAGE}\n`);
+    const r = shResult(
+      c.main,
+      "./scripts/session-commit.sh -y -F ../msg.txt a.txt",
+    );
+    expect(r.ok, r.out).toBe(true);
+    expect(git(c.main, "log", "-1", "--format=%B")).toBe(MESSAGE);
+  });
+
+  it("takes it from stdin with -F -", () => {
+    writeFileSync(join(c.root, "msg.txt"), `${MESSAGE}\n`);
+    const r = shResult(
+      c.main,
+      "./scripts/session-commit.sh -y -F - a.txt < ../msg.txt",
+    );
+    expect(r.ok, r.out).toBe(true);
+    expect(git(c.main, "log", "-1", "--format=%B")).toBe(MESSAGE);
+  });
+
+  it("-F - without -y is refused, with nothing staged", () => {
+    const r = shResult(
+      c.main,
+      "echo msg | ./scripts/session-commit.sh -F - a.txt",
+    );
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("pass -y");
+    expect(git(c.main, "diff", "--cached", "--name-only")).toBe("");
+  });
+
+  it("-m and -F together is a usage error", () => {
+    writeFileSync(join(c.root, "msg.txt"), "x\n");
+    const r = shResult(
+      c.main,
+      './scripts/session-commit.sh -y -m "x" -F ../msg.txt a.txt || echo "exit=$?"',
+    );
+    expect(r.out).toContain("-m and -F are two messages");
+    expect(r.out).toContain("exit=64");
+  });
+
+  it("a message file that is not there fails before anything is staged", () => {
+    const r = shResult(
+      c.main,
+      "./scripts/session-commit.sh -y -F ../nope.txt a.txt",
+    );
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("no such message file: ../nope.txt");
+    expect(git(c.main, "diff", "--cached", "--name-only")).toBe("");
+    expect(existsSync(join(c.main, ".git", "session-commit.lock"))).toBe(false);
   });
 });

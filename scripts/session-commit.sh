@@ -4,6 +4,8 @@
 #
 #   ./scripts/session-commit.sh -m "message" path/one.ts path/two.tsx
 #   ./scripts/session-commit.sh -m "message" --push -y path/one.ts
+#   ./scripts/session-commit.sh -F message.txt -y path/one.ts
+#   ./scripts/session-commit.sh --push          # push what is already committed
 #
 # WHY THIS EXISTS
 # ---------------
@@ -18,6 +20,11 @@
 # push would fast-forward before sending it, per the same memory's "diff
 # against parent before pushing."
 #
+# `--push` with no message and no paths pushes what is already committed, with
+# the same lock, fetch and fast-forward check. "Commit now, push once someone
+# has looked" is the usual order in a main session, and without this it ended
+# in a bare `git push` that skipped all three.
+#
 # This does not replace judgement about which files belong to your task —
 # it just makes it impossible to stage more than you named.
 
@@ -27,19 +34,24 @@ LOCK_STALE_SECONDS=120
 LOCK_WAIT_SECONDS=30
 
 message=""
+message_file=""
 paths=()
 auto_yes=false
 do_push=false
 
 usage() {
-  echo "usage: ${AZELF_INVOKED_AS:-$0} -m <message> [--push] [-y] <path> [<path> ...]" >&2
+  echo "usage: ${AZELF_INVOKED_AS:-$0} (-m <message> | -F <file>) [--push] [-y] <path> [<path> ...]" >&2
+  echo "       ${AZELF_INVOKED_AS:-$0} --push [-y]" >&2
   echo "       every path must be named explicitly — no ., no -A" >&2
+  echo "       -F - reads the message from stdin, and needs -y" >&2
+  echo "       --push alone pushes the commits that already exist" >&2
   exit 64
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -m|--message) message="${2:-}"; shift 2 ;;
+    -m|--message) [[ $# -ge 2 ]] || usage; message="$2"; shift 2 ;;
+    -F|--file) [[ $# -ge 2 ]] || usage; message_file="$2"; shift 2 ;;
     -y|--yes) auto_yes=true; shift ;;
     --push) do_push=true; shift ;;
     -h|--help) usage ;;
@@ -49,22 +61,59 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$message" ]] || { echo "error: -m/--message is required" >&2; usage; }
-
-if [[ ${#paths[@]} -eq 0 ]]; then
-  echo "error: no paths given — this script never stages everything." >&2
-  echo "       pass the exact files/dirs this task touched." >&2
-  exit 1
+if [[ -n "$message" && -n "$message_file" ]]; then
+  echo "error: -m and -F are two messages — pass one." >&2
+  usage
 fi
 
-for p in "${paths[@]}"; do
-  case "$p" in
-    "."|".."|"-A"|"--all"|"*")
-      echo "error: '$p' looks like a bulk-stage, not a named path. Refusing." >&2
-      exit 1
-      ;;
-  esac
-done
+# `--push` and nothing else: no commit is made, the existing ones are pushed.
+push_only=false
+if $do_push && [[ -z "$message" && -z "$message_file" && ${#paths[@]} -eq 0 ]]; then
+  push_only=true
+fi
+
+if ! $push_only; then
+  [[ -n "$message" || -n "$message_file" ]] || {
+    echo "error: -m/--message or -F/--file is required" >&2
+    usage
+  }
+
+  if [[ ${#paths[@]} -eq 0 ]]; then
+    echo "error: no paths given — this script never stages everything." >&2
+    echo "       pass the exact files/dirs this task touched." >&2
+    exit 1
+  fi
+
+  for p in "${paths[@]}"; do
+    case "$p" in
+      "."|".."|"-A"|"--all"|"*")
+        echo "error: '$p' looks like a bulk-stage, not a named path. Refusing." >&2
+        exit 1
+        ;;
+    esac
+  done
+fi
+
+# The message file, checked and read here: before the lock, before anything is
+# staged, and before the `cd` to the repo root below changes what a relative
+# path means. Stdin cannot carry the message and answer the prompt as well.
+if [[ "$message_file" == "-" ]]; then
+  if ! $auto_yes; then
+    echo "error: -F - reads the message from stdin, so it cannot ask — pass -y." >&2
+    echo "       Nothing was staged." >&2
+    exit 1
+  fi
+  message="$(cat)"
+  message_file=""
+  [[ -n "$message" ]] || { echo "error: the message on stdin is empty. Nothing was staged." >&2; exit 1; }
+elif [[ -n "$message_file" ]]; then
+  if [[ ! -f "$message_file" ]]; then
+    echo "error: no such message file: $message_file" >&2
+    echo "       Nothing was staged." >&2
+    exit 1
+  fi
+  message_file="$(cd "$(dirname "$message_file")" && pwd -P)/$(basename "$message_file")"
+fi
 
 # Refused here, before the lock and before anything is staged. It used to be
 # checked just before the commit, so a run with no terminal staged its paths,
@@ -164,6 +213,55 @@ while ! mkdir "$lock_dir" 2>/dev/null; do
 done
 trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
 
+# ─── Push ───────────────────────────────────────────────────────────────
+# Fetch, and send only what fast-forwards. Under the lock, for both callers:
+# the commit path below, and `--push` alone.
+push_branch() {
+  if git rev-parse --verify -q "origin/$branch" >/dev/null; then
+    if git merge-base --is-ancestor "origin/$branch" HEAD; then
+      git push origin "HEAD:$branch"
+    else
+      echo "error: origin/$branch has commits you don't have — pull/rebase before pushing." >&2
+      exit 1
+    fi
+  else
+    git push -u origin "HEAD:$branch"
+  fi
+  echo "✓ pushed to origin/$branch"
+}
+
+if $push_only; then
+  branch=$(git rev-parse --abbrev-ref HEAD)
+  git fetch origin "$branch" 2>/dev/null || true
+  if git rev-parse --verify -q "origin/$branch" >/dev/null; then
+    if ! git merge-base --is-ancestor "origin/$branch" HEAD; then
+      echo "error: origin/$branch has commits you don't have — pull/rebase before pushing." >&2
+      exit 1
+    fi
+    ahead=$(git log --oneline "origin/$branch..HEAD")
+    if [[ -z "$ahead" ]]; then
+      echo "nothing to push — origin/$branch already has HEAD."
+      exit 0
+    fi
+    echo "── to push to origin/$branch ────────────────────"
+    printf '%s\n' "$ahead"
+    echo "──────────────────────────────────────────────────"
+    count=$(printf '%s\n' "$ahead" | wc -l | tr -d ' ')
+  else
+    echo "origin/$branch does not exist yet — this push creates it."
+    count="every"
+  fi
+  if ! $auto_yes; then
+    read -r -p "Push $count commit(s) to origin/$branch? [y/N] " reply
+    if [[ ! "$reply" =~ ^[Yy]$ ]]; then
+      echo "Aborted — nothing pushed."
+      exit 1
+    fi
+  fi
+  push_branch
+  exit 0
+fi
+
 # ─── Stage + review ─────────────────────────────────────────────────────
 echo "── working tree status ──────────────────────────"
 git status --short
@@ -262,22 +360,16 @@ if ! $auto_yes; then
   fi
 fi
 
-git commit -m "$message" -- "${paths[@]}"
+if [[ -n "$message_file" ]]; then
+  git commit -F "$message_file" -- "${paths[@]}"
+else
+  git commit -m "$message" -- "${paths[@]}"
+fi
 echo "✓ committed: $(git log -1 --format='%h %s')"
 
 # ─── Optional push ──────────────────────────────────────────────────────
 if $do_push; then
   branch=$(git rev-parse --abbrev-ref HEAD)
   git fetch origin "$branch" 2>/dev/null || true
-  if git rev-parse --verify -q "origin/$branch" >/dev/null; then
-    if git merge-base --is-ancestor "origin/$branch" HEAD; then
-      git push origin "HEAD:$branch"
-    else
-      echo "error: origin/$branch has commits you don't have — pull/rebase before pushing." >&2
-      exit 1
-    fi
-  else
-    git push -u origin "HEAD:$branch"
-  fi
-  echo "✓ pushed to origin/$branch"
+  push_branch
 fi

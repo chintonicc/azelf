@@ -87,8 +87,42 @@ add_if_present() {
   return 0
 }
 
+# Named paths that are not there. A deletion (HEAD has it, the tree does not)
+# is skipped quietly: a changed-file list that contains one is not a mistake.
+# A path neither the tree nor HEAD knows is one, and used to end in "nothing
+# to format — no changed files" and exit 0. It is the rule session-commit.sh
+# applies to its own paths.
+deleted=0
+missing=()
+
 if [ $# -gt 0 ]; then
-  for f in "$@"; do add_if_present "$f"; done
+  for f in "$@"; do
+    if [ -e "$f" ] || [ -L "$f" ]; then
+      add_if_present "$f"
+    elif [ -n "$(git ls-tree -r --name-only HEAD -- "$f" 2>/dev/null)" ]; then
+      deleted=$((deleted + 1))
+    else
+      missing[${#missing[@]}]="$f"
+    fi
+  done
+  if [ ${#missing[@]} -gt 0 ]; then
+    for f in "${missing[@]}"; do
+      case "$f" in
+        *" "*|*"
+"*)
+          # What an unsplit "$FILES" looks like: zsh does not word-split it.
+          echo "error: no such path: $f (one argument — was a list passed unsplit?)" >&2
+          ;;
+        *) echo "error: no such path: $f" >&2 ;;
+      esac
+    done
+    echo "       Nothing was formatted." >&2
+    exit 1
+  fi
+  if [ ${#existing[@]} -eq 0 ]; then
+    echo "nothing to format — the $deleted named path(s) are deleted."
+    exit 0
+  fi
 else
   # Tracked changes vs HEAD (staged and unstaged) plus untracked files. In a
   # SHARED tree this is still everyone's uncommitted work, not just yours —

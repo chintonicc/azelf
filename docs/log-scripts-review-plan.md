@@ -1,6 +1,6 @@
 # A run log that says what is true, scripts that take the common order, and a review that can see past its own ticket
 
-**Status:** IN PROGRESS (Phase 1 landed) · **Written:** 2026-10-02
+**Status:** IN PROGRESS (Phases 1–2 landed) · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), the entries still `open` after `docs/resolve-and-report-plan.md`: dated
 2026-09-25, 09-26, 09-30, 10-01 and 10-02.
@@ -95,7 +95,7 @@ not after.
   the reviewer gets the result and the tail of the output, and judges. It never gates
   a land by itself.
 
-## Phase 1 — the run log says what is true
+## Phase 1 — the run log says what is true (`be5b582`)
 
 Smallest, no behaviour change beyond text. `scripts/slice-run.ts`,
 `scripts/slice-overlap.ts`, `scripts/slice-session.sh`.
@@ -156,37 +156,43 @@ a new `tests/scripts/format.test.ts`. Independent of Phase 1.
 
 ### 2a. `session-commit.sh --push` alone
 
-- [ ] `--push` with no `-m`, no `-F` and no paths is push-only. `--push` with paths and
+- [x] `--push` with no `-m`, no `-F` and no paths is push-only. `--push` with paths and
       no message stays the error it is.
-- [ ] Push-only: take the lock, fetch, refuse if `origin/<branch>` is not an ancestor
+- [x] Push-only: take the lock, fetch, refuse if `origin/<branch>` is not an ancestor
       of HEAD (the existing message), print `git log --oneline origin/<branch>..HEAD`,
       say "nothing to push" and exit 0 if that is empty, confirm, push.
-- [ ] Move the existing push block into a function both paths call.
-- [ ] Usage text, and the header's examples.
-- [ ] Tests, against the fixture's bare remote: pushes two existing commits; refuses
+- [x] Move the existing push block into a function both paths call.
+- [x] Usage text, and the header's examples.
+- [x] Tests, against the fixture's bare remote: pushes two existing commits; refuses
       when the remote is ahead; nothing to push exits 0; no terminal and no `-y`
       refuses before fetching.
 
 ### 2b. `session-commit.sh -F`
 
-- [ ] `-F <file>` / `--file <file>`, passed to `git commit -F`. `-F -` reads stdin and
+- [x] `-F <file>` / `--file <file>`, passed to `git commit -F`. `-F -` reads stdin and
       requires `-y`, since stdin cannot also answer the prompt.
-- [ ] `-m` and `-F` together: usage error, exit 64. A file that does not exist: error
+- [x] `-m` and `-F` together: usage error, exit 64. A file that does not exist: error
       before the lock, nothing staged.
-- [ ] Tests: a multi-line file becomes the commit message verbatim; `-F -`; both flags
+- [x] Tests: a multi-line file becomes the commit message verbatim; `-F -`; both flags
       together.
 
 ### 2c. `format.sh` and paths that are not there
 
-- [ ] With explicit paths: a path that does not exist and that `git ls-tree HEAD` does
+- [x] With explicit paths: a path that does not exist and that `git ls-tree HEAD` does
       not know → collect, then `error: no such path: <p>` per path, exit 1, nothing
       formatted. If the missing path contains a space or a newline, add
       `(one argument — was a list passed unsplit?)`, which is the mistake both entries
       made.
-- [ ] If every named path was a deletion: `nothing to format — the N named path(s) are
+- [x] If every named path was a deletion: `nothing to format — the N named path(s) are
       deleted.` instead of "no changed files".
-- [ ] Tests: a missing path fails and formats nothing, also when a real path is named
+- [x] Tests: a missing path fails and formats nothing, also when a real path is named
       beside it; a deleted tracked path is skipped; no arguments behaves as before.
+
+**As landed.** `-F -` is read into the message before the lock, so nothing later in the
+script can take stdin from it. A relative `-F` path is resolved before the script moves
+to the repo root. `--push` alone with no `origin/<branch>` yet says the push creates
+it and asks the same way. `format.test.ts` puts a fake `bunx` on `PATH` that records
+its arguments, which is how "nothing formatted" is asserted.
 
 ## Phase 3 — the review sees the parent
 

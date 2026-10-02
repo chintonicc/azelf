@@ -292,11 +292,16 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 
 ```sh
 ./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths
+./scripts/session-commit.sh -y -F message.txt path/to/file # the message from a file (-F - reads stdin)
+./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
 ./scripts/slice-done.sh                                    # mark ready to land (you, or the session under --auto)
 ./scripts/format.sh                                        # the write half, by hand
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths
 ./scripts/db-lock.sh status                                # who holds them, since when
 ```
+
+`format.sh` with named paths fails on one that does not exist and that git does not
+know, and formats nothing. A named path that was deleted is skipped.
 
 ## Configuration reference
 
