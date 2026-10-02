@@ -114,6 +114,32 @@ export type SliceConfig = {
    */
   overlapIgnore?: string[];
   /**
+   * Run the test files a slice adds or changes against the base branch as it
+   * was before the slice, and show the spec review the result. Optional; left
+   * out, nothing is run.
+   *
+   * The reviewer has no tools, so "a failing test first" was accepted on the
+   * commit message's word. With this set, at land (after the gates, before
+   * the review, and only when review is on) the dispatcher makes a throwaway
+   * worktree at the commit the slice was rebased onto, checks out the slice's
+   * test files into it, and runs `command(files)` there. The exit status and
+   * the last lines of output go into the review's prompt. It is evidence for
+   * the reviewer and never gates a land by itself: an exit code cannot tell
+   * "the fix is missing" from "the checkout is broken".
+   *
+   * `files` are the patterns for what counts as a test file, in the syntax of
+   * `overlapIgnore`. Default: `**\/*.test.*` and `**\/*.spec.*`, at any depth.
+   *
+   * It costs one extra test run per land. The throwaway worktree gets the
+   * slice worktree's `node_modules` as a symlink and the `provisionCopy`
+   * files; a slice that changes a manifest or lockfile is skipped, since the
+   * base's dependencies are then not the slice's.
+   */
+  testOnBase?: {
+    command: (files: string[]) => string[];
+    files?: string[];
+  };
+  /**
    * What a slice must pass before it lands, in order. Built from the shapes
    * in `slice-gates.ts`; every one must be read-only (see the contract there).
    * TypeScript-only — functions, so the shell bridge cannot carry them and no
@@ -336,6 +362,30 @@ function validate(c: SliceConfig): SliceConfig {
           `overlapIgnore[${i}] ("${p}") must be repo-relative — no leading / or ./`,
         );
       }
+    }
+  }
+  if (c.testOnBase !== undefined) {
+    if (
+      typeof c.testOnBase !== "object" ||
+      c.testOnBase === null ||
+      typeof c.testOnBase.command !== "function"
+    ) {
+      bad(
+        "testOnBase must be { command: (files) => string[] }, or left out — command returns the argv that runs those test files",
+      );
+    }
+    const patterns = c.testOnBase.files;
+    if (
+      patterns !== undefined &&
+      !(
+        Array.isArray(patterns) &&
+        patterns.length > 0 &&
+        patterns.every((f) => typeof f === "string" && f)
+      )
+    ) {
+      bad(
+        "testOnBase.files must be a non-empty array of path patterns, or left out",
+      );
     }
   }
   if (

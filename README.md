@@ -336,6 +336,7 @@ export default {
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
+| `testOnBase` | `{ command, files? }?` | run a slice's new test files against the base before its review; off when left out. See below |
 | `gates` | `Gate[]` | what a slice must pass before landing, in order |
 | `tracker` | `Tracker` | where tickets and blocking edges live |
 | `launcher` | `Launcher?` | how a prepped worktree becomes an open session (default `manual()`) |
@@ -343,6 +344,32 @@ export default {
 | `wrapCommand` | `string[]?` | command the agent runs inside; `[]` by default |
 | `startPrompt` | `string` | opening instruction for a session; `{n}` is the ticket |
 | `tabTitle` | `function \| false?` | a slice tab's title; `#17 › #42 <title>` by default |
+
+**`testOnBase`** is for tickets that ask for a failing test first. The reviewer has
+no tools, so that criterion was accepted on the commit message's word. Set it to how
+your runner takes a list of files:
+
+```ts
+testOnBase: { command: (files) => ["bunx", "vitest", "run", ...files] },
+```
+
+At land, after the gates and before the review (so only with `--auto` or
+`--review`), the dispatcher makes a throwaway worktree at the commit the slice was
+rebased onto, checks out the test files the slice added or changed into it, and runs
+the command there for up to ten minutes. The run log says `new tests on base: fail
+(expected for a fix)`, `pass`, or `skipped — <reason>`, and the spec review is shown
+the command, whether it exited non-zero, and the last 40 lines of output.
+
+- **It is evidence, not a gate.** An exit code cannot tell "the fix is missing" from
+  "the checkout is broken", so the reviewer reads the output and judges. Nothing is
+  parked on this result alone.
+- **It costs one extra test run per land** that touches a test file.
+- **The throwaway worktree is not installed.** It gets the slice worktree's
+  top-level `node_modules` as a symlink and the `provisionCopy` files. A slice that
+  changes a manifest or lockfile is skipped. If your runner does not start in such a
+  checkout, the output will say so in every review: leave the key out.
+- `files` overrides what counts as a test file (default `**/*.test.*` and
+  `**/*.spec.*`), in the syntax of `overlapIgnore`.
 
 Two of these have sharp edges worth stating:
 

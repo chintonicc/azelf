@@ -61,11 +61,13 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
   statfsSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join } from "node:path";
@@ -1391,6 +1393,8 @@ type SpecContext = {
   parent?: string | null;
   /** What landed onto this slice's files while it was open: see `landedUnder`. */
   landed?: string | null;
+  /** The slice's new tests, run against the base: see `testsOnBase`. */
+  testsOnBase?: string | null;
 };
 
 /**
@@ -1447,6 +1451,15 @@ ${commits}
 
 DIFF:
 ${diff}${
+  context.testsOnBase
+    ? `
+
+NEW TESTS AGAINST THE BASE:
+${context.testsOnBase}
+
+How to read that: a spec that asks for a failing test first is met when these tests FAIL on the base for the reason the spec describes. An import error for a file this slice adds counts — the code under test is not there yet. A broken environment (a missing dependency, a runner that did not start) does not count either way. Tests that PASS on the base do not show what a failing-test-first spec asked them to show: report that under (a). If you cannot tell which of these it is, say so, and do not BLOCK on this alone.`
+    : ""
+}${
   context.landed
     ? `
 
@@ -1554,6 +1567,190 @@ function landedUnder(id: TicketId): string | null {
   }`;
 }
 
+/** How long the slice's tests may run against the base. */
+const TEST_ON_BASE_TIMEOUT_MS =
+  Number(process.env.SLICE_TEST_ON_BASE_TIMEOUT_SECONDS ?? 600) * 1000;
+
+/** Output lines of that run the reviewer is shown. */
+const TEST_ON_BASE_TAIL = 40;
+
+/** What counts as a test file when `testOnBase.files` is left out. */
+const isTestFile = ignores(
+  config.testOnBase?.files ?? [
+    "**/*.test.*",
+    "*.test.*",
+    "**/*.spec.*",
+    "*.spec.*",
+  ],
+);
+
+/**
+ * A slice that changes one of these has dependencies the base does not, and
+ * its tests against the base's install say nothing about the tests.
+ */
+const MANIFESTS = new Set([
+  "package.json",
+  "package-lock.json",
+  "bun.lock",
+  "bun.lockb",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "Cargo.toml",
+  "Cargo.lock",
+  "go.mod",
+  "go.sum",
+  "pyproject.toml",
+  "requirements.txt",
+  "uv.lock",
+  "poetry.lock",
+  "Gemfile",
+  "Gemfile.lock",
+]);
+
+/** The throwaway worktree for one slice's run, beside the slice's own. */
+const baseTestDir = (id: TicketId) => `${worktreeFor(id)}-base-test`;
+
+/** Remove it, whatever state it was left in. */
+function removeBaseTest(id: TicketId): void {
+  const dir = baseTestDir(id);
+  if (!existsSync(dir)) return;
+  run(["git", "worktree", "remove", "--force", dir], { allowFail: true });
+  // A directory git no longer knows as a worktree, or could not remove.
+  rmSync(dir, { recursive: true, force: true });
+  run(["git", "worktree", "prune"], { allowFail: true });
+}
+
+/**
+ * Run the test files this slice adds or changes against the base branch as it
+ * was before the slice, for the spec review to read. See `testOnBase` in
+ * slice-config.ts for why, and for why the answer is evidence and not a gate.
+ *
+ * Null when the feature is off or the slice touches no test file: nothing is
+ * said. Otherwise `line` is the run log's, and `section` the prompt's, absent
+ * when the run was skipped.
+ *
+ * Called after the rebase and the gates, so the merge base is the commit the
+ * slice now sits on, and the test files are the ones that will land.
+ */
+function testsOnBase(id: TicketId): { line: string; section?: string } | null {
+  const conf = config.testOnBase;
+  if (!conf) return null;
+  const onto = mergeBase(id);
+  if (!onto) return null;
+  // Added, modified or renamed-to: a deleted test file has nothing to run.
+  const tests = run(
+    [
+      "git",
+      "diff",
+      "--name-only",
+      "--diff-filter=AMR",
+      `${onto}..${branchFor(id)}`,
+    ],
+    { allowFail: true },
+  )
+    .out.split("\n")
+    .map((l) => l.trim())
+    .filter((f) => f && isTestFile(f));
+  if (tests.length === 0) return null;
+
+  const manifest = changedFiles(id).find((f) =>
+    MANIFESTS.has(f.split("/").pop() ?? ""),
+  );
+  if (manifest) {
+    return {
+      line: `skipped — the slice changes ${manifest}, so the base's dependencies are not the slice's`,
+    };
+  }
+
+  const dir = baseTestDir(id);
+  removeBaseTest(id);
+  try {
+    const made = run(["git", "worktree", "add", "--detach", dir, onto], {
+      allowFail: true,
+    });
+    if (!made.ok) {
+      return {
+        line: `skipped — the throwaway worktree could not be made: ${
+          made.out.split("\n").pop() ?? ""
+        }`,
+      };
+    }
+    // What prep gives a worktree, without the install: the slice's own
+    // node_modules by reference, and the gitignored files the config names.
+    const wt = worktreeFor(id);
+    if (existsSync(join(wt, "node_modules"))) {
+      symlinkSync(join(wt, "node_modules"), join(dir, "node_modules"));
+    }
+    for (const f of config.provisionCopy) {
+      const from = join(repoRoot, f);
+      const to = join(dir, f);
+      if (existsSync(from) && !existsSync(to)) {
+        mkdirSync(dirname(to), { recursive: true });
+        copyFileSync(from, to);
+      }
+    }
+    const got = run(["git", "checkout", branchFor(id), "--", ...tests], {
+      cwd: dir,
+      allowFail: true,
+    });
+    if (!got.ok) {
+      return {
+        line: "skipped — the slice's test files could not be checked out onto the base",
+      };
+    }
+
+    const argv = conf.command(tests);
+    const proc = spawnSync(argv[0] as string, argv.slice(1), {
+      cwd: dir,
+      stdio: "pipe",
+      encoding: "utf8",
+      timeout: TEST_ON_BASE_TIMEOUT_MS,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+    if (proc.error) {
+      const timedOut =
+        (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT";
+      return {
+        line: timedOut
+          ? `skipped — the command did not finish in ${Math.round(
+              TEST_ON_BASE_TIMEOUT_MS / 1000,
+            )}s`
+          : `skipped — the command could not be run: ${proc.error.message}`,
+      };
+    }
+    const failed = proc.status !== 0;
+    const tail = `${proc.stdout ?? ""}${proc.stderr ?? ""}`
+      .trimEnd()
+      .split("\n")
+      .slice(-TEST_ON_BASE_TAIL)
+      .join("\n");
+    return {
+      line: failed ? "fail (expected for a fix)" : "pass",
+      section: `The test files this slice adds or changes were run against the base branch as it was before this slice (${onto.slice(
+        0,
+        12,
+      )}), in a throwaway checkout holding the base's code and only these files from the slice:
+${tests.join("  ")}
+command: ${argv.join(" ")}
+result: ${
+        failed
+          ? `exited ${
+              proc.status ?? "on a signal"
+            } — the tests FAIL on the base`
+          : "exited 0 — the tests PASS on the base"
+      }
+last ${TEST_ON_BASE_TAIL} lines of output:
+${tail || "(no output)"}`,
+    };
+  } catch (e) {
+    return {
+      line: `skipped — ${e instanceof Error ? e.message : String(e)}`,
+    };
+  } finally {
+    removeBaseTest(id);
+  }
+}
+
 /** Left in an open slice's worktree when a sibling lands on its files. */
 const LANDED_NOTE = ".slice-landed.md";
 
@@ -1628,6 +1825,9 @@ function reviewSlice(t: Ticket): boolean {
   const diff = diffFor(range, wt);
   const scope = `ticket ${ref(t.id)} — ${t.title}`;
 
+  const onBase = testsOnBase(t.id);
+  if (onBase) console.log(`  new tests on base: ${onBase.line}`);
+
   console.log(`  reviewing ${ref(t.id)} (spec + standards) …`);
   const parent = parentSpec(t.id);
   const spec = reviewSpec(
@@ -1636,9 +1836,16 @@ function reviewSlice(t: Ticket): boolean {
     commits,
     diff,
     wt,
-    { parent: parent.text, landed: landedUnder(t.id) },
+    {
+      parent: parent.text,
+      landed: landedUnder(t.id),
+      testsOnBase: onBase?.section,
+    },
   );
   if (parent.note) spec.report = `${parent.note}\n\n${spec.report}`;
+  if (onBase && !onBase.section) {
+    spec.report = `(new tests on base: ${onBase.line})\n\n${spec.report}`;
+  }
   const standards = reviewStandards(scope, commits, diff, wt);
 
   const heading = `# Review — ${ref(t.id)} ${t.title}`;
@@ -3370,6 +3577,8 @@ const planBase = run(["git", "rev-parse", baseBranch]).out.trim();
 // for nothing. This run's tickets only: another dispatcher may own the rest.
 for (const t of tickets) {
   rmSync(join(worktreeFor(t.id), RETRY_MARKER), { force: true });
+  // A `testOnBase` worktree a crashed run left behind.
+  removeBaseTest(t.id);
 }
 
 /**

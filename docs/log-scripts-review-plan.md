@@ -1,6 +1,6 @@
 # A run log that says what is true, scripts that take the common order, and a review that can see past its own ticket
 
-**Status:** IN PROGRESS (Phases 1–4 landed) · **Written:** 2026-10-02
+**Status:** IN PROGRESS (Phases 1–5 landed) · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), the entries still `open` after `docs/resolve-and-report-plan.md`: dated
 2026-09-25, 09-26, 09-30, 10-01 and 10-02.
@@ -234,7 +234,7 @@ does not depend on this. A land removes the worktree, ignored files included, so
 is no separate cleanup. The session-side sentence went into the `slice` skill, which is
 what a session reads; the `azelf` command file got one line too.
 
-## Phase 4 — a slice is reviewed against the sibling that landed under it
+## Phase 4 — a slice is reviewed against the sibling that landed under it (`f6bf997`)
 
 `scripts/slice-run.ts`. Builds on Phase 1b's `landedHeads` and Phase 3's prompt.
 
@@ -274,32 +274,40 @@ eleven patterns.
 
 Opt-in. Drop this phase without touching the others if the cost reads wrong.
 
-- [ ] Config (`slice-config.ts`): `testOnBase?: { command: (files: string[]) =>
+- [x] Config (`slice-config.ts`): `testOnBase?: { command: (files: string[]) =>
       string[]; files?: string[] }`. `files` are patterns for what counts as a test,
       default `**/*.test.*` and `**/*.spec.*`, matched with `ignores()` from
       `slice-overlap.ts`. Unset means the feature is off and nothing below runs.
-- [ ] At land, after the gates pass and before the review, when review is on: the
+- [x] At land, after the gates pass and before the review, when review is on: the
       test files this slice added or changed. None: skip, say nothing.
-- [ ] A throwaway worktree, detached at the commit the slice rebased onto, beside the
+- [x] A throwaway worktree, detached at the commit the slice rebased onto, beside the
       slice's own. `node_modules` is a symlink to the slice worktree's;
       `provisionCopy` files are copied as prep does. Check out the slice's test files
       into it from the branch. Run the command there, ten-minute timeout. Remove the
       worktree in a `finally`, and at dispatcher start remove any left by a crash.
-- [ ] Skipped, with the reason in the report, when the slice changes a manifest or
+- [x] Skipped, with the reason in the report, when the slice changes a manifest or
       lockfile (the base's dependencies are then not the slice's), or when the
       worktree cannot be made.
-- [ ] The spec prompt gains `NEW TESTS AGAINST THE BASE`: the command, whether it
+- [x] The spec prompt gains `NEW TESTS AGAINST THE BASE`: the command, whether it
       exited non-zero, and the last 40 lines of output. Rule for the reviewer: a
       ticket that asks for a failing test first is met when these tests fail on the
       base *for the reason the ticket describes*; an import error for a file the slice
       adds counts, a broken environment does not, and if it cannot tell it says so.
-- [ ] Run log: `new tests on base: fail (expected for a fix)` / `pass` / `skipped —
+- [x] Run log: `new tests on base: fail (expected for a fix)` / `pass` / `skipped —
       <reason>`. Never a park.
-- [ ] README: the config key, and that it costs one extra test run per land.
-- [ ] Tests: a fixture slice that adds a test and its fix → prompt says the tests
+- [x] README: the config key, and that it costs one extra test run per land.
+- [x] Tests: a fixture slice that adds a test and its fix → prompt says the tests
       failed on base; one that adds a test passing on base → says passed; unset config
       → no section and no worktree; the throwaway worktree is gone afterwards in all
       three, also when the command times out.
+
+**As landed.** The run happens at the top of `reviewSlice`, which is after the gates
+and only with review on. The default patterns also match a test file at the repo root,
+which `**/*.test.*` alone does not in `ignores()`. A timeout is reported as `skipped —
+the command did not finish in Ns`, not as a failure, and `SLICE_TEST_ON_BASE_TIMEOUT_SECONDS`
+exists so the timeout test takes one second. Manifests are matched by file name at any
+depth, for the common ecosystems and not only bun's. Only the top-level `node_modules`
+is linked; a workspace with nested ones is the consumer check below.
 
 ## Checks only the consumer can make
 

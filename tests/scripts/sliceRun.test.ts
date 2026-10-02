@@ -364,6 +364,137 @@ describe("a slice that lands onto a sibling's files", () => {
   }, 60_000);
 });
 
+/**
+ * `testOnBase`: the test files a slice adds or changes are run against the
+ * base as it was before the slice, in a throwaway worktree, and the result
+ * goes into the spec review's prompt. Here a "test" is a shell script, and
+ * the runner runs each one.
+ */
+describe("new tests run against the base", () => {
+  const RECORD = [
+    "bash",
+    "-c",
+    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    "reviewer",
+  ];
+  const TEST_ON_BASE = `testOnBase: { command: (files) => ["bash", "-c", 'for f in "$@"; do bash "$f" || exit 1; done', "runner", ...files] },`;
+  const specPrompt = (fx: Consumer) =>
+    readFileSync(join(fx.root, "prompts"), "utf8")
+      .split("\n=====\n")
+      .find((p) => p.includes("faithfully implement the spec")) ?? "";
+  const noThrowaway = (fx: Consumer) => {
+    expect(existsSync(`${fx.wt(40)}-base-test`)).toBe(false);
+    expect(git(fx.main, "worktree", "list")).not.toContain("base-test");
+  };
+  /** A slice with a.test.sh running `test`, and fix.txt beside it. */
+  const slice = (test: string, configExtra = TEST_ON_BASE) => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      review: RECORD,
+      configExtra,
+    });
+    c = fx;
+    commitIn(fx.wt(40), "fix.txt", "fix\n", "fix: the fix");
+    commitIn(fx.wt(40), "a.test.sh", test, "test: the fix");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+  const ARGS = ["--review", "-y", "--interval", "1", "40"];
+
+  it("tells the review the tests fail on the base", () => {
+    const fx = slice("test -f fix.txt || { echo FIX-MISSING; exit 1; }\n");
+    // A throwaway worktree a crashed run left behind is in the way.
+    git(fx.main, "worktree", "add", "-q", "--detach", `${fx.wt(40)}-base-test`);
+
+    const r = runDispatcher(fx, ARGS);
+
+    expect(r.out).toContain("new tests on base: fail (expected for a fix)");
+    const prompt = specPrompt(fx);
+    expect(prompt).toContain("NEW TESTS AGAINST THE BASE:");
+    expect(prompt).toContain("only these files from the slice:\na.test.sh\n");
+    expect(prompt).toContain(
+      "result: exited 1 — the tests FAIL on the base\nlast 40 lines of output:\nFIX-MISSING",
+    );
+    expect(r.out).toContain("landing #40");
+    noThrowaway(fx);
+  });
+
+  it("tells the review when they pass on the base", () => {
+    const fx = slice("echo ALWAYS-GREEN\n");
+
+    const r = runDispatcher(fx, ARGS);
+
+    expect(r.out).toContain("new tests on base: pass\n");
+    expect(specPrompt(fx)).toContain(
+      "result: exited 0 — the tests PASS on the base\nlast 40 lines of output:\nALWAYS-GREEN",
+    );
+    noThrowaway(fx);
+  });
+
+  it("runs nothing when the config leaves it out", () => {
+    const fx = slice("echo ALWAYS-GREEN\n", "");
+
+    const r = runDispatcher(fx, ARGS);
+
+    expect(r.out).not.toContain("new tests on base");
+    expect(specPrompt(fx)).not.toContain("NEW TESTS");
+    expect(r.out).toContain("landing #40");
+    noThrowaway(fx);
+  });
+
+  it("says nothing for a slice that touches no test file", () => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      review: RECORD,
+      configExtra: TEST_ON_BASE,
+    });
+    c = fx;
+    commitIn(fx.wt(40), "fix.txt", "fix\n", "fix: the fix");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(fx, ARGS);
+
+    expect(r.out).not.toContain("new tests on base");
+    expect(specPrompt(fx)).not.toContain("NEW TESTS");
+  });
+
+  it("skips a slice that changes a manifest, and says so in the report", () => {
+    const fx = slice("exit 1\n");
+    sh(fx.wt(40), "rm .slice-ready-to-land");
+    commitIn(fx.wt(40), "package.json", "{}\n", "chore: a dependency");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(fx, ARGS);
+
+    expect(r.out).toContain(
+      "new tests on base: skipped — the slice changes package.json",
+    );
+    expect(r.out).toContain(
+      "(new tests on base: skipped — the slice changes package.json",
+    );
+    expect(specPrompt(fx)).not.toContain("NEW TESTS");
+    expect(r.out).toContain("landing #40");
+    noThrowaway(fx);
+  });
+
+  it("removes the worktree when the command times out, and still lands", async () => {
+    const fx = slice("sleep 30\n");
+
+    d = startDispatcher(fx, ARGS, {
+      env: { SLICE_TEST_ON_BASE_TIMEOUT_SECONDS: "1" },
+    });
+    await d.until("plan complete");
+
+    expect(d.output()).toContain(
+      "new tests on base: skipped — the command did not finish in 1s",
+    );
+    expect(specPrompt(fx)).not.toContain("NEW TESTS");
+    noThrowaway(fx);
+  }, 60_000);
+});
+
 describe("slice-session.sh and .slice-parent.md", () => {
   const prep = (body: string) => {
     const fx = makeConsumer({ worktrees: [40], agent: ["true"] });
