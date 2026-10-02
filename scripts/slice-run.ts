@@ -1389,6 +1389,8 @@ ${diff}`,
 type SpecContext = {
   /** The spec the ticket hangs under: see `parentSpec`. */
   parent?: string | null;
+  /** What landed onto this slice's files while it was open: see `landedUnder`. */
+  landed?: string | null;
 };
 
 /**
@@ -1409,14 +1411,25 @@ function reviewSpec(
 Report only:
  (a) requirements the spec asked for that are MISSING or partial;
  (b) behaviour in the diff that was NOT asked for (scope creep);
- (c) requirements that look implemented but where the implementation looks WRONG.
-Quote the spec line for each finding. Do not comment on style, naming or structure — a separate axis covers that. Under 400 words.
+ (c) requirements that look implemented but where the implementation looks WRONG.${
+   context.landed
+     ? `
+ (d) something the landed work below set up for this slice to join, extend or respect, that this diff does not — a shared guard, a registry, an invariant stated in a comment.`
+     : ""
+ }
+Quote the spec line for each finding${
+      context.landed ? ", or for (d) the landed line" : ""
+    }. Do not comment on style, naming or structure — a separate axis covers that. Under 400 words.
 
 Then, as the FINAL line and nothing after it, print exactly one of:
 VERDICT: PASS
 VERDICT: BLOCK
 
-BLOCK only for (a) or (c) — something asked for is missing or looks wrong. Scope creep alone is a finding, not a block. If the spec is too vague to judge against, PASS and say so.${
+BLOCK only for (a)${
+      context.landed ? ", (c) or (d)" : " or (c)"
+    } — something asked for is missing or looks wrong${
+      context.landed ? ", or a contract the landed work set up is not kept" : ""
+    }. Scope creep alone is a finding, not a block. If the spec is too vague to judge against, PASS and say so.${
       context.parent
         ? `
 
@@ -1433,7 +1446,16 @@ COMMITS:
 ${commits}
 
 DIFF:
-${diff}`,
+${diff}${
+  context.landed
+    ? `
+
+LANDED WHILE THIS SLICE WAS OPEN:
+Other slices of the same plan landed on files this diff also changes, after this slice was started. Its author did not see them. The DIFF above is already rebased onto them, so they applied cleanly; (d) is about what a clean rebase does not check.
+
+${context.landed}`
+    : ""
+}`,
     cwd,
   );
 
@@ -1452,6 +1474,139 @@ ${diff}`,
     };
   }
   return { report: out, block: verdict === "BLOCK" };
+}
+
+/** What the landed diffs may take of the spec review's prompt. */
+const LANDED_BUDGET = 30_000;
+
+/** The files both lists name, minus what the overlap report ignores. */
+const sharedFiles = (a: string[], b: string[]): string[] => {
+  const other = new Set(b);
+  return [...new Set(a)]
+    .filter((f) => other.has(f) && !overlapIgnored(f))
+    .sort();
+};
+
+/** `git log --oneline` over what one slice put on the base branch. */
+const landedSubjects = (r: { from: string; to: string }): string =>
+  run(["git", "log", "--oneline", `${r.from}..${r.to}`], {
+    allowFail: true,
+  }).out.trim();
+
+/**
+ * The spec review's `LANDED WHILE THIS SLICE WAS OPEN` section, or null.
+ *
+ * A contract between two siblings is the thing no per-slice review could see:
+ * on consumer-a one slice landed a guard whose comment said its sibling joins
+ * it, the sibling was in flight on the older base and never did, and the
+ * overlap warning, the resolver and the plan review all noticed after it was
+ * on the base branch. So a slice that lands onto files a sibling changed
+ * under it is shown that sibling: its commit subjects, and its diff limited
+ * to the files both touched.
+ *
+ * Called after the rebase, so `changedFiles` is what this slice itself
+ * changes. Per-file diffs are added smallest first, so one large file does
+ * not crowd out the rest; what does not fit is named.
+ */
+function landedUnder(id: TicketId): string | null {
+  const mine = changedFiles(id);
+  const parts: string[] = [];
+  const diffs: { file: string; text: string }[] = [];
+  for (const other of landedWhileOpen.get(id) ?? []) {
+    const range = landedRanges.get(other);
+    const files = sharedFiles(landedFiles.get(other) ?? [], mine);
+    if (!range || files.length === 0) continue;
+    const title = tickets.find((t) => t.id === other)?.title ?? "";
+    parts.push(
+      `${ref(other)} — ${title}\nfiles this diff also changes: ${files.join(
+        "  ",
+      )}\ncommits:\n${landedSubjects(range)}`,
+    );
+    for (const file of files) {
+      const text = run(["git", "diff", range.from, range.to, "--", file], {
+        allowFail: true,
+      }).out;
+      if (text.trim()) diffs.push({ file: `${ref(other)} ${file}`, text });
+    }
+  }
+  if (parts.length === 0) return null;
+
+  diffs.sort((a, b) => a.text.length - b.text.length);
+  let left = LANDED_BUDGET;
+  const shown: string[] = [];
+  const cut: string[] = [];
+  for (const d of diffs) {
+    if (d.text.length <= left) {
+      left -= d.text.length;
+      shown.push(d.text.trimEnd());
+    } else {
+      cut.push(`${d.file} (${d.text.length} chars)`);
+    }
+  }
+  return `${parts.join(
+    "\n\n",
+  )}\n\nWHAT THEY CHANGED IN THOSE FILES:\n${shown.join("\n")}${
+    cut.length
+      ? `\n\n[not shown, over the ${LANDED_BUDGET}-char budget: ${cut.join(
+          ", ",
+        )}]`
+      : ""
+  }`;
+}
+
+/** Left in an open slice's worktree when a sibling lands on its files. */
+const LANDED_NOTE = ".slice-landed.md";
+
+/**
+ * Tell the open slices that `landed` just changed files they have changed
+ * too: a note in each one's worktree, appended per land, which its session
+ * may or may not read. The review at its own land is what checks; this is the
+ * cheap chance to get it right before then. Written whether or not review is
+ * on.
+ *
+ * Only where git ignores the file (the pattern is in init's exclude block):
+ * elsewhere it would be an untracked change, and a slice with one is not
+ * clean and does not land.
+ */
+function noteLanded(landed: Ticket, files: string[]): void {
+  const range = landedRanges.get(landed.id);
+  if (!range) return;
+  for (const t of tickets) {
+    if (!t.open || t.id === landed.id || !hasWorktree(t.id)) continue;
+    const shared = sharedFiles(files, changedFiles(t.id));
+    if (shared.length === 0) continue;
+    const wt = worktreeFor(t.id);
+    const { ok: ignored } = run(["git", "check-ignore", "-q", LANDED_NOTE], {
+      cwd: wt,
+      allowFail: true,
+    });
+    if (!ignored) continue;
+    const path = join(wt, LANDED_NOTE);
+    let before = "";
+    try {
+      before = readFileSync(path, "utf8");
+    } catch {
+      // The first land under this slice.
+    }
+    writeFileSync(
+      path,
+      `${
+        before ||
+        `# Landed under this slice\n\nOther slices of this plan landed on files this one has changed. Your branch does not have them until it is rebased at land. Before you finish, read what they changed: if one set up something this slice should join, extend or respect (a shared guard, a registry, an invariant stated in a comment), do that. The review at land checks for it.\n`
+      }\n## ${ref(landed.id)} — ${
+        landed.title
+      }\n\nFiles you both changed:\n${shared
+        .map((f) => `- ${f}`)
+        .join("\n")}\n\nCommits:\n\n${landedSubjects(range)
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n")}\n\nWhat it changed there: \`git diff ${range.from.slice(
+        0,
+        12,
+      )} ${range.to.slice(0, 12)} -- ${shared.join(" ")}\`\n`,
+    );
+    console.log(`  noted in ${ref(t.id)}'s worktree: ${LANDED_NOTE}`);
+  }
 }
 
 /**
@@ -1481,7 +1636,7 @@ function reviewSlice(t: Ticket): boolean {
     commits,
     diff,
     wt,
-    { parent: parent.text },
+    { parent: parent.text, landed: landedUnder(t.id) },
   );
   if (parent.note) spec.report = `${parent.note}\n\n${spec.report}`;
   const standards = reviewStandards(scope, commits, diff, wt);
@@ -2651,6 +2806,8 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
   // reaches the base branch — and so a slice that never got past the gates
   // contributes nothing.
   const landing = changedFiles(t.id);
+  // The slice is rebased, so this is where its commits start.
+  const landedFrom = baseHead();
   // `--end-session` under --auto only: the session in that tab was launched
   // with --self-land, nobody is reading it, and ending its agent after the
   // removal is what lets the tab close. A manual land never ends a session.
@@ -2671,6 +2828,18 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
   landedFiles.set(t.id, landing);
   const landedAt = baseHead();
   if (landedAt) landedHeads.set(t.id, landedAt);
+  if (landedFrom && landedAt) {
+    landedRanges.set(t.id, { from: landedFrom, to: landedAt });
+  }
+  // Every slice that has a branch right now was open when this landed, and
+  // stays so however often it is rebased or retried afterwards.
+  for (const o of tickets) {
+    if (!o.open || o.id === t.id || !branchHead(o.id)) continue;
+    const under = landedWhileOpen.get(o.id);
+    if (under) under.push(t.id);
+    else landedWhileOpen.set(o.id, [t.id]);
+  }
+  noteLanded(t, landing);
   const flaky = flakyGates.get(t.id);
   if (flaky) landedOnRetry.set(t.id, flaky);
   parked.delete(t.id);
@@ -2820,6 +2989,18 @@ const landedFiles = new Map<TicketId, string[]>();
  * and has nothing left to rebase over: see `containsLanded`.
  */
 const landedHeads = new Map<TicketId, string>();
+
+/** The base branch before and after each land: that slice's commits. */
+const landedRanges = new Map<TicketId, { from: string; to: string }>();
+
+/**
+ * For each slice, the slices that landed while it had a branch, in order.
+ * Recorded at the land and not derived from ancestry later, because a slice
+ * parked on red gates has already been rebased onto the landed work by the
+ * time its land is retried, and is no less a slice whose author did not see
+ * it.
+ */
+const landedWhileOpen = new Map<TicketId, TicketId[]>();
 
 /** `is-ancestor` answers, keyed on both commits: neither side un-happens. */
 const containsCache = new Map<string, boolean>();

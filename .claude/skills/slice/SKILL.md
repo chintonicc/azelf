@@ -64,6 +64,12 @@ mode — apply formatting as an edit you commit, not as part of the gate.
 
 ## 6. Finish
 
+Before you finish, look for `.slice-landed.md` in this worktree. It is there when
+another slice of the plan landed on files you have changed, and it names the files
+and the command that shows what landed. If that work set up something yours should
+join, extend or respect (a shared guard, a registry, an invariant stated in a
+comment), do it now: the review at land is shown the same diff and checks for it.
+
 How a slice finishes depends on the instruction this session was started with.
 
 **It told you to run `./scripts/slice-done.sh`.** Then nobody is reading this session

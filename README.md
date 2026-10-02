@@ -130,7 +130,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes ten marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes eleven marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -159,7 +159,7 @@ saying so.
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | ten marker patterns, in a delimited block |
+| `.git/info/exclude` | eleven marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -812,6 +812,18 @@ and says so when more than one of them has changed the same file:
 A landed slice stays in the report only for the slices that were open when it
 landed. One started afterwards is cut on top of it and has nothing to rebase over,
 so the pair is not printed.
+
+**The warning is not the only thing that happens.** When a slice lands on files an
+open slice has also changed, the dispatcher appends what landed to
+`.slice-landed.md` in the open slice's worktree (`noted in #21's worktree:
+.slice-landed.md`), and the `slice` skill tells a session to read it before it
+finishes. And when that open slice comes to land, with review on, its spec review
+is shown the landed slice's commit subjects and its diff in the shared files, under
+`LANDED WHILE THIS SLICE WAS OPEN`, with one more kind of finding: something the
+landed work set up for this slice to join, extend or respect, that its diff does
+not. That is a BLOCK under the same rule as any other spec failure. It exists
+because of a pair that both applied cleanly: one landed a guard whose comment said
+its sibling joins it, and the sibling, written on the older base, never did.
 
 **This is warn-only, and it is about the soft case.** Landing rebases the slice
 onto the base branch, so two slices whose edits to one file textually conflict

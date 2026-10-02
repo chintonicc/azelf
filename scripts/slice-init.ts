@@ -67,6 +67,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 # A fresh clone does not get this block — rerun \`azelf init\` there.
 .slice-ticket.md
 .slice-parent.md
+.slice-landed.md
 .slice-autostart
 .slice-live
 .slice-ready-to-land

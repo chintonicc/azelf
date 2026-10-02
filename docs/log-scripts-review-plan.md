@@ -1,6 +1,6 @@
 # A run log that says what is true, scripts that take the common order, and a review that can see past its own ticket
 
-**Status:** IN PROGRESS (Phases 1–3 landed) · **Written:** 2026-10-02
+**Status:** IN PROGRESS (Phases 1–4 landed) · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), the entries still `open` after `docs/resolve-and-report-plan.md`: dated
 2026-09-25, 09-26, 09-30, 10-01 and 10-02.
@@ -194,7 +194,7 @@ to the repo root. `--push` alone with no `origin/<branch>` yet says the push cre
 it and asks the same way. `format.test.ts` puts a fake `bunx` on `PATH` that records
 its arguments, which is how "nothing formatted" is asserted.
 
-## Phase 3 — the review sees the parent
+## Phase 3 — the review sees the parent (`195473b`)
 
 `scripts/slice-run.ts`, `scripts/slice-config.ts`, `scripts/slice-config.sh`,
 `scripts/slice-session.sh`, the skill (`agent/commands/azelf.md` and its copy).
@@ -238,27 +238,37 @@ what a session reads; the `azelf` command file got one line too.
 
 `scripts/slice-run.ts`. Builds on Phase 1b's `landedHeads` and Phase 3's prompt.
 
-- [ ] In `reviewSlice`, after the rebase: the landed slices whose `landedFiles`
+- [x] In `reviewSlice`, after the rebase: the landed slices whose `landedFiles`
       intersect this slice's changed files and whose `landedHeads` entry is **not** an
       ancestor of the branch as it was before this land's rebase. That is "landed
       while this one was open". Record the pre-rebase head in `tryLand` for this.
-- [ ] For those: commit subjects (`git log --oneline` over the landed range) and the
+- [x] For those: commit subjects (`git log --oneline` over the landed range) and the
       landed diff limited to the shared files, under a budget (30 000 characters,
       shared files first by size ascending so one large file does not crowd out the
       rest).
-- [ ] Prompt section `LANDED WHILE THIS SLICE WAS OPEN`, and a fourth finding kind:
+- [x] Prompt section `LANDED WHILE THIS SLICE WAS OPEN`, and a fourth finding kind:
       "(d) something the landed work set up for this slice to join, extend or respect,
       that this diff does not — a shared guard, a registry, an invariant stated in a
       comment". BLOCK covers (d). No such slices: no section, no (d).
-- [ ] When a slice lands and an open slice overlaps it, write the same subjects and
+- [x] When a slice lands and an open slice overlaps it, write the same subjects and
       file list to `<open worktree>/.slice-landed.md`, appended per land, and print
       `noted in #N's worktree: .slice-landed.md`. Skill: before finishing, read
       `.slice-landed.md` if it exists. Same exclusion and cleanup as
       `.slice-ticket.md`.
-- [ ] Tests: two siblings on one file, the first lands; the second's review prompt
+- [x] Tests: two siblings on one file, the first lands; the second's review prompt
       carries the section and the first's subject line; a slice prepped after the land
       gets no section; the note file appears in the open worktree. With review off the
       note is still written.
+
+**As landed.** "Landed while this one was open" is recorded at the land, for every
+ticket that has a branch at that moment (`landedWhileOpen`), and not derived from
+ancestry at review time. A slice parked on red gates has already been rebased onto the
+landed work when its land is retried, and the ancestry test would then say it contains
+it. The file intersection is still taken at review time, after the rebase. The landed
+range is the base head before and after the land (`landedRanges`). Paths in
+`overlapIgnore` are left out here as they are in the warning. `.slice-landed.md` is
+written only where git ignores it, as `.slice-parent.md` is; the exclude block now has
+eleven patterns.
 
 ## Phase 5 — new tests are run against the base, when the consumer says how
 

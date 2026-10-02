@@ -248,6 +248,122 @@ describe("the spec review and the parent spec", () => {
   });
 });
 
+/**
+ * Two siblings change one file and both apply cleanly. The one that lands
+ * second is reviewed against the first, and is left a note about it while it
+ * is still open. `shared.txt` has room for both edits, so no rebase conflicts.
+ */
+describe("a slice that lands onto a sibling's files", () => {
+  const RECORD = [
+    "bash",
+    "-c",
+    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    "reviewer",
+  ];
+  const specPrompts = (fx: Consumer) =>
+    readFileSync(join(fx.root, "prompts"), "utf8")
+      .split("\n=====\n")
+      .filter((p) => p.includes("faithfully implement the spec"));
+  const BASE = "top\n\n\n\nmiddle\n\n\n\nbottom\n";
+
+  /** A consumer whose main has shared.txt, and worktrees cut from it. */
+  const siblings = (
+    opts: Parameters<typeof makeConsumer>[0],
+    worktrees: number[],
+  ) => {
+    const fx = makeConsumer({ remote: true, ...opts });
+    c = fx;
+    commitIn(fx.main, "shared.txt", BASE, "chore: shared");
+    git(fx.main, "push", "-q", "origin", "main");
+    for (const n of worktrees) {
+      git(fx.main, "worktree", "add", "-q", fx.wt(n), "-b", `ticket/${n}`);
+    }
+    fx.setTicket("40", { title: "The guard" });
+    fx.setTicket("41", { title: "The sibling" });
+    commitIn(
+      fx.wt(40),
+      "shared.txt",
+      BASE.replace("top", "top GUARD-LINE"),
+      "feat: a guard every writer joins",
+    );
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+
+  it("shows the second one's review what the first landed, and leaves a note", async () => {
+    const fx = siblings({ review: RECORD }, [40, 41]);
+    commitIn(
+      fx.wt(41),
+      "shared.txt",
+      BASE.replace("bottom", "bottom SIBLING"),
+      "feat: the sibling",
+    );
+    const session = fakeSession(fx, 41);
+    sessions.push(session);
+
+    d = startDispatcher(fx, ["--review", "-y", "--interval", "1", "40", "41"]);
+    await d.until("noted in #41's worktree: .slice-landed.md");
+    const note = readFileSync(join(fx.wt(41), ".slice-landed.md"), "utf8");
+    expect(note).toContain("## #40 — The guard");
+    expect(note).toContain("- shared.txt");
+    expect(note).toMatch(/ {4}[0-9a-f]+ feat: a guard every writer joins/);
+    // Ignored, so the note does not make the slice dirty.
+    expect(git(fx.wt(41), "status", "--porcelain")).toBe("");
+    // 40's own review had nothing landed under it.
+    expect(specPrompts(fx)[0]).not.toContain("LANDED WHILE");
+    expect(specPrompts(fx)[0]).not.toContain("(d)");
+
+    await session.stop();
+    sh(fx.wt(41), "./scripts/slice-done.sh");
+    await d.until("plan complete");
+
+    const prompt = specPrompts(fx)[1] ?? "";
+    expect(prompt).toContain("LANDED WHILE THIS SLICE WAS OPEN:");
+    expect(prompt).toContain("#40 — The guard");
+    expect(prompt).toContain("files this diff also changes: shared.txt");
+    expect(prompt).toMatch(/[0-9a-f]+ feat: a guard every writer joins/);
+    expect(prompt).toContain("+top GUARD-LINE");
+    expect(prompt).toContain(" (d) something the landed work below set up");
+    expect(prompt).toContain("BLOCK only for (a), (c) or (d)");
+  }, 60_000);
+
+  it("writes the note with review off", async () => {
+    const fx = siblings({}, [40, 41]);
+    commitIn(
+      fx.wt(41),
+      "shared.txt",
+      BASE.replace("bottom", "bottom SIBLING"),
+      "feat: the sibling",
+    );
+    sessions.push(fakeSession(fx, 41));
+
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"]);
+    await d.until("noted in #41's worktree: .slice-landed.md");
+    expect(existsSync(join(fx.wt(41), ".slice-landed.md"))).toBe(true);
+  }, 60_000);
+
+  it("shows nothing to a slice that was prepped after the land", async () => {
+    const fx = siblings({ review: RECORD, agent: ["true"] }, [40]);
+    fx.setTicket("41", { blockedBy: ["40"] });
+
+    d = startDispatcher(fx, ["--review", "-y", "--interval", "1", "40", "41"]);
+    await d.until(`✓ prepped — worktree ready at ${fx.wt(41)}`);
+    commitIn(
+      fx.wt(41),
+      "shared.txt",
+      BASE.replace("top", "top GUARD-LINE").replace("bottom", "bottom SIBLING"),
+      "feat: the sibling",
+    );
+    sh(fx.wt(41), "./scripts/slice-done.sh");
+    await d.until("plan complete");
+
+    expect(specPrompts(fx)).toHaveLength(2);
+    expect(specPrompts(fx)[1]).not.toContain("LANDED WHILE");
+    expect(existsSync(join(fx.wt(41), ".slice-landed.md"))).toBe(false);
+    expect(d.output()).not.toContain("noted in");
+  }, 60_000);
+});
+
 describe("slice-session.sh and .slice-parent.md", () => {
   const prep = (body: string) => {
     const fx = makeConsumer({ worktrees: [40], agent: ["true"] });
