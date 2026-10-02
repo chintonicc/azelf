@@ -234,6 +234,7 @@ Installs into the repo you are standing in.
 | `--no-start` | prep the worktree but do not open a session |
 | `--review` | ask the agent to review the diff before landing (implied by `--auto`) |
 | `--no-review` | never review, even under `--auto` |
+| `--auto-resolve` | hand a rebase conflict to the agent without asking (implied by `--auto`) |
 | `--no-auto-resolve` | never let an agent resolve a rebase conflict — park it, as before |
 | `-y`, `--yes` | non-interactive: park on any failure instead of asking |
 | `--retry <id>` | what `azelf retry` runs |
@@ -929,6 +930,15 @@ and a resolution passes through the same gates and the same review of the rebase
 diff. It is strictly less exposure than the slice it is fixing. `--no-auto-resolve`
 opts out, and the honest counter-argument is worth knowing: a bad resolution is harder
 to spot in review than bad new code, because the diff reads as somebody else's work.
+
+Without `--auto` the conflict is offered as `[a]` at the prompt, and a run under `-y`
+or without a terminal parks before the offer. `--auto-resolve` hands it to the agent
+there too. The slice's code was released by whoever ran `slice-done.sh`; the
+resolution was written afterwards and nobody released that. So with `--review` on,
+the spec review **blocks** a slice whose rebase the agent resolved, where it is
+otherwise advisory without `--auto`. With review off the gates are the only check on
+the resolution, and the run header says so. `--auto-resolve` with an agent that has
+no resolver is refused before anything is dispatched.
 
 ### What retries a parked slice
 

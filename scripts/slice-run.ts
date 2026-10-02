@@ -177,6 +177,10 @@ const sessionFlags = [
 const reviewEnabled =
   !flag("--no-review") && (flag("--auto") || flag("--review"));
 const reviewBlocks = flag("--auto");
+// Slices whose rebase an agent resolved in this run. Their spec review blocks
+// even without --auto: the human who ran slice-done.sh released the slice's
+// code, and the resolution was written after that.
+const resolvedByAgent = new Set<TicketId>();
 
 // ─── shelling out ─────────────────────────────────────────────────────────
 
@@ -1410,7 +1414,7 @@ function reviewSlice(t: Ticket): boolean {
   console.log(`\n${heading}\n\n${body}`);
   console.log(`  report saved: ${path}`);
 
-  if (spec.block && reviewBlocks) {
+  if (spec.block && (reviewBlocks || resolvedByAgent.has(t.id))) {
     console.log(
       `  ✗ ${ref(
         t.id,
@@ -2202,6 +2206,7 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     console.log(`     ⚠ ${f} was in the diff before and is not now`);
   }
   console.log(`     transcript: ${path}`);
+  resolvedByAgent.add(t.id);
   const now = baseHead();
   if (now && now !== onto) {
     console.log(
@@ -2447,6 +2452,11 @@ function askAboutBlocked(
   }
   if (assumeYes || !process.stdin.isTTY) {
     console.log(`     parked (non-interactive) — ${ways}`);
+    // Only where the flag would have done something: a conflict, a resolver,
+    // and no attempt made yet (a failed attempt passes no file list).
+    if (conflicted?.length && agent.resolve && autoResolve && !resolveUnasked) {
+      console.log("     --auto-resolve lets the agent resolve it.");
+    }
     return "park";
   }
   const canResolve = Boolean(
@@ -2493,8 +2503,9 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     // the gates and the spec review, and a resolution passes through the SAME
     // gates and the same review of the rebased diff. It is strictly less
     // exposure than the slice it is fixing. --no-auto-resolve opts out, and an
-    // interactive run is asked rather than told.
-    const decide = autoLand && autoResolve && agent.resolve;
+    // interactive run is asked rather than told. --auto-resolve asks for the
+    // same without --auto, where `-y` or a missing TTY parks before any offer.
+    const decide = resolveUnasked;
     if (decide && passes >= RESOLVE_PASSES) {
       return park(
         t,
@@ -2762,6 +2773,15 @@ const autoLand = flag("--auto");
 // response is to make --auto offer rather than act — not to add a confidence
 // heuristic on top of it.
 const autoResolve = !flag("--no-auto-resolve");
+if (flag("--auto-resolve") && !autoResolve) {
+  console.error(
+    "--auto-resolve and --no-auto-resolve contradict each other — pass one.",
+  );
+  process.exit(64);
+}
+// Whether a failed rebase goes to the agent without anyone being asked.
+const resolveUnasked =
+  Boolean(agent.resolve) && autoResolve && (autoLand || flag("--auto-resolve"));
 const intervalMs = Number(value("--interval") ?? 30) * 1000;
 // How long the round line stays quiet while nothing changes. A run that waits
 // on one long slice otherwise prints the same line every 30 seconds for
@@ -2850,6 +2870,13 @@ if (missingEdges.length > 0 && !ignoreBodyBlockers) {
 const maxParallel = Number(value("--max") ?? width);
 
 if (planOnly) process.exit(0);
+
+if (flag("--auto-resolve") && !agent.resolve) {
+  console.error(
+    `\n✗ ${agent.name} declares no resolver — --auto-resolve has nothing to run. Drop the flag, or give the agent a \`resolve\` in slice.config.ts.`,
+  );
+  process.exit(1);
+}
 
 console.log("");
 // Every ticket's worktree shares a parent unless `worktreeDir` puts `{n}` in
@@ -2967,7 +2994,11 @@ console.log(
       ? "  conflicts: --no-auto-resolve — a rebase conflict parks without offering [a]."
       : autoLand
         ? "  conflicts: a failed rebase is handed to the agent, then re-verified (rebased, clean, no markers) and gated. --no-auto-resolve to opt out."
-        : "  conflicts: a failed rebase offers [a] — the agent resolves it, and the result is re-verified and gated.",
+        : resolveUnasked
+          ? reviewEnabled
+            ? "  conflicts: --auto-resolve — a failed rebase is handed to the agent, re-verified and gated; the spec review blocks a slice that was resolved."
+            : "  conflicts: --auto-resolve — a failed rebase is handed to the agent, re-verified and gated. Review is OFF: the gates are the only check on a resolution."
+          : "  conflicts: a failed rebase offers [a] — the agent resolves it, and the result is re-verified and gated.",
 );
 
 if (!assumeYes) {

@@ -1,6 +1,6 @@
 # A run that finishes its rebases, and says what its last review found
 
-**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-02
+**Status:** IN PROGRESS — Phases 1 and 2 landed · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), entries dated 2026-09-25 and 2026-10-01. `docs/dispatch-safety-plan.md`
 covers the entries ranked above these.
@@ -126,7 +126,7 @@ pass now. Three things differ from the text above:
 
 ## Phase 2 — `--auto-resolve` without `--auto`
 
-- [ ] **2a. The flag.** In `slice-run.ts:2719`:
+- [x] **2a. The flag.** In `slice-run.ts:2719`:
   - `--auto-resolve` and `--no-auto-resolve` together: usage error, exit 64.
   - `resolveUnasked = agent.resolve && (flag("--auto-resolve") || (autoLand && !flag("--no-auto-resolve")))`.
     This replaces `decide` in `tryLand`.
@@ -136,13 +136,13 @@ pass now. Three things differ from the text above:
   - Add the flag to `FLAGS` and the usage text in `slice-run-usage.ts`.
     `resumeCommand` copies flags already, so a resumed run keeps it.
 
-- [ ] **2b. A resolved slice's review blocks.** Keep a `Set<TicketId>` of slices whose
+- [x] **2b. A resolved slice's review blocks.** Keep a `Set<TicketId>` of slices whose
   rebase an agent resolved in this run, filled where `resolveConflict` returns true. In
   `reviewSlice` (`slice-run.ts:1413`), block when `reviewBlocks` is set or the ticket
   is in the set. The advisory line (`slice-run.ts:1428`) is unchanged for slices that
   were not resolved.
 
-- [ ] **2c. The run says so.**
+- [x] **2c. The run says so.**
   - Header (`slice-run.ts:2917-2926`), for `--auto-resolve` without `--auto`:
     - review on: `conflicts: a failed rebase is handed to the agent, re-verified and gated; the spec review blocks a slice that was resolved.`
     - review off: `conflicts: a failed rebase is handed to the agent, re-verified and gated. Review is OFF: the gates are the only check on a resolution.`
@@ -150,11 +150,11 @@ pass now. Three things differ from the text above:
     conflicted files, the agent has a resolver, and `--no-auto-resolve` is not set,
     gains: `--auto-resolve lets the agent resolve it`.
 
-- [ ] **2d. Docs.** `README.md` (flag table at 237, the paragraph at 920),
+- [x] **2d. Docs.** `README.md` (flag table at 237, the paragraph at 920),
   `agent/commands/azelf.md:82` and `.claude/commands/azelf.md`: the flag, what it
   implies for the review, and that `--auto` still implies it.
 
-- [ ] **2e. Tests** (`sliceRun.test.ts`):
+- [x] **2e. Tests** (`sliceRun.test.ts`):
   - `-y --auto-resolve 40` without `--auto`, slice marked done by hand, conflict with
     main: one resolver call, the slice lands;
   - the same without the flag: parked, and the park line names `--auto-resolve`;
@@ -162,6 +162,14 @@ pass now. Three things differ from the text above:
     landed; an unresolved slice in the same mode still lands with the advisory line;
   - both flags together: exit 64;
   - the flag with an agent that has no resolver: exit 1 before any session starts.
+
+**As landed.** As written, with these details:
+
+- The set of resolved slices is filled inside `resolveConflict` when it accepts, so a
+  resolution taken with `[a]` at the prompt makes the review block too.
+- The park line's hint is its own line under `parked (non-interactive)`, and is left
+  out once the agent has tried and failed.
+- An extra test covers that last case.
 
 ## Phase 3 — the plan review's outcome is the run's outcome
 

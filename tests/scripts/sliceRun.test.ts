@@ -479,11 +479,16 @@ describe("resolving a rebase conflict", () => {
 done`;
 
   /** A consumer whose ticket/40 conflicts with main in each of `files`. */
-  const conflicting = (resolver: string, files = ["a.txt"]) => {
+  const conflicting = (
+    resolver: string,
+    files = ["a.txt"],
+    opts: Parameters<typeof makeConsumer>[0] = {},
+  ) => {
     const fx = makeConsumer({
       worktrees: [40],
       remote: true,
       resolve: ["bash", "-c", resolver, "resolver"],
+      ...opts,
     });
     for (const f of files) commitIn(fx.wt(40), f, "branch\n", `feat: ${f}`);
     for (const f of files) commitIn(fx.main, f, "main\n", `main: ${f}`);
@@ -622,6 +627,107 @@ ${moveMain(
       expect(() =>
         git(wt, "merge-base", "--is-ancestor", "main~1", "HEAD"),
       ).not.toThrow();
+    });
+  });
+
+  /**
+   * Without --auto the conflict is only offered at a prompt, and `-y` parks
+   * before the offer. --auto-resolve hands it over anyway.
+   */
+  describe("--auto-resolve without --auto", () => {
+    const released = ["--once", "-y", "40"];
+    const BLOCK = ["bash", "-c", "echo 'VERDICT: BLOCK'", "reviewer"];
+
+    it("hands the conflict to the agent and lands the slice", () => {
+      c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+      writeFileSync(join(c.root, "resolver.sh"), logged(c.root, RESOLVE_BOTH));
+
+      const r = runDispatcher(c, ["--auto-resolve", ...released]);
+
+      expect(r.out).toContain(
+        "conflicts: --auto-resolve — a failed rebase is handed to the agent, re-verified and gated. Review is OFF: the gates are the only check on a resolution.",
+      );
+      expect(r.code).toBe(0);
+      expect(calls(c)).toBe(1);
+      expect(readFileSync(join(c.main, "a.txt"), "utf8")).toBe(
+        "main\nbranch\n",
+      );
+    });
+
+    it("parks without the flag, and names it", () => {
+      c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+      writeFileSync(join(c.root, "resolver.sh"), logged(c.root, RESOLVE_BOTH));
+
+      const r = runDispatcher(c, released);
+
+      expect(r.out).toMatch(
+        /parked \(non-interactive\) — .*\n {5}--auto-resolve lets the agent resolve it\./,
+      );
+      expect(r.code).toBe(1);
+      expect(calls(c)).toBe(0);
+    });
+
+    it("does not name the flag once the agent has tried", () => {
+      c = conflicting("echo 'IRRECONCILABLE: no'");
+      const r = runDispatcher(c, ["--auto-resolve", ...released]);
+      expect(r.code).toBe(1);
+      expect(r.out).not.toContain("--auto-resolve lets the agent");
+    });
+
+    it("lets the spec review block a slice that was resolved", () => {
+      c = conflicting(RESOLVE_BOTH, ["a.txt"], { review: BLOCK });
+
+      const r = runDispatcher(c, ["--auto-resolve", "--review", ...released]);
+
+      expect(r.out).toContain(
+        "the spec review blocks a slice that was resolved.",
+      );
+      expect(r.out).toContain("#40 not landed — spec review says BLOCK.");
+      expect(r.code).toBe(1);
+      expect(git(c.main, "log", "-1", "--format=%s")).toBe("main: a.txt");
+    });
+
+    it("leaves the review advisory for a slice that was not resolved", () => {
+      c = makeConsumer({
+        worktrees: [40],
+        remote: true,
+        review: BLOCK,
+        resolve: ["true"],
+      });
+      commitIn(c.wt(40), "a.txt", "branch\n", "feat: a.txt");
+      sh(c.wt(40), "./scripts/slice-done.sh");
+
+      const r = runDispatcher(c, ["--auto-resolve", "--review", ...released]);
+
+      expect(r.out).toContain("review is advisory here");
+      expect(r.code).toBe(0);
+      expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a.txt");
+    });
+
+    it("refuses both flags together", () => {
+      c = conflicting(RESOLVE_BOTH);
+      const r = runDispatcher(c, [
+        "--auto-resolve",
+        "--no-auto-resolve",
+        ...released,
+      ]);
+      expect(r.code).toBe(64);
+      expect(r.out).toContain("contradict each other");
+    });
+
+    it("refuses before dispatch when the agent has no resolver", () => {
+      // A fake agent that can review and cannot resolve.
+      c = makeConsumer({ worktrees: [40], remote: true, review: ["true"] });
+      commitIn(c.wt(40), "a.txt", "branch\n", "feat: a.txt");
+      sh(c.wt(40), "./scripts/slice-done.sh");
+
+      const r = runDispatcher(c, ["--auto-resolve", ...released]);
+
+      expect(r.code).toBe(1);
+      expect(r.out).toContain(
+        "declares no resolver — --auto-resolve has nothing to run",
+      );
+      expect(git(c.main, "log", "-1", "--format=%s")).not.toBe("feat: a.txt");
     });
   });
 

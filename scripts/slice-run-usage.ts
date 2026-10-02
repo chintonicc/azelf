@@ -20,6 +20,8 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --no-start       land at a bare prompt instead of starting work
   azelf run --review         review each slice before landing (implied by --auto)
   azelf run --auto --no-review   opt out of the review --auto implies
+  azelf run --auto-resolve       hand a rebase conflict to the agent without
+                             asking (implied by --auto)
   azelf run --no-auto-resolve    never let an agent resolve a rebase conflict
   azelf run --gates 12       run the landing gates on slice 12, land nothing
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
@@ -47,6 +49,7 @@ const FLAGS = new Set([
   "--no-start",
   "--review",
   "--no-review",
+  "--auto-resolve",
   "--no-auto-resolve",
   "--gates",
   "--sync-edges",

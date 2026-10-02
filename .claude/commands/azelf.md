@@ -85,6 +85,12 @@ conflict markers left — and then goes through the ordinary gates and spec revi
 failed resolution aborts the rebase, saves a transcript to `.slice-reviews/`, and
 parks; the branch is left exactly as its author committed it.
 
+Without `--auto`, a run under `-y` parks a conflict before `[a]` can be offered. Pass
+`--auto-resolve` to hand it to the agent anyway. With `--review` on, the spec review
+then blocks a slice that was resolved; with review off, only the gates check the
+resolution. If the base moves while the agent resolves, the resolution is kept and the
+land rebases again.
+
 A parked slice is retried when something its failure depended on changes, never on
 a timer: its branch moves (commit a fix in the worktree), the base branch moves (red
 gates or a refused land, at most twice per branch head), or the ticket body is edited
