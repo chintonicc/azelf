@@ -1,6 +1,6 @@
 # A run that finishes its rebases, and says what its last review found
 
-**Status:** NOT STARTED · **Written:** 2026-10-02
+**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), entries dated 2026-09-25 and 2026-10-01. `docs/dispatch-safety-plan.md`
 covers the entries ranked above these.
@@ -69,7 +69,7 @@ after.
 
 ## Phase 1 — a resolution survives the base moving under it
 
-- [ ] **1a. `resolveConflict` pins the base.** At the top, next to `head`
+- [x] **1a. `resolveConflict` pins the base.** At the top, next to `head`
   (`slice-run.ts:1993`), read `onto = git rev-parse <baseBranch>`. Use `onto` for the
   rebase (`slice-run.ts:2028`), for `landedCommits`, for `after`
   (`changedIn(wt, onto...HEAD)`), and for the `rebased` check
@@ -79,7 +79,7 @@ after.
   - If `onto` cannot be read, return `give("could not read <baseBranch>")` before the
     rebase starts.
 
-- [ ] **1b. `tryLand` rebases again after a resolution.** Today a successful
+- [x] **1b. `tryLand` rebases again after a resolution.** Today a successful
   `resolveConflict` falls through to the gates (`slice-run.ts:2460-2473`). Change the
   top of `tryLand` into a loop of at most `RESOLVE_PASSES = 2`:
   1. `rebaseOntoBase(t)`. If it is fine, leave the loop.
@@ -95,11 +95,11 @@ after.
   - Print one line when the loop goes round:
     `<base> moved during the resolution (<old7> → <new7>) — rebasing onto the new commits …`
 
-- [ ] **1c. The "abandoned" message says what was checked.** In `resolutionProblem`
+- [x] **1c. The "abandoned" message says what was checked.** In `resolutionProblem`
   (`slice-resolve.ts:89`): `the branch is not on <base> — the rebase did not complete`.
   "Abandoned" claimed a cause the check cannot know.
 
-- [ ] **1d. Tests.**
+- [x] **1d. Tests.**
   - `sliceResolve.test.ts`: the reworded message.
   - `sliceRun.test.ts`, in "resolving a rebase conflict", with a fake resolver that
     also commits on main while it resolves:
@@ -113,6 +113,16 @@ after.
 
   **Proof:** the three tests fail on `03a8b86` (the first with "abandoned") and pass
   after 1a and 1b.
+
+**As landed.** The three tests failed on `03a8b86` with the rejection from the log and
+pass now. Three things differ from the text above:
+
+- An unreadable base prints one line and returns before the rebase, without a
+  transcript: `give` writes the transcript and is defined after the rebase starts.
+- The "moved during the resolution" line is printed by `resolveConflict` when it
+  accepts, not by the loop in `tryLand`, because only it knows the commit it rebased
+  onto.
+- `README.md` gained a paragraph on the base moving (not listed in the phase).
 
 ## Phase 2 — `--auto-resolve` without `--auto`
 

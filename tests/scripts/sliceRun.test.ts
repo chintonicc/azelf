@@ -542,6 +542,89 @@ ${body}`;
     );
   });
 
+  /**
+   * A land elsewhere moves the base while the resolver works: a second
+   * dispatcher on consumer-a did, a minute before a two-stop resolution
+   * finished, and the resolution was judged against the new commit.
+   */
+  describe("when the base moves during the resolution", () => {
+    /** Shell that commits `text` to `file` on main. */
+    const moveMain = (fx: Consumer, file: string, text: string) =>
+      `(cd ${JSON.stringify(
+        fx.main,
+      )} && printf '%s\\n' ${text} > ${file} && git add ${file} && git commit -qm "main: moved ${file}")`;
+
+    const withResolver = (body: (fx: Consumer) => string) => {
+      const fx = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+      writeFileSync(join(fx.root, "resolver.sh"), logged(fx.root, body(fx)));
+      return fx;
+    };
+
+    it("keeps the resolution and rebases over the new commits", () => {
+      c = withResolver(
+        (fx) => `${RESOLVE_BOTH}\n${moveMain(fx, "other.txt", "other")}`,
+      );
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.out).toMatch(
+        /main moved during the resolution \([0-9a-f]{7} → [0-9a-f]{7}\) — rebasing onto the new commits/,
+      );
+      expect(r.out).not.toContain("resolution rejected");
+      expect(r.code).toBe(0);
+      expect(calls(c)).toBe(1);
+      expect(git(c.main, "log", "--format=%s", "-2")).toBe(
+        "feat: a.txt\nmain: moved other.txt",
+      );
+      expect(
+        readFileSync(join(c.main, ".slice-reviews", "conflict-40.md"), "utf8"),
+      ).toContain("ACCEPTED");
+    });
+
+    it("resolves once more when the new commits conflict too", () => {
+      c = withResolver(
+        (fx) => `${RESOLVE_BOTH}
+if [ ! -f ${JSON.stringify(join(fx.root, "moved"))} ]; then
+  touch ${JSON.stringify(join(fx.root, "moved"))}
+  ${moveMain(fx, "a.txt", "main2")}
+fi`,
+      );
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.code).toBe(0);
+      expect(calls(c)).toBe(2);
+      expect(git(c.main, "log", "--format=%s", "-2")).toBe(
+        "feat: a.txt\nmain: moved a.txt",
+      );
+    });
+
+    it("parks after two passes, and keeps what was resolved", () => {
+      c = withResolver(
+        (fx) => `${RESOLVE_BOTH}
+${moveMain(
+  fx,
+  "a.txt",
+  `"main$(wc -l < ${JSON.stringify(join(fx.root, "calls"))} | tr -d ' ')"`,
+)}`,
+      );
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.out).toContain(
+        "✗ #40 did not land — main moved twice while the agent was resolving, and the newest commits conflict too",
+      );
+      expect(r.code).toBe(1);
+      expect(calls(c)).toBe(2);
+      expect(rebaseInProgress(c.wt(40))).toBe(false);
+      // On the base the second pass rebased onto: main before its last move.
+      const wt = c.wt(40);
+      expect(() =>
+        git(wt, "merge-base", "--is-ancestor", "main~1", "HEAD"),
+      ).not.toThrow();
+    });
+  });
+
   it("gives up when the resolver says the sides cannot coexist", () => {
     c = conflicting("echo 'IRRECONCILABLE: both sides rewrite the same line'");
     const head = git(c.wt(40), "rev-parse", "HEAD");

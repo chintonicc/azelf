@@ -87,7 +87,7 @@ export function resolutionProblem(s: ResolutionState): string | null {
     return `the worktree is dirty afterwards (${s.dirty.length} path(s)) — a resolution ends in a committed rebase, not in edits left lying about`;
   }
   if (!s.rebased) {
-    return `the branch is still not on ${s.base} — the rebase was abandoned rather than resolved`;
+    return `the branch is not on ${s.base} — the rebase did not complete`;
   }
   if (s.markerFiles.length > 0) {
     return `conflict markers are still in the tree: ${list(s.markerFiles)}`;

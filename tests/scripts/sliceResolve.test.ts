@@ -35,10 +35,12 @@ describe("resolutionProblem", () => {
     expect(why).toContain("dirty");
   });
 
-  it("catches a rebase that was abandoned rather than resolved, and names the base", () => {
+  it("catches a rebase that did not complete, and names the base", () => {
     const why = resolutionProblem(clean({ rebased: false }));
     expect(why).toContain("master");
-    expect(why).toContain("abandoned");
+    expect(why).toContain("did not complete");
+    // The check cannot know why, so it does not say.
+    expect(why).not.toContain("abandoned");
   });
 
   /**

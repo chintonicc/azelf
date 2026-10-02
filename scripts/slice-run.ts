@@ -1984,29 +1984,47 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
   const wt = worktreeFor(t.id);
   const branch = branchFor(t.id);
 
+  // The base as a COMMIT, read once. A resolver gets twenty minutes a stop, and
+  // a land elsewhere — this run's, or a second dispatcher's — moves the branch
+  // name meanwhile. Everything below asks about the commit this resolution
+  // rebased onto; a check against the name would compare a finished rebase
+  // with a commit that arrived after it, and on consumer-a threw a correct
+  // two-stop resolution away for exactly that. `tryLand` rebases again
+  // afterwards if the base moved.
+  const onto = run(["git", "rev-parse", baseBranch], {
+    cwd: wt,
+    allowFail: true,
+  }).out.trim();
+  if (!onto) {
+    console.log(
+      `     ✗ could not read ${baseBranch} — not attempting a resolution.`,
+    );
+    return false;
+  }
+
   // Read BEFORE the rebase starts, because all of these are about the branch
   // as its author left it: the file set is what check 6 compares against, the
   // commit count is the most stops the rebase can make, and the commit list is
   // the other slices' work, which the merge-base stops being able to name once
   // the rebase has moved the branch.
-  const before = changedIn(wt, `${baseBranch}...${branch}`);
+  const before = changedIn(wt, `${onto}...${branch}`);
   const head = run(["git", "rev-parse", "HEAD"], {
     cwd: wt,
     allowFail: true,
   }).out.trim();
   const replayed =
     Number(
-      run(["git", "rev-list", "--count", `${baseBranch}..${branch}`], {
+      run(["git", "rev-list", "--count", `${onto}..${branch}`], {
         cwd: wt,
         allowFail: true,
       }).out.trim(),
     ) || 0;
-  const mergeBase = run(["git", "merge-base", baseBranch, branch], {
+  const mergeBase = run(["git", "merge-base", onto, branch], {
     cwd: wt,
     allowFail: true,
   }).out.trim();
   const landedCommits = run(
-    ["git", "log", "--oneline", baseBranch, "--not", mergeBase || baseBranch],
+    ["git", "log", "--oneline", onto, "--not", mergeBase || onto],
     { cwd: wt, allowFail: true },
   ).out;
 
@@ -2019,7 +2037,7 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
   // `rebaseOntoBase` aborted, on purpose — see its comment. Re-run it here to
   // stop on the same conflicts, in this function, where the abort on failure is
   // ours to make.
-  if (run(["git", "rebase", baseBranch], { cwd: wt, allowFail: true }).ok) {
+  if (run(["git", "rebase", onto], { cwd: wt, allowFail: true }).ok) {
     // Not impossible: a land in the same round can move the base branch between
     // the two attempts, and the second one is the one that counts.
     console.log(
@@ -2154,15 +2172,15 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     }).out;
   }
 
-  const after = changedIn(wt, `${baseBranch}...HEAD`);
+  const after = changedIn(wt, `${onto}...HEAD`);
   const state: ResolutionState = {
-    base: baseBranch,
+    base: `${baseBranch} at ${onto.slice(0, 7)}`,
     rebaseInProgress: rebaseInProgress(wt),
     dirty: run(["git", "status", "--porcelain"], { cwd: wt, allowFail: true })
       .out.split("\n")
       .map((l) => l.trim())
       .filter(Boolean),
-    rebased: run(["git", "merge-base", "--is-ancestor", baseBranch, "HEAD"], {
+    rebased: run(["git", "merge-base", "--is-ancestor", onto, "HEAD"], {
       cwd: wt,
       allowFail: true,
     }).ok,
@@ -2184,6 +2202,15 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     console.log(`     ⚠ ${f} was in the diff before and is not now`);
   }
   console.log(`     transcript: ${path}`);
+  const now = baseHead();
+  if (now && now !== onto) {
+    console.log(
+      `     ${baseBranch} moved during the resolution (${onto.slice(
+        0,
+        7,
+      )} → ${now.slice(0, 7)}) — rebasing onto the new commits …`,
+    );
+  }
   return true;
 }
 
@@ -2446,9 +2473,20 @@ function askAboutBlocked(
 /** Set by the escalation prompt; the round loop checks it and stops cleanly. */
 let stopRequested = false;
 
+/** Resolver passes one land attempt gets when the base moves under it. */
+const RESOLVE_PASSES = 2;
+
 function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
-  const rebase = rebaseOntoBase(t);
-  if (!rebase.ok) {
+  // A loop, because a resolution is made against the base as it was when the
+  // resolver started, and a land elsewhere can move it meanwhile. After a
+  // resolution the rebase is asked again: one `is-ancestor` call when nothing
+  // moved, a clean rebase over the new commits most other times, and a second
+  // resolver pass when those conflict too. Then it parks — each pass is up to
+  // twenty minutes a stop, and a base that outruns the resolver twice will a
+  // third time.
+  for (let passes = 0; ; passes += 1) {
+    const rebase = rebaseOntoBase(t);
+    if (rebase.ok) break;
     // Under --auto there is nobody at the prompt to press [a], so the decision
     // is made here instead of being offered. The argument: --auto already lets
     // an unwatched agent write code that reaches the base branch gated only by
@@ -2457,6 +2495,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     // exposure than the slice it is fixing. --no-auto-resolve opts out, and an
     // interactive run is asked rather than told.
     const decide = autoLand && autoResolve && agent.resolve;
+    if (decide && passes >= RESOLVE_PASSES) {
+      return park(
+        t,
+        "rebase",
+        `${baseBranch} moved twice while the agent was resolving, and the newest commits conflict too`,
+      );
+    }
     if (!decide || !resolveConflict(t, rebase.conflicted)) {
       return park(
         t,

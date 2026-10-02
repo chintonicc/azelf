@@ -899,8 +899,9 @@ rebase itself needed permission for `git add`, which `acceptEdits` does not gran
 and correct resolutions were thrown away with the rebase still in progress.
 
 **Nothing takes the resolver's word for it.** Once the rebase is through, the
-dispatcher checks the worktree itself: `git status` clean, the base branch actually
-an ancestor of `HEAD`, and no conflict markers left in any changed file. Then
+dispatcher checks the worktree itself: `git status` clean, the base commit the
+rebase started from actually an ancestor of `HEAD`, and no conflict markers left in
+any changed file. Then
 the ordinary gates and the spec review run, unchanged — a resolution is held to
 exactly the standard the code it is fixing was. Any of those failing means the resolution is thrown
 away — `git rebase --abort`, and a `reset --hard` back to the commit the branch was
@@ -908,6 +909,14 @@ on if the rebase had already finished, so "the branch is as it was" is
 true even when there was no rebase left to abort — plus a saved transcript and the
 same `[r/f/p/q]` question with the reason named. One attempt per branch head: a failed resolution parks, and only a new
 commit, or `azelf retry`, makes the slice eligible again.
+
+**The base can move while the resolver works**, and a resolution is not thrown away
+for it. A resolver gets twenty minutes a stop, and another land in that time (this
+run's, or a second dispatcher's) is ordinary. The check above is made against the
+commit the resolution rebased onto, and the land then rebases again over what
+arrived since. That usually applies cleanly. If the new commits conflict too, the
+resolver gets one more pass; after two, the slice parks with
+`<base> moved twice while the agent was resolving`, on the last base it reached.
 
 Files that were in the slice's diff before and are not after are **reported, never
 gated**. A legitimate resolution can drop a file — the base branch may already have
