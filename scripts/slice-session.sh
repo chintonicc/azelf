@@ -298,6 +298,26 @@ else
   echo "$brief" >&2
 fi
 
+# The parent spec, when the ticket names one under `## Parent`: the ticket says
+# what this slice does, the parent says why, and a session cannot fetch either.
+# Rewritten on every prep, and removed when the ticket no longer names one, so
+# the file never outlives the claim. Never fatal, like the brief.
+#
+# Only where git ignores the file. The pattern is in the block `azelf init`
+# writes to .git/info/exclude, and a checkout that has not re-run init since
+# this file existed does not have it: there the file would be an untracked
+# change, and a slice with one is not clean and does not land.
+parent_file="$worktree_path/.slice-parent.md"
+if ! git -C "$worktree_path" check-ignore -q .slice-parent.md; then
+  rm -f "$parent_file"
+  echo "  (no .slice-parent.md: git does not ignore it here yet — run \`azelf init\` once to get the parent spec in the worktree)"
+elif parent_brief=$(slice_tracker_parent "$ticket" 2>/dev/null) && [[ -n "$parent_brief" ]]; then
+  printf '%s\n' "$parent_brief" >"$parent_file"
+  echo "✓ wrote .slice-parent.md — the spec this ticket hangs under"
+else
+  rm -f "$parent_file"
+fi
+
 # ─── Launch ──────────────────────────────────────────────────────────────
 cd "$worktree_path"
 
@@ -349,7 +369,11 @@ if [[ -f "$flags_file" ]]; then
   done <"$flags_file"
 fi
 
-[[ -f "$ticket_file" ]] && echo "   your ticket is in .slice-ticket.md — read it first."
+if [[ -f "$ticket_file" && -f "$parent_file" ]]; then
+  echo "   your ticket is in .slice-ticket.md, and the spec it hangs under in .slice-parent.md — read the ticket first."
+elif [[ -f "$ticket_file" ]]; then
+  echo "   your ticket is in .slice-ticket.md — read it first."
+fi
 
 # A liveness marker, so `slice-run.ts --auto` can tell "this session is still
 # open" from "this session finished". Without it, --auto would eventually land

@@ -120,6 +120,7 @@ import {
   compareIds,
   findEpics,
   openBlockers,
+  parentFromBody,
 } from "./slice-tracker";
 // Which azelf this is, read again every round: see the version check below.
 import { installedVersion } from "./slice-version";
@@ -1221,6 +1222,64 @@ function ticketBody(n: TicketId): string {
   }
 }
 
+/** What a parent spec may take of the spec review's prompt. */
+const PARENT_BUDGET = 20_000;
+
+/**
+ * The ticket this one hangs under, or null.
+ *
+ * The ticket's own `## Parent` section first. A tracker has no child-to-parent
+ * call, only `children(id)`, so a parent recorded solely in the tracker's own
+ * hierarchy is known only when this run's plan already found it as an epic.
+ * Otherwise there is no parent as far as the review can tell.
+ */
+function parentOf(id: TicketId): TicketId | null {
+  let named: TicketId | null = null;
+  try {
+    named = parentFromBody(tracker.body(id), tracker.idPattern);
+  } catch {
+    // An unreadable body names nothing; the spec itself says so already.
+  }
+  if (named && named !== id) return named;
+  return (
+    [...epics, ...namedEpics].find((e) => e.children.includes(id))?.id ?? null
+  );
+}
+
+/**
+ * The parent spec for the review's prompt: its title and body, cut to a
+ * budget of its own. `text` is null with no parent, and with one the tracker
+ * cannot read; the second case carries a `note` for the report, because a
+ * review that could not see the parent is a weaker review.
+ */
+function parentSpec(id: TicketId): { text: string | null; note?: string } {
+  const parent = parentOf(id);
+  if (!parent) return { text: null };
+  try {
+    const title = tracker.get(parent).title;
+    const body = tracker.body(parent) || "(no body)";
+    const full = `${ref(parent)} — ${title}\n\n${body}`;
+    return {
+      text:
+        full.length <= PARENT_BUDGET
+          ? full
+          : `${full.slice(
+              0,
+              PARENT_BUDGET,
+            )}\n\n[parent spec truncated to ${PARENT_BUDGET} of ${
+              full.length
+            } chars]`,
+    };
+  } catch {
+    return {
+      text: null,
+      note: `(the parent spec ${ref(
+        parent,
+      )} could not be read — reviewed against the ticket alone)`,
+    };
+  }
+}
+
 /** `git diff` for a range, capped so an enormous branch can't blow the prompt. */
 function diffFor(range: string, cwd: string): string {
   const stat = run(["git", "diff", "--stat", range], {
@@ -1323,6 +1382,16 @@ ${diff}`,
 }
 
 /**
+ * What the spec review is shown besides the ticket and the diff. Each part is
+ * absent when there is nothing to show, and the prompt then reads as it did
+ * before the part existed.
+ */
+type SpecContext = {
+  /** The spec the ticket hangs under: see `parentSpec`. */
+  parent?: string | null;
+};
+
+/**
  * Spec axis. Returns a verdict, because this is the one that can block:
  * "does the diff do what the ticket asked, and only that".
  */
@@ -1332,6 +1401,7 @@ function reviewSpec(
   commits: string,
   diff: string,
   cwd: string,
+  context: SpecContext = {},
 ): { report: string; block: boolean } {
   const out = askAgent(
     `You are reviewing a diff on ONE axis only: does it faithfully implement the spec below?
@@ -1346,11 +1416,17 @@ Then, as the FINAL line and nothing after it, print exactly one of:
 VERDICT: PASS
 VERDICT: BLOCK
 
-BLOCK only for (a) or (c) — something asked for is missing or looks wrong. Scope creep alone is a finding, not a block. If the spec is too vague to judge against, PASS and say so.
+BLOCK only for (a) or (c) — something asked for is missing or looks wrong. Scope creep alone is a finding, not a block. If the spec is too vague to judge against, PASS and say so.${
+      context.parent
+        ? `
+
+The SPEC is what this slice must do. The PARENT SPEC is the larger spec it is one slice of: it says why, and it decides wherever the two disagree. Where the diff follows the parent against the ticket's wording, report that as "ticket and parent disagree" — it is not (a) and not (c), and never a reason to BLOCK. A requirement only the parent states belongs to another slice: it is not missing from this one.`
+        : ""
+    }
 
 SPEC:
 ${spec}
-
+${context.parent ? `\nPARENT SPEC:\n${context.parent}\n` : ""}
 SCOPE: ${scope}
 
 COMMITS:
@@ -1398,13 +1474,16 @@ function reviewSlice(t: Ticket): boolean {
   const scope = `ticket ${ref(t.id)} — ${t.title}`;
 
   console.log(`  reviewing ${ref(t.id)} (spec + standards) …`);
+  const parent = parentSpec(t.id);
   const spec = reviewSpec(
     `${ref(t.id)} — ${t.title}\n\n${ticketBody(t.id)}`,
     scope,
     commits,
     diff,
     wt,
+    { parent: parent.text },
   );
+  if (parent.note) spec.report = `${parent.note}\n\n${spec.report}`;
   const standards = reviewStandards(scope, commits, diff, wt);
 
   const heading = `# Review — ${ref(t.id)} ${t.title}`;

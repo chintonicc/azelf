@@ -1,6 +1,6 @@
 # A run log that says what is true, scripts that take the common order, and a review that can see past its own ticket
 
-**Status:** IN PROGRESS (Phases 1–2 landed) · **Written:** 2026-10-02
+**Status:** IN PROGRESS (Phases 1–3 landed) · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), the entries still `open` after `docs/resolve-and-report-plan.md`: dated
 2026-09-25, 09-26, 09-30, 10-01 and 10-02.
@@ -149,7 +149,7 @@ counted as blocked: it has its own `N parked`. The test for a landed slice kept 
 report commits in the open slice after the land, because the report is keyed on
 tickets and files and does not reprint when only the ✓ changes.
 
-## Phase 2 — scripts that take the common order
+## Phase 2 — scripts that take the common order (`401238c`)
 
 `scripts/session-commit.sh`, `scripts/format.sh`, `tests/scripts/sessionCommit.test.ts`,
 a new `tests/scripts/format.test.ts`. Independent of Phase 1.
@@ -199,31 +199,40 @@ its arguments, which is how "nothing formatted" is asserted.
 `scripts/slice-run.ts`, `scripts/slice-config.ts`, `scripts/slice-config.sh`,
 `scripts/slice-session.sh`, the skill (`agent/commands/azelf.md` and its copy).
 
-- [ ] One function for "this ticket's parent": `parentFromBody`
+- [x] One function for "this ticket's parent": `parentFromBody`
       (`slice-tracker.ts:258`) on the ticket's own body. The tracker has no
       child-to-parent call, only `children(id)`, so a parent recorded solely in the
       tracker's own hierarchy is found only when `findEpics` already saw it this run.
       Otherwise there is no parent as far as the review knows, and the ticket-writing
       convention (`## Parent`) is what makes this work. Say so in the README.
-- [ ] `reviewSlice` fetches the parent's title and body and passes it to `reviewSpec`,
+- [x] `reviewSlice` fetches the parent's title and body and passes it to `reviewSpec`,
       cut to a budget of its own (20 000 characters, with the same "(truncated)" note
       the diff gets). No parent, or one the tracker cannot read: the prompt is as it
       is today, and an unreadable one is said in the report.
-- [ ] `reviewSpec`'s prompt gains a `PARENT SPEC` section after `SPEC`, and these
+- [x] `reviewSpec`'s prompt gains a `PARENT SPEC` section after `SPEC`, and these
       rules: the ticket is what this slice must do; the parent is why, and decides
       where the two disagree; a diff that follows the parent against the ticket's
       wording is reported as "ticket and parent disagree" and is not (a) or (c); a
       requirement only the parent states is not missing from this slice.
-- [ ] `slice-config.ts --tracker parent <id>` prints the parent's brief or nothing.
+- [x] `slice-config.ts --tracker parent <id>` prints the parent's brief or nothing.
       `slice-session.sh` writes it to `.slice-parent.md` beside `.slice-ticket.md`
       (`:285`), never fatal, and the "your ticket is in" line names both. Whatever
       keeps `.slice-ticket.md` out of commits and cleans it at land must cover the new
       file: find it by grepping for `.slice-ticket.md`, do not assume.
-- [ ] Skill: one sentence, that the parent spec is in `.slice-parent.md` when there is
+- [x] Skill: one sentence, that the parent spec is in `.slice-parent.md` when there is
       one.
-- [ ] Tests: the fake review agent in the fixture records its prompt; assert the
+- [x] Tests: the fake review agent in the fixture records its prompt; assert the
       parent's body is in it for a ticket with `## Parent`, and absent without. Prep
       writes `.slice-parent.md` for a child and not for an orphan.
+
+**As landed.** The pattern that keeps `.slice-parent.md` out of commits is in the block
+`azelf init` writes to `.git/info/exclude`, and a consumer that upgrades without
+re-running init does not have it. There the file would make the worktree dirty, and a
+dirty slice does not land. So prep writes the file only where `git check-ignore` says
+it is ignored, and otherwise prints one line naming `azelf init`. The review's copy
+does not depend on this. A land removes the worktree, ignored files included, so there
+is no separate cleanup. The session-side sentence went into the `slice` skill, which is
+what a session reads; the `azelf` command file got one line too.
 
 ## Phase 4 — a slice is reviewed against the sibling that landed under it
 

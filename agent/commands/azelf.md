@@ -48,7 +48,9 @@ bunx azelf run --help     # every flag
 ```
 
 Each ticket gets a git worktree outside the repo, its ticket text written to
-`.slice-ticket.md` inside it, and a session opened there.
+`.slice-ticket.md` inside it, and a session opened there. When the ticket names a
+`## Parent`, that spec is in `.slice-parent.md` beside it, and the spec review is
+shown it too.
 
 Without `--auto`, a session stops when it is finished and does not mark itself done.
 You read its report and run `./scripts/slice-done.sh` in its worktree; the dispatcher

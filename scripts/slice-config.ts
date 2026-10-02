@@ -598,6 +598,8 @@ export function shellAssignments(): string {
  *   get <id>            state<TAB>ready<TAB>title   (ready: carries readyLabel)
  *   open-blockers <id>  the number of blockers still open, as an integer
  *   brief <id>          the .slice-ticket.md text — title, url, body
+ *   parent <id>         the same for the ticket its body names under
+ *                       `## Parent`; nothing, exit 0, when it names none
  *   tab-title <id>      the terminal tab's title, one line; empty when off
  *   close <id> <text>   close it, with that comment
  */
@@ -605,7 +607,7 @@ function trackerCli(args: string[]): never {
   const [verb, id, ...rest] = args;
   const usage = (): never => {
     console.error(
-      "usage: slice-config.ts --tracker get|open-blockers|brief|tab-title <id> | close <id> <comment>",
+      "usage: slice-config.ts --tracker get|open-blockers|brief|parent|tab-title <id> | close <id> <comment>",
     );
     process.exit(64);
   };
@@ -631,6 +633,16 @@ function trackerCli(args: string[]): never {
         const t = tracker.get(id);
         const body = tracker.body(id) || "(no body)";
         console.log(`# ${ref(id)} — ${t.title}\n\n${t.url}\n\n---\n\n${body}`);
+        break;
+      }
+      case "parent": {
+        const parent = parentFromBody(tracker.body(id), tracker.idPattern);
+        if (!parent || parent === id) break;
+        const t = tracker.get(parent);
+        const body = tracker.body(parent) || "(no body)";
+        console.log(
+          `# ${ref(parent)} — ${t.title}\n\n${t.url}\n\n---\n\n${body}`,
+        );
         break;
       }
       case "tab-title": {

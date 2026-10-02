@@ -12,6 +12,11 @@ ticket. Nobody is watching this session.
 `.slice-ticket.md` in this worktree is your ticket, written by the dispatcher. It is
 the whole brief. You cannot fetch it yourself — do not go looking for the issue.
 
+When the ticket hangs under a spec, that spec is in `.slice-parent.md`. Read it for
+why the ticket exists and for decisions the ticket does not repeat. Where the two
+disagree, the parent decides; say so in your final message. A requirement only the
+parent states is another slice's, not yours.
+
 ## 2. Build it
 
 Only what the ticket asks. A slice that also fixes an unrelated thing it noticed is

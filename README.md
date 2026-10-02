@@ -130,7 +130,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes nine marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes ten marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -159,7 +159,7 @@ saying so.
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | nine marker patterns, in a delimited block |
+| `.git/info/exclude` | ten marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -742,6 +742,21 @@ Before a session launches, `slice-session.sh` fetches the issue body and writes 
 matters more than it looks: `gh` is the first thing a restrictive `wrapCommand`
 breaks, and a slice that cannot read its own ticket is the whole tool defeated at
 step one.
+
+**The parent spec travels with it.** When the ticket's body names a parent under
+`## Parent`, that ticket's title and body are written to `.slice-parent.md` beside
+it, and pasted into the spec review as `PARENT SPEC`. The reviewer has no tools: it
+cannot fetch the parent, and without it a slice that follows the parent against its
+own ticket's wording was read as wrong. The review is told that the ticket says what
+the slice does, that the parent decides where the two disagree (reported as "ticket
+and parent disagree", never a BLOCK), and that a requirement only the parent states
+is another slice's.
+
+This works through the `## Parent` convention. `Tracker` has `children(id)` and no
+child-to-parent call, so a parent recorded only in the tracker's own hierarchy is
+known to the review when this run's plan found it as a parent, and to the worktree
+file not at all. `.slice-parent.md` is written only where git ignores it: re-run
+`azelf init` once after upgrading, which adds the pattern to `.git/info/exclude`.
 
 ## The exclusive lock
 

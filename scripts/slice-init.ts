@@ -66,6 +66,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 # read by every linked worktree because they share the common git dir.
 # A fresh clone does not get this block — rerun \`azelf init\` there.
 .slice-ticket.md
+.slice-parent.md
 .slice-autostart
 .slice-live
 .slice-ready-to-land

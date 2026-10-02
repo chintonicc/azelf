@@ -174,6 +174,124 @@ describe("what the run log says after a land", () => {
   });
 });
 
+/**
+ * The spec reviewer is text in, text out: it cannot fetch the parent spec, so
+ * the dispatcher pastes it. The fake reviewer writes every prompt it is given
+ * next to the worktree.
+ */
+describe("the spec review and the parent spec", () => {
+  const RECORD = [
+    "bash",
+    "-c",
+    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    "reviewer",
+  ];
+  const specPrompt = (fx: Consumer) =>
+    readFileSync(join(fx.root, "prompts"), "utf8")
+      .split("\n=====\n")
+      .find((p) => p.includes("faithfully implement the spec")) ?? "";
+  const reviewed = (body: string) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, review: RECORD });
+    c = fx;
+    fx.setTicket("40", { title: "Filter pills", body });
+    fx.setTicket("17", {
+      title: "Spec: the feed",
+      body: "Pills are single-select. PARENT-DECISION",
+      ready: false,
+    });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+    expect(r.out).toContain("landing #40");
+    return { fx, r };
+  };
+
+  it("pastes the parent a ticket names, and says the parent decides", () => {
+    const { fx } = reviewed("Build the pills.\n\n## Parent\n\n#17\n");
+    const prompt = specPrompt(fx);
+    expect(prompt).toContain(
+      "PARENT SPEC:\n#17 — Spec: the feed\n\nPills are single-select. PARENT-DECISION",
+    );
+    expect(prompt).toContain('"ticket and parent disagree"');
+    expect(prompt.indexOf("PARENT SPEC:")).toBeGreaterThan(
+      prompt.indexOf("SPEC:\n#40 — Filter pills"),
+    );
+  });
+
+  it("leaves the prompt as it was for a ticket with no parent", () => {
+    const { fx } = reviewed("Build the pills.");
+    const prompt = specPrompt(fx);
+    expect(prompt).toContain("SPEC:\n#40 — Filter pills");
+    expect(prompt).not.toContain("PARENT");
+    expect(prompt).not.toContain("parent");
+  });
+
+  it("says so in the report when the parent cannot be read", () => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      review: RECORD,
+      // A tracker that cannot read #17, as for a ticket in another repository.
+      configExtra:
+        'tracker: { ...tracker, get: (id) => { if (id === "17") throw new Error("no such ticket"); return tracker.get(id); } },',
+    });
+    c = fx;
+    fx.setTicket("40", { body: "Build.\n\n## Parent\n\n#17\n" });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+    expect(r.out).toContain(
+      "(the parent spec #17 could not be read — reviewed against the ticket alone)",
+    );
+    expect(specPrompt(fx)).not.toContain("PARENT SPEC");
+    expect(r.out).toContain("landing #40");
+  });
+});
+
+describe("slice-session.sh and .slice-parent.md", () => {
+  const prep = (body: string) => {
+    const fx = makeConsumer({ worktrees: [40], agent: ["true"] });
+    c = fx;
+    fx.setTicket("40", { body });
+    fx.setTicket("17", { title: "Spec: the feed", body: "PARENT-BODY" });
+    return fx;
+  };
+
+  it("writes the parent for a child, and names both files", () => {
+    const fx = prep("Build.\n\n## Parent\n\n#17\n");
+    const out = sh(fx.main, "./scripts/slice-session.sh 40");
+    expect(readFileSync(join(fx.wt(40), ".slice-parent.md"), "utf8")).toBe(
+      "# #17 — Spec: the feed\n\n\n\n---\n\nPARENT-BODY\n",
+    );
+    expect(out).toContain(
+      "your ticket is in .slice-ticket.md, and the spec it hangs under in .slice-parent.md",
+    );
+    // Ignored, so the worktree is still clean and still lands.
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  });
+
+  it("writes none for a ticket with no parent, and removes a stale one", () => {
+    const fx = prep("Build.");
+    writeFileSync(join(fx.wt(40), ".slice-parent.md"), "stale\n");
+    const out = sh(fx.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(existsSync(join(fx.wt(40), ".slice-parent.md"))).toBe(false);
+    expect(out).not.toContain(".slice-parent.md");
+  });
+
+  it("writes none where git would not ignore it, and says why", () => {
+    const fx = prep("Build.\n\n## Parent\n\n#17\n");
+    // A checkout whose exclude block predates the file.
+    const exclude = join(fx.main, ".git", "info", "exclude");
+    writeFileSync(
+      exclude,
+      readFileSync(exclude, "utf8").replace(".slice-parent.md\n", ""),
+    );
+    const out = sh(fx.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(existsSync(join(fx.wt(40), ".slice-parent.md"))).toBe(false);
+    expect(out).toContain("run `azelf init` once");
+  });
+});
+
 describe("slice-session.sh --prep-only by hand", () => {
   it("says it was not launched, and how to launch it", () => {
     c = makeConsumer({ worktrees: [40], agent: ["true"] });
