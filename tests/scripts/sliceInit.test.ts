@@ -419,6 +419,19 @@ describe("the agent-facing files", () => {
     ).toContain("slice-done.sh");
   });
 
+  // A session that runs slice-done.sh unasked lands and pushes a slice nobody
+  // released. The "do not" half is what keeps a non---auto run in human hands.
+  it("the skill finishes two ways: run slice-done.sh when told to, otherwise do not", () => {
+    agentFiles(dir);
+    const skill = readFileSync(
+      join(dir, ".claude", "skills", "slice", "SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toContain("It told you to run `./scripts/slice-done.sh`.");
+    expect(skill).toContain("It did not, or there was no start instruction.");
+    expect(skill).toContain("Do **not** run it yourself");
+  });
+
   it("changes nothing on a second run", () => {
     agentFiles(dir);
     expect(agentFiles(dir).filter((r) => r.changed)).toEqual([]);

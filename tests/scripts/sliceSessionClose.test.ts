@@ -1,5 +1,5 @@
 import { type ChildProcess, spawn, spawnSync } from "node:child_process";
-import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { type Consumer, git, makeConsumer, sh, shResult } from "./fixture";
@@ -165,4 +165,42 @@ describe("a landed --auto slice's session ends, so its tab closes", () => {
       expect(r.out).toContain("usage:");
     }
   });
+});
+
+/**
+ * A land pushes the base branch, so who declares a slice done is the whole
+ * difference between the two modes. The prompt says it either way, because the
+ * slice skill is a file the consumer may have edited.
+ */
+describe("the start prompt says who declares the slice done", () => {
+  /** Runs a session whose agent writes the prompt it was given and exits. */
+  function promptOf(...flags: string[]): string {
+    fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      // The prompt lands in $0. The worktree is the cwd; its parent is the
+      // fixture root, which keeps the file out of the slice's own tree.
+      agent: ["bash", "-c", 'printf "%s" "$0" > ../prompt.txt'],
+    });
+    const r = spawnSync("./scripts/slice-session.sh", ["40", ...flags], {
+      cwd: fx.main,
+      encoding: "utf8",
+    });
+    const file = join(fx.root, "prompt.txt");
+    expect(existsSync(file), `${r.stdout}${r.stderr}`).toBe(true);
+    return readFileSync(file, "utf8");
+  }
+
+  it("without --self-land: stop, say it is ready, do NOT run slice-done.sh", () => {
+    const prompt = promptOf();
+    expect(prompt).toContain("Do NOT run ./scripts/slice-done.sh");
+    expect(prompt).toContain("a human releases this slice");
+    expect(prompt).not.toContain("and then exit");
+  }, 60_000);
+
+  it("with --self-land: run slice-done.sh and exit", () => {
+    const prompt = promptOf("--self-land");
+    expect(prompt).toContain("run ./scripts/slice-done.sh and then exit");
+    expect(prompt).not.toContain("a human releases this slice");
+  }, 60_000);
 });

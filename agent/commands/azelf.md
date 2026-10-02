@@ -34,8 +34,16 @@ bunx azelf run --help     # every flag
 ```
 
 Each ticket gets a git worktree outside the repo, its ticket text written to
-`.slice-ticket.md` inside it, and a session opened there. `--auto` implies
-`--self-land`: the session marks itself done and the dispatcher lands it.
+`.slice-ticket.md` inside it, and a session opened there.
+
+Without `--auto`, a session stops when it is finished and does not mark itself done.
+You read its report and run `./scripts/slice-done.sh` in its worktree; the dispatcher
+then re-runs the gates, lands the branch and **pushes the base branch to origin**.
+Nothing reviews the diff in this mode unless you pass `--review`, so that command is
+the review.
+
+`--auto` implies `--self-land`: the session marks itself done and the dispatcher
+reviews, lands and pushes it with nobody in between.
 
 ## The dispatcher re-runs the gates itself
 

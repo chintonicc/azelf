@@ -79,12 +79,16 @@ The life of one slice, end to end:
    `.slice-ticket.md` **inside the worktree**.
 3. **Launch.** The launcher opens a terminal in that worktree running your agent
    with `startPrompt` as its opening instruction. The agent reads `.slice-ticket.md`,
-   builds only that ticket, commits, and runs `./scripts/slice-done.sh` when its
-   own gates are green.
+   builds only that ticket, commits, and stops when its own gates are green. You
+   read its report and run `./scripts/slice-done.sh` in that worktree to release
+   it. Under `--auto` the session is told to run it itself; without `--auto` it is
+   told not to.
 4. **Land.** The dispatcher notices the ready marker, rebases the branch onto
    `baseBranch`, **re-runs every gate itself**, optionally asks a headless agent to
-   review the diff against the ticket text, and fast-forward-merges. Landing closes
-   the ticket, which clears the blocking edge, which releases the next wave.
+   review the diff against the ticket text, fast-forward-merges, and **pushes
+   `baseBranch` to origin**. The review is on under `--auto` and off without it
+   unless you pass `--review`. Landing closes the ticket, which clears the blocking
+   edge, which releases the next wave.
 5. **Escalate.** If any of those four steps fails, it stops and asks you — once,
    with the reason and the worktree path on screen. It never lands anything that
    failed a check.
@@ -186,7 +190,8 @@ bunx azelf run --plan
 # 3. open sessions for one wave
 bunx azelf run
 
-# 4. …the agents work. When one is done it runs ./scripts/slice-done.sh
+# 4. …the agents work. When one stops, read its report and release it from its
+#    worktree with ./scripts/slice-done.sh (under --auto it does that itself)
 
 # 5. land whatever is ready, then stop
 bunx azelf run --once
@@ -276,7 +281,7 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 
 ```sh
 ./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths
-./scripts/slice-done.sh                                    # mark ready to land
+./scripts/slice-done.sh                                    # mark ready to land (you, or the session under --auto)
 ./scripts/format.sh                                        # the write half, by hand
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths
 ./scripts/db-lock.sh status                                # who holds them, since when
@@ -996,7 +1001,8 @@ gets the same contract:
 - **`.claude/skills/slice/SKILL.md`** → the `slice` skill. The session side, for an
   agent working inside a slice worktree: read `.slice-ticket.md`, build only that,
   commit with explicit paths, run the gates, and run `slice-done.sh` **only** if they
-  are green. `startPrompt` names this skill.
+  are green and the start instruction said to. Without `--auto` it says not to, and
+  the session stops and reports instead. `startPrompt` names this skill.
 
 `azelf init --codex` also writes `/azelf` to `~/.codex/prompts/azelf.md`, frontmatter
 stripped. That path is from Codex's documented layout and has not been verified here.

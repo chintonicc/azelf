@@ -424,8 +424,15 @@ fi
 # is what the dispatcher lands on, and the exit is what clears .slice-live so
 # the slot frees. Told to stop rather than mark done if the gates are red,
 # because a stranded worktree is cheap and a bad land is not.
+#
+# Without it the session is told not to, in so many words. A land pushes the
+# base branch, and an agent that finishes its work reaches for slice-done.sh
+# unless something says a human does that. The slice skill says it too, but
+# that is a file the consumer may have edited, so the prompt does not rely on it.
 if $self_land; then
   start_prompt="$start_prompt When it is finished and the gates are green, run ./scripts/slice-done.sh and then exit — nobody is watching this tab. If the gates will not go green, leave the worktree as it is, do NOT run slice-done.sh, and exit."
+else
+  start_prompt="$start_prompt When it is finished and the gates are green, stop and say it is ready. Do NOT run ./scripts/slice-done.sh: a human releases this slice."
 fi
 
 # The configured agent's argv prefix, from slice.config.ts through the bridge.

@@ -34,8 +34,16 @@ bunx azelf run --help     # every flag
 ```
 
 Each ticket gets a git worktree outside the repo, its ticket text written to
-`.slice-ticket.md` inside it, and a session opened there. `--auto` implies
-`--self-land`: the session marks itself done and the dispatcher lands it.
+`.slice-ticket.md` inside it, and a session opened there.
+
+Without `--auto`, a session stops when it is finished and does not mark itself done.
+You read its report and run `./scripts/slice-done.sh` in its worktree; the dispatcher
+then re-runs the gates, lands the branch and **pushes the base branch to origin**.
+Nothing reviews the diff in this mode unless you pass `--review`, so that command is
+the review.
+
+`--auto` implies `--self-land`: the session marks itself done and the dispatcher
+reviews, lands and pushes it with nobody in between.
 
 ## The dispatcher re-runs the gates itself
 
@@ -55,6 +63,13 @@ changed. Run those serially, from the main tree, with no other slices open.
 failure paths — a failed rebase, red gates, a `VERDICT: BLOCK` spec review, or
 `slice-land.sh` refusing — all stop and offer: retry now, land anyway without the
 review, park it, or stop the run. Non-interactive runs park automatically.
+
+A failed rebase also offers `[a] let an agent resolve it`, and takes it by itself
+under `--auto` unless you pass `--no-auto-resolve`. The resolution is verified before
+anything lands — no rebase in progress, clean tree, the base actually an ancestor, no
+conflict markers left — and then goes through the ordinary gates and spec review. A
+failed resolution aborts the rebase, saves a transcript to `.slice-reviews/`, and
+parks; the branch is left exactly as its author committed it.
 
 A parked slice is retried when something its failure depended on changes, never on
 a timer: its branch moves (commit a fix in the worktree), the base branch moves (red

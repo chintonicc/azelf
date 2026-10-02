@@ -2702,7 +2702,10 @@ if (autoLand) {
   );
 } else {
   console.log(
-    "  run ./scripts/slice-done.sh inside a finished slice; this then verifies and lands it.",
+    "  sessions stop when they are finished and do not mark themselves done.",
+  );
+  console.log(
+    `  run ./scripts/slice-done.sh inside a finished slice to release it; this then verifies it, lands it and pushes ${config.baseBranch} to origin.`,
   );
 }
 console.log(

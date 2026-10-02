@@ -26,9 +26,9 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --sync-edges     write the edges the bodies claim, then stop
   azelf run --help           this (also -h)
 
-Inside a finished slice, run ./scripts/slice-done.sh: the dispatcher then
-re-runs the gates, lands it, closes the ticket, and starts whatever that
-unblocked. ./scripts/slice-run.ts takes the same flags.`;
+Without --auto a session stops when it is finished. Run ./scripts/slice-done.sh
+inside it to release it: the dispatcher then re-runs the gates, lands it, pushes
+the base branch, closes the ticket, and starts whatever that unblocked. ./scripts/slice-run.ts takes the same flags.`;
 
 /** The flags that take the argument after them. */
 export const VALUE_FLAGS = new Set(["--max", "--interval", "--retry"]);
