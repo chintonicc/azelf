@@ -1445,12 +1445,24 @@ function reviewSlice(t: Ticket): boolean {
  * the half-migrated call site, the abstraction two slices each invented
  * differently. This is the only pass that reads the plan as one change.
  * Advisory by definition: everything already landed.
+ *
+ * So it cannot block, and what it can do is not be missed. It returns its
+ * count, and the run ends on a line that names it and exits 2 when there is
+ * anything to read: on consumer-a three unwatched waves ended "plan complete",
+ * exit 0, with eight findings between them in a file nobody was pointed at.
+ * Null when no review ran.
  */
-function reviewPlan(tickets: Ticket[], base: string): void {
-  if (!reviewEnabled) return;
+type PlanReview = {
+  /** How many findings it reported, or null when it gave no count at all. */
+  findings: number | null;
+  path: string;
+};
+
+function reviewPlan(tickets: Ticket[], base: string): PlanReview | null {
+  if (!reviewEnabled) return null;
   const range = `${base}...${baseBranch}`;
   const diff = diffFor(range, repoRoot);
-  if (diff === "(empty diff)") return;
+  if (diff === "(empty diff)") return null;
 
   const commits = run(["git", "log", "--oneline", `${base}..${baseBranch}`], {
     allowFail: true,
@@ -1463,9 +1475,8 @@ function reviewPlan(tickets: Ticket[], base: string): void {
     .join("\n\n---\n\n");
 
   console.log("\n── plan-level review (the seam between slices) ────────");
-  const crossCutting =
-    askAgent(
-      `Several tickets were implemented independently, each in its own worktree, each reviewed and gate-checked ALONE. They have all landed on ${baseBranch}. Your job is the one thing none of those per-slice reviews could see: how the slices fit together.
+  const answer = askAgent(
+    `Several tickets were implemented independently, each in its own worktree, each reviewed and gate-checked ALONE. They have all landed on ${baseBranch}. Your job is the one thing none of those per-slice reviews could see: how the slices fit together.
 
 Report ONLY cross-cutting findings — things invisible when reading any single slice's diff on its own:
  - the same concept implemented two different ways by two slices;
@@ -1477,6 +1488,9 @@ Report ONLY cross-cutting findings — things invisible when reading any single 
 
 Do NOT re-report anything confined to a single slice; that was already reviewed. If there are no cross-cutting findings, say exactly: "No cross-cutting findings." Under 500 words.
 
+Then, as the FINAL line and nothing after it, print the number of findings you reported, exactly in this form (0 when there are none):
+FINDINGS: <number>
+
 TICKETS IN THIS PLAN:
 ${spec}
 
@@ -1485,14 +1499,29 @@ ${commits}
 
 COMBINED DIFF:
 ${diff}`,
-      repoRoot,
-    ) ?? "(plan review did not return)";
+    repoRoot,
+  );
+
+  // The last such line, with the emphasis a model asked for a plain line often
+  // adds. No line is no count, and is reported as that: the same fail-closed
+  // reading the spec review gives a missing VERDICT.
+  const counts = [
+    ...(answer ?? "").matchAll(/^[\s>*`_]*FINDINGS:[*`_]*[ \t]*(\d+)/gm),
+  ];
+  const last = counts[counts.length - 1]?.[1];
+  const findings = last === undefined ? null : Number(last);
+  const crossCutting = !answer
+    ? "(plan review did not return)"
+    : findings === null
+      ? `${answer}\n\n(no parseable FINDINGS line — reported as no result)`
+      : answer;
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const body = `# Plan review — ${scope}\n\n${crossCutting}\n`;
   const path = saveReport(`plan-${stamp}.md`, body);
   console.log(`\n${crossCutting}\n`);
   console.log(`  report saved: ${path}`);
+  return { findings, path };
 }
 
 // ─── landing ──────────────────────────────────────────────────────────────
@@ -2973,7 +3002,7 @@ console.log(
         reviewBlocks
           ? ", and a failing SPEC review blocks it (--no-review to disable)"
           : " — advisory only, a human already said done"
-      }; plan-level review when the graph empties.`
+      }; plan-level review when the graph empties (findings exit 2).`
     : "  review: OFF — nothing reads the diff before it lands. --review to enable.",
 );
 if (lockEnabled) {
@@ -3039,6 +3068,8 @@ function noteAzelfChange(): void {
 }
 
 let round = 0;
+// What the plan-level review found, for the run's last line and exit code.
+let planReview: PlanReview | null = null;
 // The round line last printed, without its round number, and when.
 let lastRoundLine = "";
 let lastRoundLineAt = 0;
@@ -3056,7 +3087,7 @@ for (;;) {
   const remaining = tickets.filter((t) => t.open);
   if (remaining.length === 0) {
     console.log("\n✓ every ticket closed — plan complete.");
-    reviewPlan(tickets, planBase);
+    planReview = reviewPlan(tickets, planBase);
     break;
   }
 
@@ -3372,4 +3403,24 @@ if (parked.size > 0) {
   );
   console.log(`  To pick the run up again:\n\n    ${resumeCommand()}`);
   process.exitCode = 1;
+}
+
+// The very last line, because it is the one an unwatched run is read by. Exit
+// 2 only over a run that would otherwise say 0: 1 keeps meaning "work is
+// left", and 2 means everything landed and the last review has something to
+// read.
+if (planReview) {
+  const { findings, path } = planReview;
+  if (findings === 0) {
+    console.log("\n  plan review: no cross-cutting findings.");
+  } else {
+    console.log(
+      findings === null
+        ? `\n  plan review: no result — it did not return, or gave no count → ${path}`
+        : `\n  plan review: ${findings} finding${
+            findings === 1 ? "" : "s"
+          }, all of it already landed → ${path}`,
+    );
+    if (!process.exitCode) process.exitCode = 2;
+  }
 }

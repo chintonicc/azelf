@@ -173,7 +173,7 @@ pass now. Three things differ from the text above:
 
 ## Phase 3 — the plan review's outcome is the run's outcome
 
-- [ ] **3a. The review counts its findings.** In `reviewPlan`'s prompt
+- [x] **3a. The review counts its findings.** In `reviewPlan`'s prompt
   (`slice-run.ts:1463`), replace the "say exactly" sentence with a final line, as the
   spec review does: `FINDINGS: <number>`, and `FINDINGS: 0` with the sentence
   "No cross-cutting findings." above it when there are none. `reviewPlan` returns
@@ -182,7 +182,7 @@ pass now. Three things differ from the text above:
   - `findings: null` when the agent did not return or printed no parseable line. The
     report gets a note, as the spec review's does.
 
-- [ ] **3b. Exit code and last line.** Store the result at the call site
+- [x] **3b. Exit code and last line.** Store the result at the call site
   (`slice-run.ts:2983`). After every other summary at the end of the file (the parked
   block, `slice-run.ts:3276`), print one of:
   - `plan review: no cross-cutting findings.` (exit code unchanged)
@@ -191,17 +191,26 @@ pass now. Three things differ from the text above:
 
   Exit 2 is set only when the code would otherwise be 0.
 
-- [ ] **3c. Docs.** The header's review line (`slice-run.ts:2900-2906`) gains
+- [x] **3c. Docs.** The header's review line (`slice-run.ts:2900-2906`) gains
   `findings exit 2`. `README.md` and both `azelf.md` copies get the three exit codes in
   one place: 0 done, 1 work left, 2 landed with plan-review findings, 64 usage.
 
-- [ ] **3d. Tests** (`sliceRun.test.ts`), with a fake review agent that answers the
+- [x] **3d. Tests** (`sliceRun.test.ts`), with a fake review agent that answers the
   plan prompt (it contains "cross-cutting") differently from the spec prompt:
   - `FINDINGS: 2`: exit 2, the last line of the output is the findings line with the
     report's path;
   - `FINDINGS: 0`: exit 0, last line says no findings;
   - no `FINDINGS` line, and an agent that exits non-zero: exit 2, the "no result" line;
   - `--no-review`: exit 0, no plan-review line.
+
+**As landed.** As written, with these details:
+
+- The prompt keeps the "No cross-cutting findings." sentence and adds the
+  `FINDINGS: <number>` line after it. The parser takes the last such line and
+  tolerates markdown emphasis around it.
+- `runDispatcher` in the test fixture now also returns `stdout` on its own: its `out`
+  is stdout followed by stderr, so `git push`'s progress came after the run's real
+  last line.
 
 ## After each phase
 

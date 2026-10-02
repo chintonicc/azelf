@@ -104,6 +104,12 @@ stops instead of sleeping in a circle. The run ends with a list of what is parke
 why, and the command that picks the run up again, and exits non-zero. Every attempt's
 review and resolution is kept in `.slice-reviews/`.
 
+**How a run exits.** 0: every ticket landed. 1: work is left (something is parked, or
+the dispatch was refused). 2: every ticket landed, and the plan-level review has
+findings or gave no result; the run's last line is `plan review: N findings → <path>`.
+Read that report and tell the user what it found. Nothing is filed from it. 64: a
+flag was wrong.
+
 **Tickets that need the DB lock run one at a time** when `exclusiveLockLabel` is set:
 the plan marks them with the label and says so, and the dispatcher starts the next only
 once the one in flight has landed. That is why two of them in one wave do not start

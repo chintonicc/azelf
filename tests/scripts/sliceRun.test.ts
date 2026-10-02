@@ -781,6 +781,76 @@ echo stray >> package.json`);
 });
 
 /**
+ * The plan-level review runs after everything has landed, so it cannot block.
+ * Its count is the run's last line, and findings are exit 2: three waves on
+ * consumer-a ended "plan complete", exit 0, with findings in a file.
+ */
+describe("the plan-level review's outcome", () => {
+  /** Passes every spec review; answers the plan prompt with `plan`. */
+  const reviewer = (plan: string) => [
+    "bash",
+    "-c",
+    `case "$1" in *cross-cutting*) ${plan} ;; *) echo "VERDICT: PASS" ;; esac`,
+    "reviewer",
+  ];
+
+  const landed = (plan: string, flags: string[] = []) => {
+    c = makeConsumer({ worktrees: [40], remote: true, review: reviewer(plan) });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(c, [
+      "--auto",
+      "-y",
+      "--interval",
+      "1",
+      ...flags,
+      "40",
+    ]);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    return { ...r, last: r.stdout.trimEnd().split("\n").pop() ?? "" };
+  };
+
+  it("exits 2 on findings, and ends on the count and the report", () => {
+    const r = landed(
+      'echo "**1.** one"; echo "**2.** two"; echo "FINDINGS: 2"',
+    );
+    expect(r.out).toContain("✓ every ticket closed — plan complete.");
+    expect(r.code).toBe(2);
+    expect(r.last).toMatch(
+      /^ {2}plan review: 2 findings, all of it already landed → \S+\/\.slice-reviews\/plan-\S+\.md$/,
+    );
+  });
+
+  it("exits 0 when there are none, and says so last", () => {
+    const r = landed(
+      'echo "No cross-cutting findings."; echo "**FINDINGS: 0**"',
+    );
+    expect(r.code).toBe(0);
+    expect(r.last).toBe("  plan review: no cross-cutting findings.");
+  });
+
+  it("exits 2 when the review gives no count", () => {
+    const r = landed('echo "Looks fine to me."');
+    expect(r.code).toBe(2);
+    expect(r.last).toMatch(
+      /^ {2}plan review: no result — it did not return, or gave no count → \S+plan-\S+\.md$/,
+    );
+  });
+
+  it("exits 2 when the review does not return", () => {
+    const r = landed("exit 1");
+    expect(r.code).toBe(2);
+    expect(r.last).toContain("plan review: no result");
+  });
+
+  it("says nothing when review is off", () => {
+    const r = landed('echo "FINDINGS: 2"', ["--no-review"]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("plan review:");
+  });
+});
+
+/**
  * A parked slice retries when what it failed on changes, not only when its
  * branch moves. Ticket 41 holds a live session throughout, so the run keeps
  * polling instead of stopping on "every open slice is parked".

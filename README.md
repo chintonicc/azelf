@@ -858,6 +858,28 @@ attempt is added as `## Attempt k — <date> HH:MM`, newest last, so the BLOCK t
 parked a slice is still there after the review that later passed it. A blocked land
 names its file on the line under the ✗, as `review: /…/.slice-reviews/ticket-14.md`.
 
+**The plan-level review is the run's last word.** When review is on and every ticket
+has closed, the agent reads the whole plan as one diff, for what no per-slice review
+can see: the seam between slices. Everything has landed by then, so it cannot block.
+It ends on `FINDINGS: <n>`, and the run ends on one of:
+
+```
+  plan review: no cross-cutting findings.
+  plan review: 2 findings, all of it already landed → /…/.slice-reviews/plan-<stamp>.md
+  plan review: no result — it did not return, or gave no count → /…/.slice-reviews/plan-<stamp>.md
+```
+
+The last two exit 2. A review with no count is not read as a clean one, the same way
+a spec review with no `VERDICT:` line is read as BLOCK. azelf files nothing from the
+findings: whether one is a ticket, three, or none is yours to decide.
+
+| exit | meaning |
+| --- | --- |
+| 0 | every ticket landed |
+| 1 | work is left: something is parked, or the dispatch was refused |
+| 2 | every ticket landed, and the plan-level review has findings or no result |
+| 64 | a flag was wrong |
+
 ### Letting an agent resolve a rebase conflict
 
 One of those four is mechanical, and it is the one a wave produces by construction:
