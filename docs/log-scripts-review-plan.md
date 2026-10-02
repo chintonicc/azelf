@@ -1,6 +1,6 @@
 # A run log that says what is true, scripts that take the common order, and a review that can see past its own ticket
 
-**Status:** IN PROGRESS (Phases 1–5 landed) · **Written:** 2026-10-02
+**Status:** COMPLETE (all five phases landed 2026-10-02; the consumer checks below are still open) · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), the entries still `open` after `docs/resolve-and-report-plan.md`: dated
 2026-09-25, 09-26, 09-30, 10-01 and 10-02.
@@ -270,7 +270,7 @@ range is the base head before and after the land (`landedRanges`). Paths in
 written only where git ignores it, as `.slice-parent.md` is; the exclude block now has
 eleven patterns.
 
-## Phase 5 — new tests are run against the base, when the consumer says how
+## Phase 5 — new tests are run against the base, when the consumer says how (`aee9ab9`)
 
 Opt-in. Drop this phase without touching the others if the cost reads wrong.
 
