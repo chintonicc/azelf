@@ -116,6 +116,74 @@ describe("the round line", () => {
 });
 
 /**
+ * The line is counted after the round's land and launches. A ticket that
+ * just landed is not open, a slice that is done and waiting its turn is "to
+ * land" and not "blocked", and a slice cut on top of a landed one is not
+ * reported as editing the same files.
+ */
+describe("what the run log says after a land", () => {
+  it("does not count the landed ticket, and preps the next in one line", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    c.setTicket("40", {});
+    c.setTicket("41", { blockedBy: ["40"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "40", "41"]);
+    await d.until(
+      "[round 1] 1 running · 0 blocked · 1 open — land one to advance",
+    );
+    expect(d.output()).toContain(`✓ prepped — worktree ready at ${c.wt(41)}\n`);
+    expect(d.output()).toContain("fetching origin/main …");
+    expect(d.output()).not.toContain("launch it with");
+    expect(d.output()).not.toContain("not launched");
+
+    // 41 was cut after 40 landed, so it contains a.txt's commit already.
+    commitIn(c.wt(41), "a.txt", "a\nb\n", "feat: more a");
+    await d.until(/(\[round \d+\] 1 running[\s\S]*){4}/);
+    expect(d.output()).not.toContain("editing the same files");
+  }, 60_000);
+
+  it("still warns for a slice that was open when the other landed", async () => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true, agent: ["true"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    sessions.push(fakeSession(c, 41));
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "40", "41"]);
+    await d.until("[round 1] 1 running · 0 blocked · 1 open");
+    // 41 was cut before the land: its branch does not contain 40's commit.
+    commitIn(c.wt(41), "a.txt", "b\n", "feat: another a");
+    await d.until(/#40✓ #41 {2}a\.txt/);
+    expect(d.output()).toContain("✓ = already landed");
+  }, 60_000);
+
+  it("reads a finished slice behind another land as to land, not blocked", () => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    commitIn(c.wt(41), "b.txt", "b\n", "feat: b");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    sh(c.wt(41), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["-y", "--interval", "1", "40", "41"]);
+
+    expect(r.out).toContain(
+      "[round 1] 0 running · 1 to land · 0 blocked · 1 open — land one to advance",
+    );
+    expect(r.code).toBe(0);
+  });
+});
+
+describe("slice-session.sh --prep-only by hand", () => {
+  it("says it was not launched, and how to launch it", () => {
+    c = makeConsumer({ worktrees: [40], agent: ["true"] });
+    const out = sh(c.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(out).toContain("✓ prepped, not launched — worktree ready at");
+    expect(out).toContain("launch it with:");
+  });
+});
+
+/**
  * A prep that ran out of space partway was retried every round, and each
  * retry left another half-built worktree. The floor holds new worktrees
  * before that happens, and a prep that fails anyway cleans up after itself.

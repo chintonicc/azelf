@@ -256,6 +256,15 @@ every ten minutes so a quiet run is not mistaken for a hung one:
 
 `SLICE_HEARTBEAT_SECONDS` sets that interval, and `0` prints it every round.
 
+The line is counted after the round's land. `blocked` means a ticket has an open
+blocker and nothing else. Two more counts appear only when they are not zero:
+`N to land` for slices that are done and waiting their turn (one lands per round),
+and `N queued` for slices that could start but have no slot, no disk or no lock:
+
+```
+[round 14] 1 running · 2 to land · 1 queued · 0 blocked · 4 open — land one to advance
+```
+
 A run that stops with work left (everything parked, or the disk below
 `minFreeDiskGb`) ends with the command that picks it up again: the same flags minus
 `--once`, and the tickets it left open.
@@ -779,6 +788,10 @@ and says so when more than one of them has changed the same file:
      both are open. Uncommitted work is not visible here.
      ✓ = already landed, so the open one has to rebase over it.
 ```
+
+A landed slice stays in the report only for the slices that were open when it
+landed. One started afterwards is cut on top of it and has nothing to rebase over,
+so the pair is not printed.
 
 **This is warn-only, and it is about the soft case.** Landing rebases the slice
 onto the base branch, so two slices whose edits to one file textually conflict

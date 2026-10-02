@@ -56,6 +56,7 @@
 set -euo pipefail
 
 prep_only=false
+dispatched=false
 autostart=true
 self_land=false
 ticket=""
@@ -77,6 +78,10 @@ while [[ $# -gt 0 ]]; do
     # worktree is reused, .env is already there, bun install no-ops warm — so
     # there is still exactly one launch path rather than two that can drift.
     --prep-only) prep_only=true; shift ;;
+    # With --prep-only, from slice-run.ts: the dispatcher launches the slice
+    # itself on its next line, so the prep does not say "not launched" or how
+    # to launch it. Not in the usage line; a person has no use for it.
+    --dispatched) dispatched=true; shift ;;
     # Ask the slice to mark ITSELF done and exit when it finishes. Passed by
     # slice-run.ts only under --auto, because it is the same judgement call
     # --auto already makes: without it, --auto cannot progress unattended at
@@ -228,6 +233,8 @@ elif git show-ref --verify --quiet "refs/heads/$branch"; then
   git worktree add "$worktree_path" "$branch"
   echo "✓ created worktree at $worktree_path on existing local branch $branch"
 else
+  # Said first: on a large repository this is minutes with nothing printed.
+  echo "  fetching origin/$SLICE_BASE_BRANCH …"
   fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
     echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH:" >&2
     echo "$fetch_err" >&2
@@ -321,6 +328,10 @@ if $prep_only; then
     if ! $autostart; then echo "--no-start" >>"$flags_file"; fi
   else
     rm -f "$flags_file"
+  fi
+  if $dispatched; then
+    echo "✓ prepped — worktree ready at $worktree_path"
+    exit 0
   fi
   echo "✓ prepped, not launched — worktree ready at $worktree_path"
   echo "  launch it with: ${AZELF_INVOKED_AS:-$0} $ticket"

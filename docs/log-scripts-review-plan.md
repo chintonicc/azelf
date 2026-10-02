@@ -1,6 +1,6 @@
 # A run log that says what is true, scripts that take the common order, and a review that can see past its own ticket
 
-**Status:** NOT STARTED · **Written:** 2026-10-02
+**Status:** IN PROGRESS (Phase 1 landed) · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), the entries still `open` after `docs/resolve-and-report-plan.md`: dated
 2026-09-25, 09-26, 09-30, 10-01 and 10-02.
@@ -102,46 +102,52 @@ Smallest, no behaviour change beyond text. `scripts/slice-run.ts`,
 
 ### 1a. The round line
 
-- [ ] Build the line from the tickets as they are after the land, not from the
+- [x] Build the line from the tickets as they are after the land, not from the
       `remaining` read at the top of the round. `tryLand` sets `t.open = false`
       (`:2596`), so filtering `tickets` again is enough; no tracker call.
-- [ ] `toLand`: open, has a worktree, not occupied, not parked, and
+- [x] `toLand`: open, has a worktree, not occupied, not parked, and
       `isReadyToLand` or (`autoLand` and `autoFinished`). The same predicate as
       `finished` (`:3099`); pull it into one function so the two cannot drift.
-- [ ] `blocked`: open with at least one entry in `blockedBy` that is still open, or a
+- [x] `blocked`: open with at least one entry in `blockedBy` that is still open, or a
       `foreignBlockers` entry.
-- [ ] `queued`: open, and none of running, to land, blocked, parked.
-- [ ] Line: `N running · [N to land · ][N queued · ]N blocked · N open[ · N parked] —
+- [x] `queued`: open, and none of running, to land, blocked, parked.
+- [x] Line: `N running · [N to land · ][N queued · ]N blocked · N open[ · N parked] —
       land one to advance`.
-- [ ] Tests (`sliceRun.test.ts`): after a land in a two-ticket chain the next line
+- [x] Tests (`sliceRun.test.ts`): after a land in a two-ticket chain the next line
       does not count the landed ticket; a slice with the ready marker behind another
       land reads `1 to land`, not `1 blocked`; a wave with neither bucket prints the
       line exactly as before.
 
 ### 1b. The overlap report
 
-- [ ] Record the base head a slice landed as: `landedHeads: Map<TicketId, string>`,
+- [x] Record the base head a slice landed as: `landedHeads: Map<TicketId, string>`,
       written next to `landedFiles.set` (`:2592`) from `baseHead()` after the land.
-- [ ] `findOverlaps` (`slice-overlap.ts`) takes `absorbed?: (landed, open) => boolean`.
+- [x] `findOverlaps` (`slice-overlap.ts`) takes `absorbed?: (landed, open) => boolean`.
       For each file, a landed holder is removed when every open holder of that file
       has absorbed it. A file left with fewer than two holders is dropped. Mixed (one
       open slice has it, one does not) keeps the landed slice.
-- [ ] The caller answers with `git merge-base --is-ancestor <landedHead> <branch>`,
+- [x] The caller answers with `git merge-base --is-ancestor <landedHead> <branch>`,
       cached on `(landedHead, branchHead)`.
-- [ ] Rewrite the "A LANDED SLICE IS STILL AN OVERLAP" block in `slice-overlap.ts` to
+- [x] Rewrite the "A LANDED SLICE IS STILL AN OVERLAP" block in `slice-overlap.ts` to
       carry the exception and the two waves that showed it.
-- [ ] Tests: pure ones in `sliceOverlap.test.ts` (absorbed, not absorbed, mixed
+- [x] Tests: pure ones in `sliceOverlap.test.ts` (absorbed, not absorbed, mixed
       three-way group); one in `sliceRun.test.ts` where a blocked slice is prepped
       after its blocker landed and no warning prints.
 
 ### 1c. Prep lines
 
-- [ ] The dispatcher passes `--dispatched` with `--prep-only` (`:3211`).
+- [x] The dispatcher passes `--dispatched` with `--prep-only` (`:3211`).
       `slice-session.sh` then prints `✓ prepped — worktree ready at <path>` and
       neither "not launched" nor "launch it with".
-- [ ] `echo "  fetching origin/$SLICE_BASE_BRANCH …"` before the fetch (`:231`).
-- [ ] Test: a dispatcher run's output has no `launch it with`; a by-hand
+- [x] `echo "  fetching origin/$SLICE_BASE_BRANCH …"` before the fetch (`:231`).
+- [x] Test: a dispatcher run's output has no `launch it with`; a by-hand
       `--prep-only` still has it.
+
+**As landed.** `N running` is counted after the round's launches as well as its land,
+so a slice started this round is running and not queued. A parked slice is no longer
+counted as blocked: it has its own `N parked`. The test for a landed slice kept in the
+report commits in the open slice after the land, because the report is keyed on
+tickets and files and does not reprint when only the ✓ changes.
 
 ## Phase 2 — scripts that take the common order
 

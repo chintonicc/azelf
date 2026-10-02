@@ -44,6 +44,16 @@
  * So the caller keeps a landed slice's file set for the rest of the run and
  * keeps passing it in; `open` below is what marks which ids are still live.
  *
+ * UNTIL THE OPEN SLICE CONTAINS IT. That rule is right for a slice that was
+ * open when the land happened, and wrong for one cut afterwards: a slice
+ * prepped on top of the landed commits already has them, and has nothing to
+ * rebase over. Two later waves on consumer-a showed it. Each time a blocked
+ * slice was started after its blocker landed, the report paired the two, and
+ * the reader checked the merge-base by hand to learn there was nothing to do.
+ * So the caller also says which open slices have absorbed which landed ones
+ * (`absorbed` below), and a landed slice leaves a file's group once every
+ * open slice on that file contains it.
+ *
  * This file is the pure half — set algebra over ticket ids, no git, no I/O —
  * so it can be tested without a repository. Reading the branches and printing
  * the result is slice-run.ts's, next to the other printers.
@@ -75,6 +85,14 @@ export type FindOverlapsOptions = {
    * where the warning about what must NOT go in here lives.
    */
   ignore?: (file: string) => boolean;
+  /**
+   * Does this open slice already contain this landed one? Asked only with
+   * `open` set, for a landed id and an open id that share a file. A landed
+   * slice is taken out of a file's group when every open slice in it answers
+   * yes; one open slice that does not contain it keeps it in, for all of
+   * them, because that one still has to rebase over it.
+   */
+  absorbed?: (landed: TicketId, open: TicketId) => boolean;
 };
 
 /**
@@ -149,7 +167,15 @@ export function findOverlaps(
   }
 
   const groups = new Map<string, Overlap>();
-  for (const [file, ids] of holders) {
+  for (const [file, all] of holders) {
+    const live = all.filter((id) => opts.open?.has(id));
+    const ids =
+      opts.open && opts.absorbed
+        ? all.filter(
+            (id) =>
+              opts.open?.has(id) || !live.every((o) => opts.absorbed?.(id, o)),
+          )
+        : all;
     if (ids.length < 2) continue;
     const tickets = [...ids].sort(compareIds);
     // Nobody left to steer: both sides are already on the base branch, which

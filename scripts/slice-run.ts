@@ -2590,12 +2590,41 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     );
   }
   landedFiles.set(t.id, landing);
+  const landedAt = baseHead();
+  if (landedAt) landedHeads.set(t.id, landedAt);
   const flaky = flakyGates.get(t.id);
   if (flaky) landedOnRetry.set(t.id, flaky);
   parked.delete(t.id);
   retriesSpent.delete(t.id);
   t.open = false;
   return true;
+}
+
+/**
+ * Done and waiting for a land: the round's landing filter and the round
+ * line's "to land" count, in one place so the two cannot drift.
+ *
+ * The parked test is the caller's. The landing filter passes `isParked`,
+ * which consumes a retry that is due; the round line only counts, and passes
+ * a plain lookup.
+ */
+function awaitingLand(
+  t: Ticket,
+  isParkedNow: (id: TicketId) => boolean,
+): boolean {
+  return (
+    t.open &&
+    hasWorktree(t.id) &&
+    // Before the parked test, which would consume a retry that is due: a base
+    // that moved during someone's rebase is exactly when a land destroys
+    // it. The retry waits for the rebase to end instead.
+    !inProgress.has(t.id) &&
+    // Parked slices are skipped until what they failed on changes. Without
+    // this the same failing land is re-attempted every round for the life
+    // of the run.
+    !isParkedNow(t.id) &&
+    (isReadyToLand(t.id) || (autoLand && autoFinished(t.id)))
+  );
 }
 
 /**
@@ -2706,6 +2735,34 @@ function changedFiles(id: TicketId): string[] {
  */
 const landedFiles = new Map<TicketId, string[]>();
 
+/**
+ * The base branch's head right after each slice landed. An open slice whose
+ * branch contains that commit was cut, or rebased, on top of the landed work
+ * and has nothing left to rebase over: see `containsLanded`.
+ */
+const landedHeads = new Map<TicketId, string>();
+
+/** `is-ancestor` answers, keyed on both commits: neither side un-happens. */
+const containsCache = new Map<string, boolean>();
+
+/**
+ * Does this open slice's branch already contain what that slice landed?
+ * False when either commit cannot be read, which keeps the warning.
+ */
+function containsLanded(landed: TicketId, open: TicketId): boolean {
+  const at = landedHeads.get(landed);
+  const head = branchHead(open);
+  if (!at || !head) return false;
+  const key = `${at} ${head}`;
+  const hit = containsCache.get(key);
+  if (hit !== undefined) return hit;
+  const { ok } = run(["git", "merge-base", "--is-ancestor", at, head], {
+    allowFail: true,
+  });
+  containsCache.set(key, ok);
+  return ok;
+}
+
 /** The last report printed, so an unchanged one is not printed again. */
 let lastOverlaps = "";
 
@@ -2741,12 +2798,18 @@ function reportOverlaps(all: Ticket[]): void {
       continue;
     }
     // Closed here means landed this run, and its files are still ahead of
-    // every open slice. A ticket closed some other way never got a snapshot.
+    // every slice that was open then. `containsLanded` takes it back out for
+    // a slice cut after the land. A ticket closed some other way never got a
+    // snapshot.
     const landed = landedFiles.get(t.id);
     if (landed?.length) changed.set(t.id, landed);
   }
 
-  const overlaps = findOverlaps(changed, { open, ignore: overlapIgnored });
+  const overlaps = findOverlaps(changed, {
+    open,
+    ignore: overlapIgnored,
+    absorbed: containsLanded,
+  });
   const key = overlaps
     .map((o) => `${o.tickets.join(",")}:${o.files.join(",")}`)
     .join("|");
@@ -3097,20 +3160,7 @@ for (;;) {
   // Land before launching, so a slot freed this round is refilled this round.
   // One per round: every land fast-forwards the same master in the same main
   // worktree, so they cannot be done concurrently.
-  const finished = tickets.filter(
-    (t) =>
-      t.open &&
-      hasWorktree(t.id) &&
-      // Before `isParked`, which would consume a retry that is due: a base
-      // that moved during someone's rebase is exactly when a land destroys
-      // it. The retry waits for the rebase to end instead.
-      !inProgress.has(t.id) &&
-      // Parked slices are skipped until what they failed on changes. Without
-      // this the same failing land is re-attempted every round for the life
-      // of the run.
-      !isParked(t.id) &&
-      (isReadyToLand(t.id) || (autoLand && autoFinished(t.id))),
-  );
+  const finished = tickets.filter((t) => awaitingLand(t, isParked));
   if (finished.length) {
     console.log(
       `\n[round ${round}] ${finished.length} marked done — landing one`,
@@ -3208,7 +3258,13 @@ for (;;) {
       }
       console.log(`  prepping ${ref(t.id)} …`);
       const { ok } = run(
-        ["./scripts/slice-session.sh", t.id, ...sessionFlags, "--prep-only"],
+        [
+          "./scripts/slice-session.sh",
+          t.id,
+          ...sessionFlags,
+          "--prep-only",
+          "--dispatched",
+        ],
         { inherit: true, allowFail: true },
       );
       if (ok) {
@@ -3258,11 +3314,35 @@ for (;;) {
     for (const t of idle) launchedAt.delete(t.id);
   }
 
-  // Only when its counts change, or once a heartbeat, and word for word as it
-  // always was, so a watcher that matches it keeps working.
-  const blocked = remaining.length - up.length - ready.length;
-  const roundLine = `${up.length} running · ${Math.max(0, blocked)} blocked · ${
-    remaining.length
+  // Only when its counts change, or once a heartbeat. Counted from the
+  // tickets as they are now, after this round's land and launches, so a
+  // ticket that just landed is not "open" and a slice that is done and
+  // waiting its turn is not "blocked". The two middle buckets print only when
+  // they are not zero: a line with neither reads word for word as it always
+  // did, so a watcher that matches it keeps working.
+  const openNow = tickets.filter((t) => t.open);
+  const stillOpen = new Set(openNow.map((t) => t.id));
+  const running = openNow.filter((t) => occupied(t.id));
+  const toLand = openNow.filter(
+    (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
+  );
+  const blocked = openNow.filter(
+    (t) =>
+      !occupied(t.id) &&
+      !parked.has(t.id) &&
+      (t.foreignBlockers.length > 0 ||
+        t.blockedBy.some((b) => stillOpen.has(b))),
+  );
+  const queued =
+    openNow.length -
+    running.length -
+    toLand.length -
+    blocked.length -
+    openNow.filter((t) => parked.has(t.id) && !occupied(t.id)).length;
+  const roundLine = `${running.length} running · ${
+    toLand.length ? `${toLand.length} to land · ` : ""
+  }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
+    openNow.length
   } open${parked.size ? ` · ${parked.size} parked` : ""} — land one to advance`;
   if (
     roundLine !== lastRoundLine ||

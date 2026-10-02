@@ -130,6 +130,56 @@ describe("findOverlaps — open slices", () => {
   });
 });
 
+/**
+ * A landed slice stays in the report for the slices that were open when it
+ * landed. One cut afterwards already contains it; the caller says which.
+ */
+describe("findOverlaps — a landed slice the open one already contains", () => {
+  const both = changed({ "18": ["a.ts"], "19": ["a.ts"] });
+
+  it("drops the pair when the open slice contains the landed one", () => {
+    expect(
+      findOverlaps(both, { open: ids("19"), absorbed: () => true }),
+    ).toEqual([]);
+  });
+
+  it("keeps the pair when it does not", () => {
+    expect(
+      findOverlaps(both, { open: ids("19"), absorbed: () => false }),
+    ).toEqual([{ tickets: ["18", "19"], files: ["a.ts"] }]);
+  });
+
+  it("keeps the landed slice for everyone while one open slice lacks it", () => {
+    const three = changed({ "18": ["a.ts"], "19": ["a.ts"], "20": ["a.ts"] });
+    // 18 landed; 19 was cut on top of it, 20 was open before.
+    expect(
+      findOverlaps(three, {
+        open: ids("19", "20"),
+        absorbed: (_landed, open) => open === "19",
+      }),
+    ).toEqual([{ tickets: ["18", "19", "20"], files: ["a.ts"] }]);
+  });
+
+  it("leaves the open slices paired once both contain it", () => {
+    const three = changed({ "18": ["a.ts"], "19": ["a.ts"], "20": ["a.ts"] });
+    expect(
+      findOverlaps(three, { open: ids("19", "20"), absorbed: () => true }),
+    ).toEqual([{ tickets: ["19", "20"], files: ["a.ts"] }]);
+  });
+
+  it("never asks about two open slices", () => {
+    const asked: string[] = [];
+    findOverlaps(both, {
+      open: ids("18", "19"),
+      absorbed: (landed, open) => {
+        asked.push(`${landed} ${open}`);
+        return true;
+      },
+    });
+    expect(asked).toEqual([]);
+  });
+});
+
 describe("ignores", () => {
   it("matches nothing when given nothing", () => {
     const skip = ignores([]);
