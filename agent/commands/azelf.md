@@ -18,6 +18,20 @@ config.
 
 Tickets are picked up only when they carry the ready label AND have no open blockers.
 
+**A parent is never a slice.** A ticket that other tickets hang under (sub-issues, or
+a `## Parent` section in their bodies) is left out of a bare run, whether its children
+are open or closed. If the plan says its children are all closed, close it or take
+the ready label off.
+
+**A blocker that only a ticket body names stops the dispatch.** The plan prints
+`✗ #82's body says it is blocked by #81 … has no edge` and a dispatch exits 1. Two
+ways out: `bunx azelf run --sync-edges -y` records the edges (then plan again), or
+`--ignore-body-blockers` runs as planned when the body only meant a reading order.
+Run `--sync-edges -y` right after filing tickets and the question never comes up.
+
+**Naming ids overrides both the label and the hierarchy**, and the plan says so with
+a `⚠` line for each. Read those before you answer `proceed?`.
+
 They always come from **the repo you are standing in** — `gh` resolves the owner and
 name from the git remote of the working directory, so there is nothing to configure
 and no way for one repo's tickets to leak into another's run. The ticket body is then

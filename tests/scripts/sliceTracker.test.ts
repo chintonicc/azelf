@@ -390,6 +390,36 @@ describe("blockersFromBody — the `## Blocked by` convention", () => {
     expect(blockersFromBody("## Parent\n\n#17\n", N)).toEqual([]);
   });
 
+  it("a section that opens with None is empty, whatever it goes on to mention", () => {
+    const body = "## Blocked by\n\nNone. #62 and #63 have landed.\n";
+    expect(blockersFromBody(body, N)).toEqual([]);
+    expect(
+      blockersFromBody("## Blocked by\n\n- **None**, see #4\n", N),
+    ).toEqual([]);
+  });
+
+  it("reads 'Blocked on #N' wherever it stands, to the end of the sentence", () => {
+    const body =
+      "## What to build\n\n**Blocked on #2 (the egress trigger) and #3 (the authorizer).** Do not start early; see #9.\n";
+    expect(blockersFromBody(body, N)).toEqual(["2", "3"]);
+    expect(
+      blockersFromBody("This is blocked by #81; #82 is a sibling.", N),
+    ).toEqual(["81"]);
+  });
+
+  it("joins the section and the phrase without duplicates", () => {
+    const body = "Blocked on #2.\n\n## Blocked by\n\n#2 and #5\n";
+    expect(blockersFromBody(body, N)).toEqual(["2", "5"]);
+  });
+
+  it("skips a negated phrase, and a mention that is not a claim", () => {
+    expect(blockersFromBody("It is not blocked by #19.", N)).toEqual([]);
+    expect(blockersFromBody("This isn't blocked on #19.", N)).toEqual([]);
+    expect(blockersFromBody("No longer blocked by #19.", N)).toEqual([]);
+    expect(blockersFromBody("Unblocked by #19 landing.", N)).toEqual([]);
+    expect(blockersFromBody("Reads best after #19.", N)).toEqual([]);
+  });
+
   it("does not pick up the parent from its own section", () => {
     const body = "## Parent\n\n#17\n\n## Blocked by\n\nNone.\n";
     expect(blockersFromBody(body, N)).toEqual([]);
@@ -563,12 +593,20 @@ describe("bodyOnlyBlockers — what the prose claims and the tracker has not got
     // blocker. That sentence must not become an edge.
     const body =
       "## Blocked by\n\nNone (can start immediately). Reads best after #19, but does not depend on it.\n";
-    // The #19 here IS under the heading, so it is claimed — the guard that
-    // matters is the one below, where the mention sits in another section.
-    expect(B(body, [])).toEqual(["19"]);
+    // The #19 is under the heading, but the section opens with "None": it is
+    // empty, whatever it goes on to mention.
+    expect(B(body, [])).toEqual([]);
     expect(
       B("## Notes\n\nSupersedes #4.\n\n## Blocked by\n\nNone.\n", []),
     ).toEqual([]);
+  });
+
+  it("drops a claimed blocker that is closed, and keeps one that cannot be read", () => {
+    const state = (id: string) =>
+      ({ "18": "closed", "19": "open" })[id] as "open" | "closed" | undefined;
+    expect(
+      bodyOnlyBlockers("## Blocked by\n\n#18 #19 #999\n", [], N, "20", state),
+    ).toEqual(["19", "999"]);
   });
 
   it("drops a ticket that names itself", () => {

@@ -23,7 +23,9 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --no-auto-resolve    never let an agent resolve a rebase conflict
   azelf run --gates 12       run the landing gates on slice 12, land nothing
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
-  azelf run --sync-edges     write the edges the bodies claim, then stop
+  azelf run --sync-edges [-y]    write the edges the bodies claim, then stop
+  azelf run --ignore-body-blockers   dispatch although a body names a blocker
+                             the tracker has no edge for
   azelf run --help           this (also -h)
 
 Without --auto a session stops when it is finished. Run ./scripts/slice-done.sh
@@ -48,6 +50,7 @@ const FLAGS = new Set([
   "--no-auto-resolve",
   "--gates",
   "--sync-edges",
+  "--ignore-body-blockers",
 ]);
 
 export const wantsHelp = (argv: string[]): boolean =>

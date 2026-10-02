@@ -222,12 +222,13 @@ Installs into the repo you are standing in.
 | flag | effect |
 | --- | --- |
 | *(none)* | prep and open the current wave |
-| `<ids…>` | prep and open exactly these tickets, ignoring the plan |
+| `<ids…>` | prep and open exactly these tickets, ignoring the ready label and the hierarchy — the plan says what it overrode |
 | `--plan` | print the wave tree and exit — reads only, opens nothing |
 | `--auto` | dispatch, wait, land, release the next wave, repeat until done |
 | `--once` | one round only: land what is ready, then stop |
 | `--gates <ids…>` | run only the landing gates against existing worktrees, and exit |
-| `--sync-edges` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
+| `--sync-edges [-y]` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
+| `--ignore-body-blockers` | dispatch although a body names an open blocker the tracker has no edge for |
 | `--max <n>` | cap concurrent slices (default: the widest wave in the plan) |
 | `--interval <s>` | seconds between rounds (default 30) |
 | `--no-start` | prep the worktree but do not open a session |
@@ -412,18 +413,34 @@ GitHub's native issue dependencies satisfy this. A tracker where "done" and
 
 #### Epics are excluded from the plan
 
-A ticket that other ready tickets name as their **parent** is a heading over work,
-not work. azelf drops it from the plan and says so:
+A ticket that other tickets name as their **parent** is a heading over work, not
+work. azelf drops it from the plan and says so:
 
 ```
-  ⚠ #17 excluded — named as Parent by #18 #19 #20 #21
+  ⚠ #17 excluded — named as Parent by #18 #19 #20 #21 (2 open)
      An epic closes when its children close; it is not a slice.
      Run it anyway with: azelf run 17
 ```
 
+The children count wherever they are, open or closed, ready or not. They leave the
+ready set as they land, and a parent that was only an epic while its children were
+beside it would become an ordinary wave-1 ticket the moment the last one closed: a
+session opened on the whole spec. A finished epic that still carries the label is
+left out with what to do about it:
+
+```
+  ⚠ #80 excluded — its 3 children are all closed. Close it, or remove ready-for-agent.
+     Run it anyway with: azelf run 80
+```
+
 Two sources, in that order of trust. If your tracker models hierarchy natively it
 is asked (`children()`, implemented for GitHub sub-issues). Otherwise the ticket
-body is read for a `## Parent` section naming an id.
+body is read for a `## Parent` section naming an id; the optional `parentClaims()`
+returns every ticket with such a section, closed ones included, in one call per
+plan (GitHub answers it with an issue search).
+
+A spec with the ready label and **no tickets under it yet** is not an epic by any
+of this, and runs. Keep the label off specs.
 
 The prose fallback is not a nicety. The case this was built for had four tickets
 each declaring `## Parent — #17` while GitHub's sub-issue *and* dependency graphs
@@ -437,27 +454,46 @@ a hierarchy — ticket bodies cross-reference each other constantly ("reads best
 after #19"), and treating those as structure would exclude tickets that were only
 giving context. Only ids under the heading count.
 
-Explicit ids override all of it: `azelf run 17` runs #17, and when you name ids on
-the command line the hierarchy is neither consulted nor paid for.
-
-#### Claimed blockers are reported, never assumed
-
-The same read applies to `## Blocked by`. Where a body names a blocker the tracker
-has no edge for, azelf prints it under the tree and carries on planning:
+Explicit ids override all of it: `azelf run 17` runs #17. The plan then says what
+you overrode, below the waves:
 
 ```
-  ℹ #22's body names a blocker GitHub has no edge for: #19
-     The plan above ignores them — it schedules on edges, not prose.
-     Record them with: azelf run --sync-edges
+  ⚠ #17 is a parent (#18 #19 #20 #21, all closed) — running it as a slice because you named it
+  ⚠ not labelled ready-for-agent: #2 #4 — running them because you named them
 ```
 
-It is a note and not a warning, because most of these are not mistakes. "Blocked
-by #19" in a body very often means "read #19 first", and promoting that to an edge
-would delay a slice by a whole wave for a reading order. The plan schedules on the
-tracker's edges; the body is a claim about intent that nobody updated.
+#### A claimed blocker stops the dispatch, and is never assumed
 
-`azelf run --sync-edges` is the opt-in that acts on it. It lists every claimed
-edge, asks once, writes the confirmed ones through the tracker's optional
+A body can name a blocker the tracker has no edge for. Two places are read: the ids
+under a `## Blocked by` heading (a section that opens with "None" is empty, whatever
+it goes on to mention), and the rest of any sentence that says "blocked on" or
+"blocked by" — "**Blocked on #2 and #3.** Do not start early". A negated phrase and
+a plain mention ("reads best after #19") are not claims. A blocker that is already
+closed is dropped.
+
+What is left is an open ticket the body says to wait for and the plan does not
+wait for. The plan is still built from the tracker's edges, and says so:
+
+```
+  ✗ #82's body says it is blocked by #81 (in this run, wave 1). GitHub has no edge.
+
+not dispatching: the plan above would start a ticket beside its claimed blocker.
+  record the edges:  azelf run --sync-edges -y
+  or run as planned: azelf run --ignore-body-blockers -y
+```
+
+`--plan` prints the same and exits 0. A dispatch exits 1 before `proceed?`, with
+`-y` as much as without.
+
+azelf refuses rather than scheduling on the claim, because many of these are not
+dependencies. "Blocked by #19" in a body very often means "read #19 first", and
+promoting that to an edge would delay a slice by a whole wave for a reading order.
+So it does not guess; it asks, once. After `--sync-edges` the tracker is right for
+every later run, and `--ignore-body-blockers` is the answer "it is a reading order".
+
+`azelf run --sync-edges` is the opt-in that records them. It lists every claimed
+edge, asks once (`-y` confirms without a prompt, for a run with no terminal),
+writes the confirmed ones through the tracker's optional
 `addBlocker`, and then **stops** — the edges it just wrote are the input to the
 plan, so anything printed after them would be the plan from before. Run it again to
 see the new graph. A tracker whose adapter implements no `addBlocker` refuses

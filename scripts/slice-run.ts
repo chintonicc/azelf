@@ -236,9 +236,16 @@ type Ticket = {
  * Kept apart from `Ticket.blockedBy` on purpose: these are NOT scheduled on.
  * The plan runs on the tracker's edges, and a body is prose that was true when
  * someone wrote it. Promoting a claim to an edge is a decision with a flag
- * attached (`--sync-edges`), never a side effect of reading the plan.
+ * attached (`--sync-edges`), never a side effect of reading the plan. What
+ * the claim does do is stop the dispatch until someone has decided
+ * (`refuseOverBodyBlockers`). Closed blockers never get here.
  */
-type MissingEdge = { id: TicketId; blockers: TicketId[] };
+type MissingEdge = {
+  id: TicketId;
+  blockers: TicketId[];
+  /** The subset of `blockers` the tracker could not read: a typo, usually. */
+  unreadable: TicketId[];
+};
 
 /**
  * Blockers whose ticket is already closed are dropped: the tracker clears a
@@ -329,8 +336,28 @@ function loadTickets(explicit: TicketId[]): {
     // check this runs for explicit ids too: naming ids says which tickets to
     // run, not which edges exist, and the waves below are built from edges
     // either way.
-    const claimed = bodyOnlyBlockers(body(id), declared, tracker.idPattern, id);
-    if (claimed.length > 0) missingEdges.push({ id, blockers: claimed });
+    //
+    // A claimed blocker that is closed blocks nothing and is dropped. One the
+    // tracker cannot read is kept, and marked: a typo in a body should be
+    // seen, not swallowed.
+    const unreadable: TicketId[] = [];
+    const claimed = bodyOnlyBlockers(
+      body(id),
+      declared,
+      tracker.idPattern,
+      id,
+      (blocker) => {
+        try {
+          return get(blocker).state;
+        } catch {
+          unreadable.push(blocker);
+          return undefined;
+        }
+      },
+    );
+    if (claimed.length > 0) {
+      missingEdges.push({ id, blockers: claimed, unreadable });
+    }
     tickets.push({
       id,
       title: meta.title,
@@ -425,30 +452,85 @@ function printNamed(namedEpics: Epic[], unlabelled: TicketId[]): void {
 }
 
 /**
- * What the bodies claim and the tracker does not know, as a note rather than a
- * correction.
+ * What the bodies claim and the tracker does not know, and what that does to
+ * the run.
  *
- * Deliberately not a warning and deliberately not acted on. Most of these are
- * not mistakes: a body saying "blocked by #19" often means "read #19 first",
- * and the ticket that prompted all of this said in so many words that it
- * "reads best after #19 … but does not depend on it". Turning that sentence
- * into an edge would delay a slice by a whole wave for a reading order. So the
- * tool says what it noticed and leaves the judgement where it belongs.
+ * The plan is never changed by it. Most of these are not mistakes: a body
+ * saying "blocked by #19" often means "read #19 first", and the ticket that
+ * prompted the first version of this said in so many words that it "reads best
+ * after #19 … but does not depend on it". Scheduling on that sentence would
+ * delay a slice by a whole wave for a reading order.
+ *
+ * It used to be a note below the waves and nothing more, and that was too
+ * little: three tickets filed with `## Blocked by #81` and no edge were planned
+ * into wave 1 beside #81, and a note is not read by a run started with `-y`.
+ * So azelf still does not guess, but it now asks: a dispatch stops (see
+ * `refuseOverBodyBlockers`) until the edges are recorded or the claim is
+ * waved through with `--ignore-body-blockers`. Refusing costs one command,
+ * once, and after `--sync-edges` the tracker is right for every later run.
+ *
+ * `ignored` is that flag: the lines are then a note, as they always were.
  */
-function printMissingEdges(missing: MissingEdge[]): void {
+function printMissingEdges(
+  missing: MissingEdge[],
+  tickets: Ticket[],
+  ignored: boolean,
+): void {
   if (missing.length === 0) return;
+  const waveOf = new Map(tickets.map((t) => [t.id, t.wave]));
+  const where = (m: MissingEdge, b: TicketId): string => {
+    const wave = waveOf.get(b);
+    if (wave !== undefined) return `in this run, wave ${wave + 1}`;
+    return m.unreadable.includes(b)
+      ? `not readable on ${tracker.name}`
+      : "open, not in this run";
+  };
   console.log("");
   for (const m of missing) {
+    for (const b of m.blockers) {
+      console.log(
+        `  ${ignored ? "ℹ" : "✗"} ${ref(
+          m.id,
+        )}'s body says it is blocked by ${ref(b)} (${where(m, b)}). ${
+          tracker.name
+        } has no edge.`,
+      );
+    }
+  }
+  if (ignored) {
     console.log(
-      `  ℹ ${ref(m.id)}'s body names ${
-        m.blockers.length === 1 ? "a blocker" : "blockers"
-      } ${tracker.name} has no edge for: ${m.blockers.map(ref).join(" ")}`,
+      "     Running as planned (--ignore-body-blockers): edges are scheduled on, prose is not.",
     );
   }
+}
+
+/**
+ * The two ways past a body-only blocker, and for a dispatch the exit.
+ *
+ * `--plan` prints the same lines and exits 0: reading a plan is how this is
+ * found, and a plan that failed would be a plan nobody could read in a script.
+ * A dispatch exits 1 before `proceed?`, with `-y` as much as without, because
+ * `-y` is exactly the run in which nobody reads the note.
+ */
+function refuseOverBodyBlockers(dispatching: boolean): void {
+  // The run's own arguments, so the second command can be pasted as it is.
+  const rest = argv.filter((a) => a !== "--plan").join(" ");
+  const ids = explicit.join(" ");
+  console.log("");
   console.log(
-    "     The plan above ignores them — it schedules on edges, not prose.",
+    dispatching
+      ? "not dispatching: the plan above would start a ticket beside its claimed blocker."
+      : "a dispatch of this plan stops here: it would start a ticket beside its claimed blocker.",
   );
-  console.log("     Record them with: azelf run --sync-edges");
+  console.log(
+    `  record the edges:  azelf run --sync-edges -y${ids ? ` ${ids}` : ""}`,
+  );
+  console.log(
+    `  or run as planned: azelf run --ignore-body-blockers${
+      rest ? ` ${rest}` : ""
+    }`,
+  );
+  if (dispatching) process.exit(1);
 }
 
 /**
@@ -498,9 +580,14 @@ function syncEdges(missing: MissingEdge[], assumeYes: boolean): void {
     "  drops a wave, and it stops being runnable until its blocker closes.",
   );
   if (!assumeYes) {
-    const answer = prompt("\nwrite them? [y/N]") ?? "";
-    if (!/^y(es)?$/i.test(answer.trim())) {
-      console.log("stopped. Nothing was written.");
+    // `null` is a prompt nobody could answer: no terminal on stdin.
+    const answer = prompt("\nwrite them? [y/N]");
+    if (!/^y(es)?$/i.test((answer ?? "").trim())) {
+      console.log(
+        answer === null
+          ? "stopped. Nothing was written. Confirm without a prompt with: azelf run --sync-edges -y"
+          : "stopped. Nothing was written.",
+      );
       return;
     }
   }
@@ -2709,8 +2796,12 @@ if (flag("--sync-edges")) {
 
 assignWaves(tickets);
 const width = printTree(tickets);
-printMissingEdges(missingEdges);
+const ignoreBodyBlockers = flag("--ignore-body-blockers");
+printMissingEdges(missingEdges, tickets, ignoreBodyBlockers);
 printNamed(namedEpics, unlabelled);
+if (missingEdges.length > 0 && !ignoreBodyBlockers) {
+  refuseOverBodyBlockers(!planOnly);
+}
 const maxParallel = Number(value("--max") ?? width);
 
 if (planOnly) process.exit(0);

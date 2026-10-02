@@ -1123,3 +1123,100 @@ describe("a parent is not a slice", () => {
     expect(runDispatcher(c, ["--plan", "3"]).out).not.toContain("not labelled");
   });
 });
+
+/**
+ * A body that names a blocker the tracker has no edge for. The plan is still
+ * built from edges, but a dispatch does not start over the claim: someone
+ * records the edge or says to run anyway.
+ */
+describe("a blocker only the body names stops the dispatch", () => {
+  const claimed = (): Consumer => {
+    const fx = makeConsumer({ remote: true, agent: ["true"] });
+    fx.setTicket("81", {});
+    fx.setTicket("82", { body: "## Blocked by\n\n#81\n" });
+    return fx;
+  };
+  const LINE =
+    "✗ #82's body says it is blocked by #81 (in this run, wave 1). Fake has no edge.";
+
+  it("--plan prints where the blocker is and the two ways out, and exits 0", () => {
+    c = claimed();
+    const r = runDispatcher(c, ["--plan"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(LINE);
+    expect(r.out).toContain("record the edges:  azelf run --sync-edges -y");
+    expect(r.out).toContain(
+      "or run as planned: azelf run --ignore-body-blockers",
+    );
+  });
+
+  it("a dispatch exits 1 before anything is prepped, -y included", () => {
+    c = claimed();
+    const r = runDispatcher(c, ["-y", "--once", "81", "82"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(LINE);
+    expect(r.out).toContain("not dispatching");
+    expect(r.out).toContain("azelf run --sync-edges -y 81 82");
+    expect(r.out).toContain("azelf run --ignore-body-blockers -y --once 81 82");
+    expect(existsSync(c.wt(81))).toBe(false);
+    expect(existsSync(c.wt(82))).toBe(false);
+  });
+
+  it("names a blocker outside the run as open, not in this run", () => {
+    c = claimed();
+    const r = runDispatcher(c, ["--plan", "82"]);
+
+    expect(r.out).toContain(
+      "✗ #82's body says it is blocked by #81 (open, not in this run). Fake has no edge.",
+    );
+  });
+
+  it("--ignore-body-blockers runs as planned, and the line is a note", () => {
+    c = claimed();
+    const r = runDispatcher(c, [
+      "--ignore-body-blockers",
+      "-y",
+      "--once",
+      "--no-start",
+    ]);
+
+    expect(r.out).toContain(
+      "ℹ #82's body says it is blocked by #81 (in this run, wave 1). Fake has no edge.",
+    );
+    expect(r.out).not.toContain("not dispatching");
+    expect(existsSync(c.wt(81))).toBe(true);
+    expect(existsSync(c.wt(82))).toBe(true);
+  }, 60_000);
+
+  it("a closed blocker is not a claim: the run proceeds and says nothing", () => {
+    c = claimed();
+    c.setTicket("81", { state: "closed" });
+    const r = runDispatcher(c, ["-y", "--once", "--no-start", "82"]);
+
+    expect(r.out).not.toContain("body says");
+    expect(r.out).not.toContain("not dispatching");
+    expect(existsSync(c.wt(82))).toBe(true);
+  }, 60_000);
+
+  it("--sync-edges -y writes the edge, and the next plan schedules on it", () => {
+    c = claimed();
+    const sync = runDispatcher(c, ["--sync-edges", "-y"]);
+    expect(sync.code).toBe(0);
+    expect(sync.out).toContain("✓ #82 blocked by #81");
+
+    const r = runDispatcher(c, ["--plan"]);
+    expect(r.out).not.toContain("body says");
+    expect(r.out).toContain("wave 2");
+  });
+
+  it("--sync-edges without -y and without a terminal says how to confirm", () => {
+    c = claimed();
+    const r = runDispatcher(c, ["--sync-edges"]);
+
+    expect(r.out).toContain(
+      "stopped. Nothing was written. Confirm without a prompt with: azelf run --sync-edges -y",
+    );
+  });
+});

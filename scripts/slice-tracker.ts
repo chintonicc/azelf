@@ -263,20 +263,52 @@ export function parentFromBody(
 }
 
 /**
- * Ticket ids named under a `## Blocked by` heading.
+ * The ticket ids a body says it is blocked by.
  *
- * `[]` covers both "the section is absent" and "the section says None", which
- * are the same fact for scheduling. Note what this does NOT do: it reports what
+ * Two places are read, and neither is "every id in the body":
+ *
+ *  1. Everything under a `## Blocked by` heading — unless the section opens
+ *     with "None". Then it is empty, whatever it goes on to mention: "None.
+ *     #62 and #63 have landed." names two tickets and no blocker.
+ *  2. The rest of any sentence that says "blocked on" or "blocked by", up to
+ *     the next `.`, `;` or line end. Ticket writers put the strongest form of
+ *     the claim outside the section: "**Blocked on #2 (the egress trigger) and
+ *     #3 (the authorizer).** Do not start early." A negated phrase ("not
+ *     blocked by #19", "isn't blocked on", "no longer blocked by") is skipped.
+ *
+ * `section()` explains why a bare `#17` in a paragraph is a mention and not
+ * structure. That still holds: "reads best after #19" is not read. This reads
+ * one phrase whose only meaning is the claim.
+ *
+ * `[]` covers both "nothing is said" and "the section says None", which are
+ * the same fact for scheduling. Note what this does NOT do: it reports what
  * the body CLAIMS, which may disagree with the tracker's own edges. Reconciling
- * the two is the caller's business, and azelf only ever reports the difference
- * unless asked in so many words to write it.
+ * the two is the caller's business, and azelf never writes the difference
+ * unless asked in so many words.
  */
 export function blockersFromBody(body: string, idPattern: string): TicketId[] {
-  return idsIn(section(body, "blocked by"), idPattern);
+  const sec = section(body, "blocked by");
+  const first =
+    sec
+      .split("\n")
+      .map((l) => l.trim())
+      .find((l) => l !== "") ?? "";
+  // Leading list and emphasis markers are decoration: "- None", "**None.**".
+  const fromSection = /^[-*_>\s]*none\b/i.test(first)
+    ? []
+    : idsIn(sec, idPattern);
+
+  const fromPhrases: TicketId[] = [];
+  for (const m of body.matchAll(/\bblocked\s+(?:on|by)\b([^.;\n]*)/gi)) {
+    const before = body.slice(Math.max(0, m.index - 12), m.index);
+    if (/(?:\bnot|n't|\bno longer)\s+$/i.test(before)) continue;
+    fromPhrases.push(...idsIn(m[1] ?? "", idPattern));
+  }
+  return [...new Set([...fromSection, ...fromPhrases])];
 }
 
 /**
- * The blockers a ticket's BODY claims that the tracker has no edge for.
+ * The OPEN blockers a ticket's BODY claims that the tracker has no edge for.
  *
  * This is a DISAGREEMENT, not a defect, and the two sides fail differently: a
  * body is written once by whoever sliced the work and is never updated, while
@@ -294,16 +326,22 @@ export function blockersFromBody(body: string, idPattern: string): TicketId[] {
  * `self` drops a ticket that names itself, which is a typo rather than a cycle
  * — `addBlocker` would be rejected by any tracker, but reporting it as a
  * missing edge invites someone to try.
+ *
+ * `stateOf` drops a claimed blocker that is closed, edge or no edge: it blocks
+ * nothing, and a body is never edited to say so. It answers `undefined` for a
+ * ticket the tracker cannot read, and that one STAYS in the list — a typo in a
+ * body should be seen, not swallowed. Without `stateOf` nothing is dropped.
  */
 export function bodyOnlyBlockers(
   body: string,
   known: Blocker[],
   idPattern: string,
   self?: TicketId,
+  stateOf?: (id: TicketId) => TicketState | undefined,
 ): TicketId[] {
   const have = new Set(known.map((b) => b.id));
   return blockersFromBody(body, idPattern).filter(
-    (id) => id !== self && !have.has(id),
+    (id) => id !== self && !have.has(id) && stateOf?.(id) !== "closed",
   );
 }
 

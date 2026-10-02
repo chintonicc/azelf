@@ -93,6 +93,8 @@ export type FakeTicket = {
   ready?: boolean;
   /** What the fake tracker's `children` answers for this ticket. */
   children?: string[];
+  /** The tracker's own edges; `addBlocker` (`--sync-edges`) appends here. */
+  blockedBy?: string[];
 };
 
 export function makeConsumer(opts: {
@@ -217,7 +219,7 @@ import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringif
       join(AZELF, "index.ts"),
     )};
 const TICKETS = ${JSON.stringify(ticketsFile)};
-type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[] };
+type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[]; blockedBy?: string[] };
 const all = (): Record<string, Fake> => JSON.parse(readFileSync(TICKETS, "utf8"));
 const ticket = (id: string) => ({
   title: ${JSON.stringify(opts.title ?? "t")},
@@ -246,7 +248,13 @@ const tracker: Tracker = {
       url: "",
     };
   },
-  blockers: () => [],
+  blockers: (id) =>
+    (ticket(id).blockedBy ?? []).map((b) => ({ id: b, state: ticket(b).state })),
+  addBlocker: (id, blockerId) => {
+    const next = all();
+    next[id] = { ...next[id], blockedBy: [...(next[id]?.blockedBy ?? []), blockerId] };
+    writeFileSync(TICKETS, JSON.stringify(next));
+  },
   body: (id) => ticket(id).body,
   children: (id) => ticket(id).children ?? [],
   parentClaims: () =>
