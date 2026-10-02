@@ -1,6 +1,6 @@
 # A run that finishes its rebases, and says what its last review found
 
-**Status:** IN PROGRESS — Phases 1 and 2 landed · **Written:** 2026-10-02
+**Status:** COMPLETE — all three phases landed 2026-10-02 (`2ce6f58`, `4b5c168`, `ccb70b5`). The checks under "Checks only the consumer can make" are still open · **Written:** 2026-10-02
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), entries dated 2026-09-25 and 2026-10-01. `docs/dispatch-safety-plan.md`
 covers the entries ranked above these.
@@ -67,7 +67,7 @@ after.
 - **No tickets are filed from findings.** The tracker contract has no `create`, and a
   finding needs a human to decide whether it is one ticket, three, or none.
 
-## Phase 1 — a resolution survives the base moving under it
+## Phase 1 — a resolution survives the base moving under it (`2ce6f58`)
 
 - [x] **1a. `resolveConflict` pins the base.** At the top, next to `head`
   (`slice-run.ts:1993`), read `onto = git rev-parse <baseBranch>`. Use `onto` for the
@@ -124,7 +124,7 @@ pass now. Three things differ from the text above:
   onto.
 - `README.md` gained a paragraph on the base moving (not listed in the phase).
 
-## Phase 2 — `--auto-resolve` without `--auto`
+## Phase 2 — `--auto-resolve` without `--auto` (`4b5c168`)
 
 - [x] **2a. The flag.** In `slice-run.ts:2719`:
   - `--auto-resolve` and `--no-auto-resolve` together: usage error, exit 64.
@@ -171,7 +171,7 @@ pass now. Three things differ from the text above:
   out once the agent has tried and failed.
 - An extra test covers that last case.
 
-## Phase 3 — the plan review's outcome is the run's outcome
+## Phase 3 — the plan review's outcome is the run's outcome (`ccb70b5`)
 
 - [x] **3a. The review counts its findings.** In `reviewPlan`'s prompt
   (`slice-run.ts:1463`), replace the "say exactly" sentence with a final line, as the
