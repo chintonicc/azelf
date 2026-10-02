@@ -1049,3 +1049,77 @@ describe("a gate that passes on a retry", () => {
     expect(r.out).not.toContain("landed on a retried gate");
   });
 });
+
+/**
+ * A parent is a heading over work, not work. Its children leave the ready set
+ * as they land, so they are counted wherever they are; naming the parent still
+ * runs it, and the plan says that it did.
+ */
+describe("a parent is not a slice", () => {
+  const PARENT = "## Parent\n\n#45 — the spec\n";
+
+  const spec = (childState: "open" | "closed"): Consumer => {
+    const fx = makeConsumer({});
+    fx.setTicket("45", { title: "Spec: the feature" });
+    fx.setTicket("47", { body: PARENT, state: "closed" });
+    fx.setTicket("48", { body: PARENT, state: childState });
+    return fx;
+  };
+
+  it("a bare plan leaves out a parent whose children are all closed, and says what to do", () => {
+    c = spec("closed");
+    const r = runDispatcher(c, ["--plan"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "⚠ #45 excluded — its 2 children are all closed. Close it, or remove ready.",
+    );
+    expect(r.out).toContain("Run it anyway with: azelf run 45");
+    expect(r.out).not.toContain("wave 1");
+  });
+
+  it("a bare plan counts the closed children of a parent that still has an open one", () => {
+    c = spec("open");
+    const r = runDispatcher(c, ["--plan"]);
+
+    expect(r.out).toContain(
+      "⚠ #45 excluded — named as Parent by #47 #48 (1 open)",
+    );
+    expect(r.out).toContain("#48  t");
+    expect(r.out).not.toContain("#45  Spec");
+  });
+
+  it("a parent the tracker knows natively is left out too, with its children outside the set", () => {
+    c = makeConsumer({});
+    c.setTicket("45", { children: ["47", "48"] });
+    c.setTicket("47", { state: "closed" });
+    c.setTicket("48", { state: "closed" });
+    const r = runDispatcher(c, ["--plan"]);
+
+    expect(r.out).toContain("⚠ #45 excluded — its 2 children are all closed.");
+  });
+
+  it("a named parent is planned, and the plan says it is one", () => {
+    c = spec("closed");
+    const r = runDispatcher(c, ["--plan", "45"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("#45  Spec: the feature");
+    expect(r.out).toContain(
+      "⚠ #45 is a parent (#47 #48, all closed) — running it as a slice because you named it",
+    );
+    expect(r.out).not.toContain("excluded");
+  });
+
+  it("a named ticket without the ready label is planned, and the plan says so", () => {
+    c = makeConsumer({});
+    c.setTicket("2", { ready: false });
+    c.setTicket("4", { ready: false });
+    const r = runDispatcher(c, ["--plan", "2", "3", "4"]);
+
+    expect(r.out).toContain(
+      "⚠ not labelled ready: #2 #4 — running them because you named them",
+    );
+    expect(runDispatcher(c, ["--plan", "3"]).out).not.toContain("not labelled");
+  });
+});

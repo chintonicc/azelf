@@ -64,6 +64,20 @@ describe("github() — the adapter that ships", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("parentClaims searches every state and returns id, state and body", () => {
+    const { gh } = fakeGh({
+      'issue list --state all --search "## Parent" in:body --limit 1000 --json number,state,body':
+        {
+          stdout:
+            '[{"number":47,"state":"CLOSED","body":"## Parent\\n\\n#45"},{"number":50,"state":"OPEN","body":null}]',
+        },
+    });
+    expect(github({ gh }).parentClaims?.()).toEqual([
+      { id: "47", state: "closed", body: "## Parent\n\n#45" },
+      { id: "50", state: "open", body: "" },
+    ]);
+  });
+
   it("get normalizes OPEN/CLOSED and carries title, labels and url", () => {
     const { gh } = fakeGh({
       "issue view 3 --json number,title,state,url,labels": {
@@ -406,7 +420,13 @@ describe("findEpics — which tickets are headings, not work", () => {
         "21": child("17"),
       }),
     );
-    expect(epics).toEqual([{ id: "17", children: ["18", "19", "20", "21"] }]);
+    expect(epics).toEqual([
+      {
+        id: "17",
+        children: ["18", "19", "20", "21"],
+        openChildren: ["18", "19", "20", "21"],
+      },
+    ]);
   });
 
   it("is empty when no ticket names a parent — the common case", () => {
@@ -430,7 +450,9 @@ describe("findEpics — which tickets are headings, not work", () => {
       ["17", "18", "19"],
       from({ "17": "", "18": "", "19": child("17") }, { "18": ["19"] }),
     );
-    expect(epics).toEqual([{ id: "18", children: ["19"] }]);
+    expect(epics).toEqual([
+      { id: "18", children: ["19"], openChildren: ["19"] },
+    ]);
   });
 
   it("still reads the prose when the tracker knows no hierarchy at all", () => {
@@ -440,7 +462,9 @@ describe("findEpics — which tickets are headings, not work", () => {
       ["17", "18"],
       from({ "17": "", "18": child("17") }, {}),
     );
-    expect(epics).toEqual([{ id: "17", children: ["18"] }]);
+    expect(epics).toEqual([
+      { id: "17", children: ["18"], openChildren: ["18"] },
+    ]);
   });
 
   it("ignores a ticket naming itself", () => {
@@ -458,8 +482,49 @@ describe("findEpics — which tickets are headings, not work", () => {
       }),
     );
     expect(epics).toEqual([
-      { id: "1", children: ["20"] },
-      { id: "2", children: ["10"] },
+      { id: "1", children: ["20"], openChildren: ["20"] },
+      { id: "2", children: ["10"], openChildren: ["10"] },
+    ]);
+  });
+
+  // Children leave the ready set as they land. Counted only inside the set, a
+  // spec whose tickets were all done became an ordinary wave-1 ticket.
+  it("counts native children outside the set, and reads which are still open", () => {
+    const epics = findEpics(["45"], {
+      ...from({ "45": "" }, { "45": ["47", "48", "49"] }),
+      state: (id) => (id === "48" ? "open" : "closed"),
+    });
+    expect(epics).toEqual([
+      { id: "45", children: ["47", "48", "49"], openChildren: ["48"] },
+    ]);
+  });
+
+  it("finds a parent named only by a closed ticket's body, through parentClaims", () => {
+    const epics = findEpics(["80"], {
+      ...from({ "80": "## Problem Statement\n\nA spec." }),
+      parentClaims: () => [
+        { id: "81", state: "closed", body: child("80") },
+        { id: "82", state: "closed", body: child("80") },
+        // A claim on a parent outside the set stays context.
+        { id: "90", state: "open", body: child("70") },
+        // GitHub's search matches the word, not the heading.
+        { id: "91", state: "open", body: "The parent of this is unclear." },
+      ],
+    });
+    expect(epics).toEqual([
+      { id: "80", children: ["81", "82"], openChildren: [] },
+    ]);
+  });
+
+  it("counts a child as open when its state cannot be read", () => {
+    const epics = findEpics(["45"], {
+      ...from({ "45": "" }, { "45": ["47"] }),
+      state: () => {
+        throw new Error("gone");
+      },
+    });
+    expect(epics).toEqual([
+      { id: "45", children: ["47"], openChildren: ["47"] },
     ]);
   });
 });

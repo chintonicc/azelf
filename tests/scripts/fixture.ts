@@ -87,8 +87,12 @@ export type FakeTicket = {
   title?: string;
   body?: string;
   state?: "open" | "closed";
-  /** Labels besides `ready`, which every fake ticket carries. */
+  /** Labels besides `ready`. */
   labels?: string[];
+  /** `false` takes the `ready` label off, and the ticket out of `listReady`. */
+  ready?: boolean;
+  /** What the fake tracker's `children` answers for this ticket. */
+  children?: string[];
 };
 
 export function makeConsumer(opts: {
@@ -213,7 +217,7 @@ import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringif
       join(AZELF, "index.ts"),
     )};
 const TICKETS = ${JSON.stringify(ticketsFile)};
-type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[] };
+type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[] };
 const all = (): Record<string, Fake> => JSON.parse(readFileSync(TICKETS, "utf8"));
 const ticket = (id: string) => ({
   title: ${JSON.stringify(opts.title ?? "t")},
@@ -225,19 +229,30 @@ const tracker: Tracker = {
   name: "Fake",
   idPattern: "^[0-9]+$",
   refTemplate: "#{n}",
-  listReady: () => [],
+  // Only what the tickets file names: an id a test passes on the command line
+  // without describing it exists for \`get\`, and is not listed.
+  listReady: () =>
+    Object.keys(all()).filter((id) => {
+      const t = ticket(id);
+      return t.state === "open" && t.ready !== false;
+    }),
   get: (id) => {
     const t = ticket(id);
     return {
       id,
       title: t.title,
       state: t.state,
-      labels: ["ready", ...(t.labels ?? [])],
+      labels: [...(t.ready === false ? [] : ["ready"]), ...(t.labels ?? [])],
       url: "",
     };
   },
   blockers: () => [],
   body: (id) => ticket(id).body,
+  children: (id) => ticket(id).children ?? [],
+  parentClaims: () =>
+    Object.keys(all())
+      .map((id) => ({ id, state: ticket(id).state, body: ticket(id).body }))
+      .filter((t) => /^## Parent/m.test(t.body)),
   close: (id, comment) => {
     appendFileSync(${JSON.stringify(closeFile)}, \`\${id}\\n\${comment}\\n\`);
     const next = all();

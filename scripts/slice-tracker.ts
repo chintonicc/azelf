@@ -7,6 +7,9 @@
  *   tracker.body(id)           # the ticket text — the spec a slice is built to
  *   tracker.close(id, comment) # the step that unblocks the next wave (see below)
  *
+ * and three optional ones: `children(id)` and `parentClaims()` for hierarchy,
+ * `addBlocker(id, blockerId)` for `--sync-edges`.
+ *
  * `slice.config.ts` names one under `tracker`; `github()` below is the adapter
  * that ships. Nothing here reads the config, on purpose — the config imports
  * this file's constructor, and a module that imported the config back would
@@ -116,6 +119,18 @@ export type Tracker = {
    * parent means there is no slice here at all.
    */
   children?(id: TicketId): TicketId[];
+  /**
+   * Every ticket, OPEN OR CLOSED, whose body has a `## Parent` section.
+   * Optional; the prose counterpart of `children`, for the hierarchy that
+   * exists only as a heading someone typed.
+   *
+   * It exists because a parent's children leave the ready set as they land.
+   * Read from the set alone, a spec whose tickets are all closed looks like an
+   * ordinary ticket with nothing under it, and gets a session of its own. One
+   * call per plan, not one per ticket. An adapter may return more than asked
+   * for: the caller runs `parentFromBody` over every body itself.
+   */
+  parentClaims?(): { id: TicketId; state: TicketState; body: string }[];
   /**
    * Record that `id` is blocked by `blockerId`. Optional, and NOTHING calls it
    * unless the human asked for it in so many words (`--sync-edges`): every
@@ -292,13 +307,20 @@ export function bodyOnlyBlockers(
   );
 }
 
-/** A ticket that other tickets in the same set hang under. */
-export type Epic = { id: TicketId; children: TicketId[] };
+/**
+ * A ticket that other tickets hang under. `openChildren` is the subset still
+ * open: empty means the epic is finished and only its label is left over.
+ */
+export type Epic = {
+  id: TicketId;
+  children: TicketId[];
+  openChildren: TicketId[];
+};
 
 /**
- * The tickets in `ids` that other tickets in `ids` hang under.
+ * The tickets in `ids` that other tickets hang under, wherever those are.
  *
- * Two sources, and the cheap one is not the trusted one. The `## Parent`
+ * Three sources, and the cheap one is not the trusted one. The `## Parent`
  * convention is read from bodies the dispatcher fetches anyway; a tracker that
  * models hierarchy natively answers `children()` and OVERRIDES the prose,
  * because structured data beats a heading someone typed. The prose path cannot
@@ -310,6 +332,19 @@ export type Epic = { id: TicketId; children: TicketId[] };
  * scheduling fact — it is not competing for a worktree, and excluding on it
  * would drop a runnable ticket because of a heading somewhere else entirely.
  *
+ * CHILDREN count wherever they are, and in whatever state. They used to count
+ * only inside the set, and that had a hole exactly where it mattered: children
+ * leave the ready set as they land, so a spec whose tickets were all done
+ * stopped being an epic and became a wave-1 ticket — a session opened on the
+ * whole spec. `children()` already returns closed children; `parentClaims()`
+ * is how the prose ones outside the set are found. A tracker with neither
+ * still sees the children in the set, as before.
+ *
+ * `state` answers for a child whose state nothing here has seen yet (a native
+ * child outside the set). Without it, or when it throws, the child counts as
+ * open: "this epic still has work under it" is the reading that is cheap to be
+ * wrong about.
+ *
  * Pure and injectable rather than reaching for the module's `tracker`, so the
  * inversion can be tested without a network or a config: `slice-run.ts` does
  * its work at import time and cannot host a testable function.
@@ -317,30 +352,56 @@ export type Epic = { id: TicketId; children: TicketId[] };
 export function findEpics(
   ids: TicketId[],
   from: Pick<Tracker, "idPattern" | "body"> &
-    Partial<Pick<Tracker, "children">>,
+    Partial<Pick<Tracker, "children" | "parentClaims">> & {
+      state?: (id: TicketId) => TicketState;
+    },
 ): Epic[] {
   const inSet = new Set(ids);
   const parentOf = new Map<TicketId, TicketId>();
+  const seenState = new Map<TicketId, TicketState>();
 
   for (const id of ids) {
     const named = parentFromBody(from.body(id), from.idPattern);
     if (named && inSet.has(named) && named !== id) parentOf.set(id, named);
   }
-  // Applied second so the tracker's own answer wins where it has one.
-  if (from.children) {
-    for (const id of ids) {
-      for (const kid of from.children(id)) {
-        if (inSet.has(kid) && kid !== id) parentOf.set(kid, id);
+  if (from.parentClaims) {
+    for (const claim of from.parentClaims()) {
+      seenState.set(claim.id, claim.state);
+      const named = parentFromBody(claim.body, from.idPattern);
+      if (named && inSet.has(named) && named !== claim.id) {
+        parentOf.set(claim.id, named);
       }
     }
   }
+  // Applied last so the tracker's own answer wins where it has one.
+  if (from.children) {
+    for (const id of ids) {
+      for (const kid of from.children(id)) {
+        if (kid !== id) parentOf.set(kid, id);
+      }
+    }
+  }
+
+  const isOpen = (id: TicketId): boolean => {
+    const seen = seenState.get(id);
+    if (seen) return seen === "open";
+    if (!from.state) return true;
+    try {
+      return from.state(id) === "open";
+    } catch {
+      return true;
+    }
+  };
 
   const byParent = new Map<TicketId, TicketId[]>();
   for (const [child, parent] of parentOf) {
     byParent.set(parent, [...(byParent.get(parent) ?? []), child]);
   }
   return [...byParent.entries()]
-    .map(([id, children]) => ({ id, children: children.sort(compareIds) }))
+    .map(([id, kids]) => {
+      const children = kids.sort(compareIds);
+      return { id, children, openChildren: children.filter(isOpen) };
+    })
     .sort((a, b) => compareIds(a.id, b.id));
 }
 
@@ -491,6 +552,31 @@ export function github(opts: GithubOptions = {}): Tracker {
         "--jq",
         "[.[] | {number}]",
       ]).map((c) => String(c.number));
+    },
+
+    parentClaims() {
+      // GitHub's search drops the `##` and matches the word, so this returns
+      // every issue with "parent" in its body. That is a superset, which is
+      // all the contract asks for: the caller reads the heading itself.
+      // Checked against a repo of 84 issues by filtering a full listing
+      // locally: 67 carried the heading and the search returned all 67.
+      // 1000 is the search API's own ceiling.
+      return call<{ number: number; state: string; body: string | null }[]>([
+        "issue",
+        "list",
+        "--state",
+        "all",
+        "--search",
+        '"## Parent" in:body',
+        "--limit",
+        "1000",
+        "--json",
+        "number,state,body",
+      ]).map((i) => ({
+        id: String(i.number),
+        state: stateOf(i.state),
+        body: i.body ?? "",
+      }));
     },
 
     addBlocker(id, blockerId) {

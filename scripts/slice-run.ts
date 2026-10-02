@@ -115,6 +115,7 @@ import { USAGE, VALUE_FLAGS, unknownFlag, wantsHelp } from "./slice-run-usage";
 import {
   type Epic,
   type TicketId,
+  type TicketInfo,
   bodyOnlyBlockers,
   compareIds,
   findEpics,
@@ -250,12 +251,25 @@ type MissingEdge = { id: TicketId; blockers: TicketId[] };
  */
 function loadTickets(explicit: TicketId[]): {
   tickets: Ticket[];
+  /** Parents left out of a bare run. Empty when ids were named. */
   epics: Epic[];
+  /** Parents that run anyway, because they were named. */
+  namedEpics: Epic[];
+  /** Named tickets without the ready label. */
+  unlabelled: TicketId[];
   missingEdges: MissingEdge[];
 } {
   const ids = explicit.length ? explicit : tracker.listReady(config.readyLabel);
 
-  if (ids.length === 0) return { tickets: [], epics: [], missingEdges: [] };
+  if (ids.length === 0) {
+    return {
+      tickets: [],
+      epics: [],
+      namedEpics: [],
+      unlabelled: [],
+      missingEdges: [],
+    };
+  }
 
   // One fetch per ticket, however many readers want the text: findEpics reads
   // every body for `## Parent` and the edge check below reads the same bodies
@@ -270,26 +284,44 @@ function loadTickets(explicit: TicketId[]): {
     return text;
   };
 
-  // Explicit ids are the user's own answer and override the plan, here as
-  // everywhere else — so the hierarchy is neither consulted nor paid for. That
-  // is also what makes the exclusion below recoverable rather than a dead end:
-  // `azelf run 17` runs #17.
-  const epics = explicit.length
-    ? []
-    : findEpics(ids, {
-        idPattern: tracker.idPattern,
-        body,
-        children: tracker.children?.bind(tracker),
-      });
+  // Cached for the same reason: a child's state is asked for by findEpics and
+  // the ticket itself is read again in the loop below.
+  const metas = new Map<TicketId, TicketInfo>();
+  const get = (id: TicketId): TicketInfo => {
+    const hit = metas.get(id);
+    if (hit) return hit;
+    const meta = tracker.get(id);
+    metas.set(id, meta);
+    return meta;
+  };
+
+  // The hierarchy is read for explicit ids too, but only a bare run excludes
+  // on it. Explicit ids are the user's own answer and override the plan, here
+  // as everywhere else, which is what makes the exclusion recoverable rather
+  // than a dead end: `azelf run 17` runs #17. It used to run it without a
+  // word, and a spec named among its own tickets then opened a session on the
+  // whole spec; now the plan says what was overridden (`printNamed`).
+  const found = findEpics(ids, {
+    idPattern: tracker.idPattern,
+    body,
+    children: tracker.children?.bind(tracker),
+    parentClaims: tracker.parentClaims?.bind(tracker),
+    state: (id) => get(id).state,
+  });
+  const epics = explicit.length ? [] : found;
   const excluded = new Set(epics.map((e) => e.id));
   const runnable = ids.filter((id) => !excluded.has(id));
   const inSet = new Set(runnable);
 
   const tickets: Ticket[] = [];
   const missingEdges: MissingEdge[] = [];
+  const unlabelled: TicketId[] = [];
   const lockLabel = config.exclusiveLockLabel;
   for (const id of runnable) {
-    const meta = tracker.get(id);
+    const meta = get(id);
+    if (explicit.length && !meta.labels.includes(config.readyLabel)) {
+      unlabelled.push(id);
+    }
     const declared = tracker.blockers(id);
     const stillBlocking = openBlockers(declared);
     // Against the FULL blocker list, closed ones included — an edge the plan
@@ -311,7 +343,20 @@ function loadTickets(explicit: TicketId[]): {
       exclusive: lockLabel !== undefined && meta.labels.includes(lockLabel),
     });
   }
-  return { tickets, epics, missingEdges };
+  return {
+    tickets,
+    epics,
+    namedEpics: explicit.length ? found : [],
+    unlabelled,
+    missingEdges,
+  };
+}
+
+/** "#47 #48 #49, 1 open" or "#47 #48 #49, all closed". */
+function childrenOf(e: Epic): string {
+  return `${e.children.map(ref).join(" ")}, ${
+    e.openChildren.length ? `${e.openChildren.length} open` : "all closed"
+  }`;
 }
 
 /**
@@ -325,15 +370,57 @@ function loadTickets(explicit: TicketId[]): {
 function printEpics(epics: Epic[]): void {
   for (const e of epics) {
     console.log("");
-    console.log(
-      `  ⚠ ${ref(e.id)} excluded — named as Parent by ${e.children
-        .map(ref)
-        .join(" ")}`,
-    );
-    console.log(
-      "     An epic closes when its children close; it is not a slice.",
-    );
+    if (e.openChildren.length > 0) {
+      console.log(
+        `  ⚠ ${ref(e.id)} excluded — named as Parent by ${e.children
+          .map(ref)
+          .join(" ")} (${e.openChildren.length} open)`,
+      );
+      console.log(
+        "     An epic closes when its children close; it is not a slice.",
+      );
+    } else {
+      // The children left the ready set as they landed, and the parent kept
+      // its label. Nothing is wrong with the plan; the tracker needs tidying.
+      const n = e.children.length;
+      console.log(
+        `  ⚠ ${ref(e.id)} excluded — ${
+          n === 1
+            ? "its one child is closed"
+            : `its ${n} children are all closed`
+        }. Close it, or remove ${config.readyLabel}.`,
+      );
+    }
     console.log(`     Run it anyway with: azelf run ${e.id}`);
+  }
+}
+
+/**
+ * What naming ids overrode. Explicit ids win over the hierarchy and the ready
+ * label, and they should, but not silently: `azelf run 2 4 5` on five
+ * unlabelled tickets used to read exactly like a plan the tracker agreed with.
+ *
+ * Printed after the waves, next to the `proceed?` prompt, because that is
+ * where the decision to go ahead is made.
+ */
+function printNamed(namedEpics: Epic[], unlabelled: TicketId[]): void {
+  if (namedEpics.length === 0 && unlabelled.length === 0) return;
+  console.log("");
+  for (const e of namedEpics) {
+    console.log(
+      `  ⚠ ${ref(e.id)} is a parent (${childrenOf(
+        e,
+      )}) — running it as a slice because you named it`,
+    );
+  }
+  if (unlabelled.length > 0) {
+    console.log(
+      `  ⚠ not labelled ${config.readyLabel}: ${unlabelled
+        .map(ref)
+        .join(" ")} — running ${
+        unlabelled.length === 1 ? "it" : "them"
+      } because you named ${unlabelled.length === 1 ? "it" : "them"}`,
+    );
   }
 }
 
@@ -2597,7 +2684,8 @@ if (flag("--gates")) {
 }
 
 console.log(`── reading the plan from ${tracker.name} ──────────────────────`);
-const { tickets, epics, missingEdges } = loadTickets(explicit);
+const { tickets, epics, namedEpics, unlabelled, missingEdges } =
+  loadTickets(explicit);
 // Before the empty check, not after: if every ready ticket turned out to be a
 // heading over the others, "nothing to run" is true and useless. The reason has
 // to come first or the run looks broken.
@@ -2622,6 +2710,7 @@ if (flag("--sync-edges")) {
 assignWaves(tickets);
 const width = printTree(tickets);
 printMissingEdges(missingEdges);
+printNamed(namedEpics, unlabelled);
 const maxParallel = Number(value("--max") ?? width);
 
 if (planOnly) process.exit(0);
