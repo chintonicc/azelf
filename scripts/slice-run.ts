@@ -3949,6 +3949,10 @@ let lastRoundLine = "";
 let lastRoundLineAt = 0;
 // The exclusiveLockLabel line last printed, so a long wait says it once.
 let lastLabelLine = "";
+// The DB lock block last printed, without its round number, and when. Empty
+// once the lock is seen free, which is also when "DB lock free" is said.
+let lastLockBlock = "";
+let lastLockBlockAt = 0;
 // Set when the run stopped on an error rather than finishing or parking: the
 // ending prints the resume command for it too.
 let stoppedOnError = false;
@@ -4027,23 +4031,35 @@ try {
     // frees — so the only tickets held back are the ones that already tried.
     // The holder text is printed whole, indented, because it can be more than
     // a name: when worktrees are dirty with no claim it carries the diagnosis.
+    // Like the round line, it is printed when it changes or on the heartbeat:
+    // one holder used to fill 28 rounds with the same block. "DB lock free"
+    // then says when it ended, which silence otherwise would have to.
     const holder = dbLockHolder();
     const lockParked = tickets.filter(
       (t) => t.open && holder !== "" && isWaitingOnLock(t.id),
     );
     if (holder) {
-      console.log(
-        `\n[round ${round}] DB lock held by:\n${holder
-          .split("\n")
-          .map((l) => `    ${l}`)
-          .join("\n")}${
-          lockParked.length
-            ? `\n  waiting for it: ${lockParked
-                .map((t) => ref(t.id))
-                .join(", ")} — relaunched when it frees`
-            : ""
-        }`,
-      );
+      const lockBlock = `DB lock held by:\n${holder
+        .split("\n")
+        .map((l) => `    ${l}`)
+        .join("\n")}${
+        lockParked.length
+          ? `\n  waiting for it: ${lockParked
+              .map((t) => ref(t.id))
+              .join(", ")} — relaunched when it frees`
+          : ""
+      }`;
+      if (
+        lockBlock !== lastLockBlock ||
+        Date.now() - lastLockBlockAt >= heartbeatMs
+      ) {
+        console.log(`\n[round ${round}] ${lockBlock}`);
+        lastLockBlock = lockBlock;
+        lastLockBlockAt = Date.now();
+      }
+    } else if (lastLockBlock) {
+      console.log(`\n[round ${round}] DB lock free`);
+      lastLockBlock = "";
     }
 
     const up = tickets.filter((t) => t.open && occupied(t.id));

@@ -117,6 +117,70 @@ describe("the round line", () => {
 });
 
 /**
+ * The DB lock block follows the round line's rule: printed when it changes or
+ * on the heartbeat, plus one "DB lock free" when a held lock goes. #44 holds
+ * the lock from its own worktree while #40's session keeps the run going.
+ */
+describe("the DB lock block", () => {
+  const holding = () => {
+    c = makeConsumer({ lockPaths: ["db"], worktrees: [40, 44] });
+    sessions.push(fakeSession(c, 40));
+    return c;
+  };
+  const start = (fx: Consumer) =>
+    startDispatcher(fx, ["-y", "--interval", "1", "40"], {
+      env: { SLICE_HEARTBEAT_SECONDS: "6" },
+    });
+  const count = (text: string, s: string) => text.split(s).length - 1;
+  const roundOf = (text: string, s: string) =>
+    Number(text.match(new RegExp(`\\[round (\\d+)\\] ${s}`))?.[1]);
+
+  it("is printed once while the same holder keeps it, and the free once", async () => {
+    const fx = holding();
+    sh(fx.wt(44), "./scripts/db-lock.sh claim");
+    d = start(fx);
+    await d.until("DB lock held by:");
+    // About four rounds with the same holder: still one block.
+    await new Promise((r) => setTimeout(r, 4_500));
+    expect(count(d.output(), "DB lock held by:")).toBe(1);
+    expect(d.output()).toContain("ticket/44, holds the DB lock since");
+
+    sh(fx.wt(44), "./scripts/db-lock.sh release");
+    await d.until("DB lock free");
+    await new Promise((r) => setTimeout(r, 2_500));
+    const out = d.output();
+    expect(count(out, "DB lock held by:")).toBe(1);
+    expect(count(out, "DB lock free")).toBe(1);
+    expect(
+      roundOf(out, "DB lock free") - roundOf(out, "DB lock held by:"),
+    ).toBeGreaterThanOrEqual(3);
+  }, 60_000);
+
+  it("is printed again when the lock is claimed again after it freed", async () => {
+    const fx = holding();
+    sh(fx.wt(44), "./scripts/db-lock.sh claim");
+    d = start(fx);
+    await d.until("DB lock held by:");
+    sh(fx.wt(44), "./scripts/db-lock.sh release");
+    await d.until("DB lock free");
+    sh(fx.wt(44), "./scripts/db-lock.sh claim");
+    await d.until(/DB lock free[\s\S]*DB lock held by:/);
+
+    expect(count(d.output(), "DB lock held by:")).toBe(2);
+    expect(count(d.output(), "DB lock free")).toBe(1);
+  }, 60_000);
+
+  it("is never said free when it was never held", async () => {
+    const fx = holding();
+    d = start(fx);
+    await d.until("[round 1] 1 running");
+    await new Promise((r) => setTimeout(r, 2_500));
+    // The header says "DB lock: free"; no round says anything about it.
+    expect(d.output()).not.toMatch(/\[round \d+\] DB lock/);
+  }, 60_000);
+});
+
+/**
  * A tracker read that fails mid-run is no news: the ticket keeps its last
  * state and the round goes on. Only a tracker that has stopped answering
  * altogether ends the run, and then through its normal ending.

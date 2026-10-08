@@ -258,6 +258,8 @@ every ten minutes so a quiet run is not mistaken for a hung one:
 ```
 
 `SLICE_HEARTBEAT_SECONDS` sets that interval, and `0` prints it every round.
+The `DB lock held by:` block follows the same rule. When a held lock frees, the run
+says `[round N] DB lock free` once.
 
 The line is counted after the round's land. `blocked` means a ticket has an open
 blocker and nothing else. Two more counts appear only when they are not zero:
