@@ -74,7 +74,10 @@ The life of one slice, end to end:
    everything with no open blockers, wave 2 is everything blocked only by wave 1,
    and so on — and prints the tree with the reason each held-back ticket is held.
 2. **Prep.** For each ticket in the current wave it creates a branch from
-   `baseBranch` and a git worktree outside the repo, copies in the gitignored files
+   `baseBranch` (local `baseBranch` when it is ahead of origin, since the first
+   land pushes those commits anyway, and the plan names them; a `baseBranch` that
+   has diverged from origin stops the dispatch) and a git worktree outside the
+   repo, copies in the gitignored files
    a fresh worktree never gets (`provisionCopy`), and writes the ticket body to
    `.slice-ticket.md` **inside the worktree**.
 3. **Launch.** The launcher opens a terminal in that worktree running your agent

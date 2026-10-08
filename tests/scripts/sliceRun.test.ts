@@ -17,6 +17,7 @@ import {
   makeConsumer,
   runDispatcher,
   sh,
+  shResult,
   startDispatcher,
   startScript,
 } from "./fixture";
@@ -1979,6 +1980,74 @@ describe("a ticket for a person (humanLabel)", () => {
     expect(runDispatcher(c, ["--plan"]).out).toContain(
       "humanLabel is the same as readyLabel",
     );
+  });
+});
+
+/**
+ * A slice is cut from what will land: local main when it is ahead of origin,
+ * because a land rebases onto local main and pushes it. The plan says so
+ * before anything is cut, and a main that has diverged stops the dispatch.
+ */
+describe("the base branch ahead of origin", () => {
+  it("is where a new slice is cut from, and the plan names the commits", () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("40", {});
+    commitIn(c.main, "local.txt", "x\n", "feat: only on local main");
+    const sha = git(c.main, "rev-parse", "--short", "HEAD");
+    const r = runDispatcher(c, ["--once", "-y", "40"]);
+
+    expect(r.out).toContain(
+      `ℹ main is 1 commit ahead of origin/main. Slices are cut from it, and the first land pushes it:\n      ${sha} feat: only on local main\n`,
+    );
+    expect(r.out).toContain(
+      "on new branch ticket/40, from local main (1 commit(s) ahead of origin — the first land pushes them)",
+    );
+    expect(git(c.wt(40), "log", "--format=%s")).toContain(
+      "feat: only on local main",
+    );
+  });
+
+  it("stops a dispatch when main and origin have diverged, and the prep refuses too", () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("40", {});
+    const other = join(c.root, "other");
+    git(c.root, "clone", "-q", join(c.root, "remote"), other);
+    commitIn(other, "theirs.txt", "x\n", "feat: theirs");
+    git(other, "push", "-q", "origin", "main");
+    commitIn(c.main, "ours.txt", "x\n", "feat: ours");
+
+    const LINE =
+      "✗ main and origin/main have diverged (1 and 1 commits), so no land could push. Pull or rebase main first.";
+    const plan = runDispatcher(c, ["--plan", "40"]);
+    expect(plan.code).toBe(0);
+    expect(plan.out).toContain(LINE);
+
+    const r = runDispatcher(c, ["-y", "40"]);
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(LINE);
+    expect(r.out).toContain(
+      "not dispatching: main and origin/main have diverged.",
+    );
+    expect(r.out).not.toContain("prepping #40");
+    expect(existsSync(c.wt(40))).toBe(false);
+
+    const prep = shResult(c.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(prep.ok).toBe(false);
+    expect(prep.out).toContain(
+      "error: main and origin/main have diverged (1 and 1 commits), so no land could push.",
+    );
+    expect(existsSync(c.wt(40))).toBe(false);
+  });
+
+  it("says nothing when main is level with origin", () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("40", {});
+    const r = runDispatcher(c, ["--once", "-y", "40"]);
+
+    expect(r.out).toContain("prepping #40");
+    expect(r.out).not.toContain("ahead of origin");
+    expect(r.out).not.toContain("diverged");
+    expect(r.out).toContain("on new branch ticket/40\n");
   });
 });
 

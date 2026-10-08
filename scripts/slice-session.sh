@@ -268,8 +268,32 @@ else
     git worktree add "$worktree_path" -b "$branch" "origin/$branch"
     echo "✓ created worktree at $worktree_path, resuming previously-pushed branch origin/$branch"
   else
-    git worktree add "$worktree_path" -b "$branch" "origin/$SLICE_BASE_BRANCH"
-    echo "✓ created worktree at $worktree_path on new branch $branch"
+    # Cut from what will land. A land rebases onto LOCAL $SLICE_BASE_BRANCH
+    # and pushes it, so commits that are only local go out with the first
+    # land either way. Cut from origin, a slice did not have them: a ticket
+    # whose file was changed two local commits ago was written against the
+    # old file. So local when it is ahead, origin when local is behind (it
+    # catches up at the next land's rebase), and nothing when the two have
+    # diverged, because no land could push.
+    cut_from="origin/$SLICE_BASE_BRANCH"
+    cut_note=""
+    local_base="refs/heads/$SLICE_BASE_BRANCH"
+    origin_base="refs/remotes/origin/$SLICE_BASE_BRANCH"
+    if git show-ref --verify --quiet "$local_base"; then
+      if git merge-base --is-ancestor "$origin_base" "$local_base"; then
+        cut_from="$local_base"
+        ahead=$(git rev-list --count "$origin_base..$local_base")
+        if [[ "$ahead" -gt 0 ]]; then
+          cut_note=", from local $SLICE_BASE_BRANCH ($ahead commit(s) ahead of origin — the first land pushes them)"
+        fi
+      elif ! git merge-base --is-ancestor "$local_base" "$origin_base"; then
+        echo "error: $SLICE_BASE_BRANCH and origin/$SLICE_BASE_BRANCH have diverged ($(git rev-list --count "$origin_base..$local_base") and $(git rev-list --count "$local_base..$origin_base") commits), so no land could push." >&2
+        echo "       $SLICE_BASE_BRANCH is at $(git rev-parse --short "$local_base"), origin/$SLICE_BASE_BRANCH at $(git rev-parse --short "$origin_base"). Pull or rebase $SLICE_BASE_BRANCH first; no worktree was created." >&2
+        exit 1
+      fi
+    fi
+    git worktree add "$worktree_path" -b "$branch" "$cut_from"
+    echo "✓ created worktree at $worktree_path on new branch $branch$cut_note"
   fi
 fi
 

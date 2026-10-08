@@ -582,6 +582,67 @@ function refuseOverBodyBlockers(dispatching: boolean): void {
 }
 
 /**
+ * The base branch against origin's, said before anything is cut. A slice is
+ * cut from local `baseBranch` when it is ahead (see slice-session.sh), and the
+ * first land pushes those commits; neither was printed anywhere, and a run
+ * once cut a ticket without two local commits it needed. Ahead: which
+ * commits. Diverged: no land could push, so a dispatch stops here. Behind or
+ * level: nothing. No `origin` at all: nothing either, there is nothing to
+ * push to.
+ */
+function noteBaseAgainstOrigin(dispatching: boolean): void {
+  if (!run(["git", "remote", "get-url", "origin"], { allowFail: true }).ok) {
+    return;
+  }
+  const fetched = run(["git", "fetch", "-q", "origin", baseBranch], {
+    allowFail: true,
+  });
+  if (!fetched.ok) {
+    console.log(
+      `\n  couldn't fetch origin/${baseBranch} — comparing against the last fetch: ${errorLine(
+        fetched.out,
+      )}`,
+    );
+  }
+  const local = `refs/heads/${baseBranch}`;
+  const remote = `refs/remotes/origin/${baseBranch}`;
+  const count = (range: string) => {
+    const r = run(["git", "rev-list", "--count", range], { allowFail: true });
+    return r.ok ? Number(r.out) : 0;
+  };
+  const ahead = count(`${remote}..${local}`);
+  const behind = count(`${local}..${remote}`);
+  if (ahead === 0) return;
+  if (behind > 0) {
+    console.log(
+      `\n  ✗ ${baseBranch} and origin/${baseBranch} have diverged (${ahead} and ${behind} commits), so no land could push. Pull or rebase ${baseBranch} first.`,
+    );
+    if (dispatching) {
+      console.log(
+        `\nnot dispatching: ${baseBranch} and origin/${baseBranch} have diverged.`,
+      );
+      process.exit(1);
+    }
+    return;
+  }
+  const subjects = run(
+    ["git", "log", "--format=%h %s", "-n", "5", `${remote}..${local}`],
+    { allowFail: true },
+  ).out;
+  console.log(
+    `\n  ℹ ${baseBranch} is ${ahead} commit${
+      ahead === 1 ? "" : "s"
+    } ahead of origin/${baseBranch}. Slices are cut from it, and the first land pushes ${
+      ahead === 1 ? "it" : "them"
+    }:`,
+  );
+  for (const line of subjects.split("\n").filter(Boolean)) {
+    console.log(`      ${line}`);
+  }
+  if (ahead > 5) console.log(`      … and ${ahead - 5} more`);
+}
+
+/**
  * Write the claimed edges the tracker is missing, one confirmation for the lot.
  *
  * This is the only write azelf makes to a tracker that is not a close-on-land,
@@ -3703,6 +3764,7 @@ const width = printTree(tickets);
 const ignoreBodyBlockers = flag("--ignore-body-blockers");
 printMissingEdges(missingEdges, tickets, ignoreBodyBlockers);
 printNamed(namedEpics, unlabelled, tickets);
+noteBaseAgainstOrigin(!planOnly);
 if (missingEdges.length > 0 && !ignoreBodyBlockers) {
   refuseOverBodyBlockers(!planOnly);
 }
