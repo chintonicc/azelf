@@ -976,9 +976,9 @@ attempt is added as `## Attempt k — <date> HH:MM`, newest last, so the BLOCK t
 parked a slice is still there after the review that later passed it. A blocked land
 names its file on the line under the ✗, as `review: /…/.slice-reviews/ticket-14.md`.
 
-**The plan-level review is the run's last word.** When review is on and every ticket
-has closed, the agent reads the whole plan as one diff, for what no per-slice review
-can see: the seam between slices. Everything has landed by then, so it cannot block.
+**The plan-level review is the run's last word.** When review is on, every ticket
+has closed, and two or more slices landed in the run, the agent reads the whole plan
+as one diff, for what no per-slice review can see: the seam between slices. Everything has landed by then, so it cannot block.
 It ends on `FINDINGS: <n>`, and the run ends on one of:
 
 ```
@@ -986,6 +986,10 @@ It ends on `FINDINGS: <n>`, and the run ends on one of:
   plan review: 2 findings, all of it already landed → /…/.slice-reviews/plan-<stamp>.md
   plan review: no result — it did not return, or gave no count → /…/.slice-reviews/plan-<stamp>.md
 ```
+
+With one slice landed there is no seam, so no agent is asked. The run says
+`plan review: skipped — one slice landed in this run (#87), and its own review covered it.`
+With none landed it says nothing.
 
 The last two exit 2. A review with no count is not read as a clean one, the same way
 a spec review with no `VERDICT:` line is read as BLOCK. azelf files nothing from the

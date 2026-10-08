@@ -6,6 +6,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -1381,19 +1382,31 @@ describe("the plan-level review's outcome", () => {
     "reviewer",
   ];
 
-  const landed = (plan: string, flags: string[] = []) => {
-    c = makeConsumer({ worktrees: [40], remote: true, review: reviewer(plan) });
-    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
-    sh(c.wt(40), "./scripts/slice-done.sh");
+  /** Two slices by default: the plan review needs a seam to read. */
+  const landed = (
+    plan: string,
+    flags: string[] = [],
+    slices: number[] = [40, 41],
+  ) => {
+    c = makeConsumer({
+      worktrees: slices,
+      remote: true,
+      review: reviewer(plan),
+    });
+    for (const n of slices) {
+      commitIn(c.wt(n), `f${n}.txt`, `${n}\n`, `feat: ${n}`);
+      sh(c.wt(n), "./scripts/slice-done.sh");
+    }
     const r = runDispatcher(c, [
       "--auto",
       "-y",
       "--interval",
       "1",
       ...flags,
-      "40",
+      ...slices.map(String),
     ]);
-    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    const log = git(c.main, "log", "--format=%s");
+    for (const n of slices) expect(log).toContain(`feat: ${n}`);
     return { ...r, last: r.stdout.trimEnd().split("\n").pop() ?? "" };
   };
 
@@ -1434,6 +1447,20 @@ describe("the plan-level review's outcome", () => {
     const r = landed('echo "FINDINGS: 2"', ["--no-review"]);
     expect(r.code).toBe(0);
     expect(r.out).not.toContain("plan review:");
+  });
+
+  it("asks no agent when one slice landed, and says why", () => {
+    const asked = join(
+      tmpdir(),
+      `azelf-plan-asked-${process.pid}-${Date.now()}`,
+    );
+    const r = landed(`touch ${asked}; echo "FINDINGS: 0"`, [], [40]);
+    expect(existsSync(asked), "the reviewer was asked").toBe(false);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("── plan-level review");
+    expect(r.last).toBe(
+      "plan review: skipped — one slice landed in this run (#40), and its own review covered it.",
+    );
   });
 });
 

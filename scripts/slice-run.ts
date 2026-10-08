@@ -2178,6 +2178,20 @@ type PlanReview = {
 
 function reviewPlan(tickets: Ticket[], base: string): PlanReview | null {
   if (!reviewEnabled) return null;
+  // The seam between slices needs two slices. With one, its own review read
+  // everything this would; on consumer-a the agent said as much ("Cross-slice
+  // problems need at least two slices … FINDINGS: 0") after a full call.
+  if (landedRanges.size < 2) {
+    const [only] = landedRanges.keys();
+    if (only !== undefined) {
+      console.log(
+        `\nplan review: skipped — one slice landed in this run (${ref(
+          only,
+        )}), and its own review covered it.`,
+      );
+    }
+    return null;
+  }
   const range = `${base}...${baseBranch}`;
   const diff = diffFor(range, repoRoot);
   if (diff === "(empty diff)") return null;
@@ -3874,7 +3888,7 @@ console.log(
         reviewBlocks
           ? ", and a failing SPEC review blocks it (--no-review to disable)"
           : " — advisory only, a human already said done"
-      }; plan-level review when the graph empties (findings exit 2).`
+      }; plan-level review when the graph empties and two or more slices landed (findings exit 2).`
     : "  review: OFF — nothing reads the diff before it lands. --review to enable.",
 );
 if (lockEnabled) {
