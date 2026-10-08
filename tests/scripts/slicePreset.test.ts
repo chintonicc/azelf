@@ -151,6 +151,11 @@ describe("the generated config", () => {
     );
   });
 
+  it("labels a person's tickets, so they are never dispatched", () => {
+    pkg({});
+    expect(gen()).toContain('humanLabel: "ready-for-human"');
+  });
+
   it("imports from the scoped package name", () => {
     pkg({});
     expect(gen()).toContain('from "@chintonicc/azelf"');

@@ -11,7 +11,7 @@
 #   n="$(slice_ticket_from_branch "$branch")" # → 42, or non-zero if it doesn't parse
 #   slice_ref 42                             # → #42 (or ENG-42 — the tracker's refTemplate)
 #
-#   slice_tracker_get 42            # → state<TAB>ready<TAB>title, one line
+#   slice_tracker_get 42            # → state<TAB>ready<TAB>human<TAB>title, one line
 #   slice_tracker_open_blockers 42  # → 0
 #   slice_tracker_brief 42          # → the .slice-ticket.md text
 #   slice_tracker_parent 42         # → the .slice-parent.md text, or nothing
@@ -22,6 +22,7 @@
 #   SLICE_WORKTREE_DIR SLICE_READY_LABEL SLICE_START_PROMPT
 #   SLICE_TRACKER_NAME SLICE_TICKET_ID_PATTERN SLICE_TICKET_REF_TEMPLATE
 #   SLICE_LAUNCHER_NAME SLICE_LAUNCHER_STARTS SLICE_EXCLUSIVE_LOCK_LABEL
+#   SLICE_HUMAN_LABEL
 #   SLICE_EXCLUSIVE_LOCK_PATHS[] SLICE_PROVISION_COPY[]
 #
 # The tracker's METHODS are not exported — they are functions, like the gates.

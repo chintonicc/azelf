@@ -366,6 +366,12 @@ export default {
   readyLabel: "ready-for-agent",
 
   /**
+   * Tickets only a person can do. They stay in the plan and hold their
+   * dependents, and are never given to an agent, even when named.
+   */
+  humanLabel: "ready-for-human",
+
+  /**
    * Paths only ONE worktree may hold changes to at a time — the lock. \`[]\`
    * makes it a no-op, which is right almost everywhere. Set it only for a
    * genuinely shared mutable resource: one live database, one generated

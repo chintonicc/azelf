@@ -85,6 +85,16 @@ export type SliceConfig = {
    * an error, since a label with nothing to protect is a typo.
    */
   exclusiveLockLabel?: string;
+  /**
+   * The tracker label on tickets only a person can do: a check on a device,
+   * a decision, a sign-off. Optional; unset, every ticket is agent work.
+   *
+   * Such a ticket is never dispatched, even when named on the command line.
+   * It stays in the plan as "waiting on a human" and holds its dependents
+   * until someone closes it. A run whose remaining work all waits on one
+   * stops and prints the command that picks it up again.
+   */
+  humanLabel?: string;
   /** Gitignored files copied into each new worktree. */
   provisionCopy: string[];
   /**
@@ -344,6 +354,16 @@ function validate(c: SliceConfig): SliceConfig {
     if (!c.exclusiveLockPaths?.length) {
       bad(
         "exclusiveLockLabel is set but exclusiveLockPaths is empty — the label has nothing to protect",
+      );
+    }
+  }
+  if (c.humanLabel !== undefined) {
+    if (typeof c.humanLabel !== "string" || !c.humanLabel) {
+      bad("humanLabel must be a non-empty label name, or left out");
+    }
+    if (c.humanLabel === c.readyLabel) {
+      bad(
+        "humanLabel is the same as readyLabel — one label cannot mean both an agent's ticket and a person's",
       );
     }
   }
@@ -636,6 +656,7 @@ export function shellAssignments(): string {
     shArray("SLICE_WRAP_COMMAND", config.wrapCommand ?? []),
     shArray("SLICE_EXCLUSIVE_LOCK_PATHS", config.exclusiveLockPaths),
     `SLICE_EXCLUSIVE_LOCK_LABEL=${shq(config.exclusiveLockLabel ?? "")}`,
+    `SLICE_HUMAN_LABEL=${shq(config.humanLabel ?? "")}`,
     shArray("SLICE_PROVISION_COPY", config.provisionCopy),
   ].join("\n");
 }
@@ -645,7 +666,8 @@ export function shellAssignments(): string {
  * without jq. Exit 64 for a usage error, 1 for a tracker failure (message on
  * stderr, nothing on stdout — so a `$(…)` capture is empty, never half a line).
  *
- *   get <id>            state<TAB>ready<TAB>title   (ready: carries readyLabel)
+ *   get <id>            state<TAB>ready<TAB>human<TAB>title
+ *                       (ready: carries readyLabel; human: carries humanLabel)
  *   open-blockers <id>  the number of blockers still open, as an integer
  *   brief <id>          the .slice-ticket.md text — title, url, body
  *   parent <id>         the same for the ticket its body names under
@@ -673,7 +695,14 @@ function trackerCli(args: string[]): never {
       case "get": {
         const t = tracker.get(id);
         const ready = t.labels.includes(config.readyLabel);
-        console.log([t.state, String(ready), terminalSafe(t.title)].join("\t"));
+        const human =
+          config.humanLabel !== undefined &&
+          t.labels.includes(config.humanLabel);
+        console.log(
+          [t.state, String(ready), String(human), terminalSafe(t.title)].join(
+            "\t",
+          ),
+        );
         break;
       }
       case "open-blockers":

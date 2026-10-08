@@ -32,6 +32,11 @@ Run `--sync-edges -y` right after filing tickets and the question never comes up
 **Naming ids overrides both the label and the hierarchy**, and the plan says so with
 a `⚠` line for each. Read those before you answer `proceed?`.
 
+**A person's ticket is never a slice**, named or not. With `humanLabel` set (`init`
+writes `ready-for-human`), such a ticket stays in the plan as `[waiting on a human]`
+and holds its dependents. A run where only those are left stops and prints the
+command to pick it up after someone closes them.
+
 They always come from **the repo you are standing in** — `gh` resolves the owner and
 name from the git remote of the working directory, so there is nothing to configure
 and no way for one repo's tickets to leak into another's run. The ticket body is then

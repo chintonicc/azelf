@@ -204,3 +204,50 @@ describe("the start prompt says who declares the slice done", () => {
     expect(prompt).not.toContain("a human releases this slice");
   }, 60_000);
 });
+
+/**
+ * The ticket checks a prep runs before anything is cut. A ticket named on the
+ * dispatcher's command line without the ready label comes with `--named`, and
+ * is prepped; a person's ticket (`humanLabel`) is refused either way.
+ */
+describe("which tickets a prep refuses", () => {
+  /** Preps #40 as the fake tracker describes it, with each set of flags. */
+  function prep(ticket: { ready?: boolean; labels?: string[] }) {
+    const c = makeConsumer({
+      remote: true,
+      agent: ["true"],
+      configExtra: 'humanLabel: "human",',
+    });
+    fx = c;
+    c.setTicket("40", ticket);
+    return (...flags: string[]) =>
+      shResult(
+        c.main,
+        `./scripts/slice-session.sh 40 --prep-only ${flags.join(" ")}`,
+      );
+  }
+
+  it("refuses a ticket without the ready label, unless it was named", () => {
+    const run = prep({ ready: false });
+    const refused = run();
+    expect(refused.ok).toBe(false);
+    expect(refused.out).toContain("error: #40 is missing the 'ready' label.");
+
+    const named = run("--named");
+    expect(named.ok, named.out).toBe(true);
+    expect(named.out).toContain(
+      "has no open blockers — not labelled ready, run because it was named",
+    );
+    expect(named.out).toContain("✓ prepped");
+  }, 60_000);
+
+  it("refuses a person's ticket, named or not", () => {
+    const run = prep({ labels: ["human"] });
+    for (const r of [run(), run("--named")]) {
+      expect(r.ok).toBe(false);
+      expect(r.out).toContain(
+        "error: #40 is labelled human — a person does this one, not a session.",
+      );
+    }
+  }, 60_000);
+});

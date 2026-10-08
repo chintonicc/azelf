@@ -265,6 +265,9 @@ and `N queued` for slices that could start but have no slot, no disk or no lock:
 [round 14] 1 running · 2 to land · 1 queued · 0 blocked · 4 open — land one to advance
 ```
 
+`N waiting on a human` appears the same way, for tickets held by a `humanLabel`
+ticket (see [Epics are excluded from the plan](#epics-are-excluded-from-the-plan)).
+
 A tracker read that fails mid-run (a `gh` call that times out, an `EOF`, a VPN
 reconnecting) does not end the run. The ticket keeps its last state, the run says so
 once, and once more when the tracker answers again:
@@ -349,6 +352,7 @@ export default {
 | `readyLabel` | `string` | issue label marking a ticket runnable |
 | `exclusiveLockPaths` | `string[]` | paths only one worktree may hold changes to; `[]` disables |
 | `exclusiveLockLabel` | `string?` | tracker label on tickets that will touch `exclusiveLockPaths`; they are started one at a time. Needs `exclusiveLockPaths` |
+| `humanLabel` | `string?` | tracker label on tickets only a person can do. They are never dispatched, even when named, and they hold their dependents until closed. `init` writes `ready-for-human` |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
@@ -519,6 +523,27 @@ you overrode, below the waves:
   ⚠ #17 is a parent (#18 #19 #20 #21, all closed) — running it as a slice because you named it
   ⚠ not labelled ready-for-agent: #2 #4 — running them because you named them
 ```
+
+Except a person's ticket. With `humanLabel` set, a ticket carrying it is never given
+to a session, named or not. It stays in the plan, marked `[waiting on a human]`, and
+holds its dependents until someone closes it:
+
+```
+  ⚠ #99 is labelled ready-for-human — not starting it; #105 waits until it is closed
+```
+
+A run whose remaining work all waits on a person stops, rather than waiting days:
+
+```
+  nothing can advance — what is left waits on a human:
+    #99  ready-for-human — blocks #105
+  Close it when done, then pick the run up again:
+
+    bunx azelf run -y 99 105
+```
+
+A blocker outside the run's set is read again every round, so a ticket held by one
+starts the round after a person, or another dispatcher, closes it.
 
 #### A claimed blocker stops the dispatch, and is never assumed
 

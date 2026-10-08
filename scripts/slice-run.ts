@@ -235,6 +235,10 @@ type Ticket = {
   wave: number;
   /** Carries `exclusiveLockLabel`: scheduled one at a time, see `runnable`. */
   exclusive: boolean;
+  /** Carries `humanLabel`: a person's ticket, never dispatched. */
+  human: boolean;
+  /** The subset of `foreignBlockers` that carry `humanLabel`. */
+  foreignHuman: TicketId[];
 };
 
 /**
@@ -269,7 +273,7 @@ function loadTickets(explicit: TicketId[]): {
   epics: Epic[];
   /** Parents that run anyway, because they were named. */
   namedEpics: Epic[];
-  /** Named tickets without the ready label. */
+  /** Named tickets without the ready label, and without `humanLabel`. */
   unlabelled: TicketId[];
   missingEdges: MissingEdge[];
 } {
@@ -331,9 +335,13 @@ function loadTickets(explicit: TicketId[]): {
   const missingEdges: MissingEdge[] = [];
   const unlabelled: TicketId[] = [];
   const lockLabel = config.exclusiveLockLabel;
+  const humanLabel = config.humanLabel;
+  const isHuman = (meta: TicketInfo) =>
+    humanLabel !== undefined && meta.labels.includes(humanLabel);
   for (const id of runnable) {
     const meta = get(id);
-    if (explicit.length && !meta.labels.includes(config.readyLabel)) {
+    const human = isHuman(meta);
+    if (explicit.length && !human && !meta.labels.includes(config.readyLabel)) {
       unlabelled.push(id);
     }
     const declared = tracker.blockers(id);
@@ -365,16 +373,27 @@ function loadTickets(explicit: TicketId[]): {
     if (claimed.length > 0) {
       missingEdges.push({ id, blockers: claimed, unreadable });
     }
+    const foreignBlockers = stillBlocking
+      .filter((b) => !inSet.has(b.id))
+      .map((b) => b.id);
     tickets.push({
       id,
       title: meta.title,
       open: meta.state === "open",
       blockedBy: stillBlocking.filter((b) => inSet.has(b.id)).map((b) => b.id),
-      foreignBlockers: stillBlocking
-        .filter((b) => !inSet.has(b.id))
-        .map((b) => b.id),
+      foreignBlockers,
       wave: 0,
       exclusive: lockLabel !== undefined && meta.labels.includes(lockLabel),
+      human,
+      // Read only to say what the wait is for. One that cannot be read holds
+      // all the same: it is still an open blocker.
+      foreignHuman: foreignBlockers.filter((b) => {
+        try {
+          return isHuman(get(b));
+        } catch {
+          return false;
+        }
+      }),
     });
   }
   return {
@@ -437,8 +456,15 @@ function printEpics(epics: Epic[]): void {
  * Printed after the waves, next to the `proceed?` prompt, because that is
  * where the decision to go ahead is made.
  */
-function printNamed(namedEpics: Epic[], unlabelled: TicketId[]): void {
-  if (namedEpics.length === 0 && unlabelled.length === 0) return;
+function printNamed(
+  namedEpics: Epic[],
+  unlabelled: TicketId[],
+  tickets: Ticket[],
+): void {
+  const held = tickets.filter((t) => t.human && t.open);
+  if (namedEpics.length === 0 && unlabelled.length === 0 && !held.length) {
+    return;
+  }
   console.log("");
   for (const e of namedEpics) {
     console.log(
@@ -454,6 +480,21 @@ function printNamed(namedEpics: Epic[], unlabelled: TicketId[]): void {
         .join(" ")} — running ${
         unlabelled.length === 1 ? "it" : "them"
       } because you named ${unlabelled.length === 1 ? "it" : "them"}`,
+    );
+  }
+  // Named or not: a person's ticket is not an agent's, whoever asked.
+  for (const h of held) {
+    const waiting = tickets
+      .filter((t) => t.open && t.blockedBy.includes(h.id))
+      .map((t) => ref(t.id));
+    console.log(
+      `  ⚠ ${ref(h.id)} is labelled ${config.humanLabel} — not starting it${
+        waiting.length
+          ? `; ${waiting.join(", ")} ${
+              waiting.length === 1 ? "waits" : "wait"
+            } until it is closed`
+          : ""
+      }`,
     );
   }
 }
@@ -672,10 +713,13 @@ function printTree(tickets: Ticket[]): number {
     const inWave = (waves.get(w) as Ticket[]).sort((a, b) =>
       compareIds(a.id, b.id),
     );
+    const held = inWave.filter((t) => t.human && t.open).length;
     console.log(
       `  wave ${w + 1}  ${inWave.length} ticket${
         inWave.length === 1 ? "" : "s"
-      }${w === 0 ? "  (runnable now)" : ""}`,
+      }${held ? `, ${held} waiting on a human` : ""}${
+        w === 0 ? "  (runnable now)" : ""
+      }`,
     );
     for (const t of inWave) {
       const blockers = t.blockedBy.length
@@ -684,12 +728,17 @@ function printTree(tickets: Ticket[]): number {
       const foreign = t.foreignBlockers.length
         ? `  ← blocked by ${t.foreignBlockers
             .map(ref)
-            .join(", ")} (outside this set)`
+            .join(", ")} (outside this set${
+            t.foreignHuman.length ? ", waiting on a human" : ""
+          })`
         : "";
       const done = t.open ? "" : "  ✓ closed";
       const label = t.exclusive ? `  [${config.exclusiveLockLabel}]` : "";
+      const human = t.human && t.open ? "  [waiting on a human]" : "";
       console.log(
-        `      ${ref(t.id)}  ${t.title}${label}${blockers}${foreign}${done}`,
+        `      ${ref(t.id)}  ${
+          t.title
+        }${label}${human}${blockers}${foreign}${done}`,
       );
     }
   }
@@ -710,10 +759,11 @@ function printTree(tickets: Ticket[]): number {
 
   // The widest wave is the most sessions that can ever be useful at once.
   // Running more than this cannot go faster; it only burns tokens on tickets
-  // whose blockers haven't landed. A wave's labelled tickets count as one.
+  // whose blockers haven't landed. A wave's labelled tickets count as one,
+  // and a person's tickets as none: no session is ever opened for them.
   const width = Math.max(
     ...ordered.map((w) => {
-      const inWave = waves.get(w) as Ticket[];
+      const inWave = (waves.get(w) as Ticket[]).filter((t) => !t.human);
       const labelled = inWave.filter((t) => t.exclusive).length;
       return inWave.length - labelled + Math.min(labelled, 1);
     }),
@@ -953,6 +1003,11 @@ function dbLockStatusLine(): string {
  * after the land would read them open again, and `runnable` would prep a
  * fresh worktree for work that is already on the base branch. Their close is
  * retried instead, in `retryCloses`.
+ *
+ * And each blocker outside the set, once however many tickets it holds, so a
+ * ticket starts the round after a person, or another dispatcher, closes what
+ * held it. Read once at plan time, as it used to be, it held them for the
+ * whole run. One that cannot be read keeps holding.
  */
 function refreshOpenState(tickets: Ticket[]): {
   failed: { id: TicketId; error: string }[];
@@ -969,6 +1024,22 @@ function refreshOpenState(tickets: Ticket[]): {
     } catch (e) {
       failed.push({ id: t.id, error: errorLine(e) });
     }
+  }
+  const closed = new Set<TicketId>();
+  const outside = new Set(
+    tickets.flatMap((t) => (t.open ? t.foreignBlockers : [])),
+  );
+  for (const id of outside) {
+    read += 1;
+    try {
+      if (tracker.get(id).state !== "open") closed.add(id);
+    } catch (e) {
+      failed.push({ id, error: errorLine(e) });
+    }
+  }
+  for (const t of tickets) {
+    t.foreignBlockers = t.foreignBlockers.filter((b) => !closed.has(b));
+    t.foreignHuman = t.foreignHuman.filter((b) => !closed.has(b));
   }
   return { failed, allFailed: read > 0 && failed.length === read };
 }
@@ -1097,6 +1168,8 @@ function unparkClosed(tickets: Ticket[]): void {
  * (`inProgress`): a session opened there would work on top of someone's
  * half-finished fix.
  *
+ * And not a person's ticket (`humanLabel`), named or not.
+ *
  * Last, `exclusiveLockLabel` tickets are a group of size one: while one is in
  * flight (see `exclusiveInFlight`) only that one may be relaunched, and with
  * none in flight only the first of them may start. Without this, two
@@ -1115,6 +1188,7 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       !parked.has(t.id) &&
       !inProgress.has(t.id) &&
       !(lockHeld && isWaitingOnLock(t.id)) &&
+      !t.human &&
       t.foreignBlockers.length === 0 &&
       t.blockedBy.every((b) => closed.has(b)),
   );
@@ -1125,6 +1199,30 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
     exclusiveTaken = true;
     return true;
   });
+}
+
+/**
+ * Open tickets that wait on a person: one carrying `humanLabel`, one held by
+ * an outside blocker that does, and one whose open blocker in the set waits
+ * on a person, however far down the chain.
+ */
+function waitingOnHuman(tickets: Ticket[]): Set<TicketId> {
+  const byId = new Map(tickets.map((t) => [t.id, t]));
+  const memo = new Map<TicketId, boolean>();
+  const waits = (t: Ticket): boolean => {
+    const hit = memo.get(t.id);
+    if (hit !== undefined) return hit;
+    const w =
+      t.human ||
+      t.foreignHuman.length > 0 ||
+      t.blockedBy.some((b) => {
+        const o = byId.get(b);
+        return o?.open === true && waits(o);
+      });
+    memo.set(t.id, w);
+    return w;
+  };
+  return new Set(tickets.filter((t) => t.open && waits(t)).map((t) => t.id));
 }
 
 /**
@@ -1257,12 +1355,20 @@ const launcher: Launcher = launcherProblem ? manual() : configuredLauncher;
  * the session — one launch path, not two that can drift. The flags are on
  * the command line here; a launcher that cannot carry a command (Warp's
  * tab path) gets them from the `.slice-flags` file prep parked instead.
+ *
+ * `--named` for a ticket named on the command line without the ready label:
+ * the plan said it runs because you named it, and the session's own label
+ * check would otherwise refuse it at every prep.
  */
+const flagsFor = (n: TicketId): string[] => [
+  ...sessionFlags,
+  ...(unlabelled.includes(n) ? ["--named"] : []),
+];
 const sessionFor = (n: TicketId): Session => ({
   id: n,
   ref: ref(n),
   dir: worktreeFor(n),
-  cmd: [`${repoRoot}/scripts/slice-session.sh`, n, ...sessionFlags],
+  cmd: [`${repoRoot}/scripts/slice-session.sh`, n, ...flagsFor(n)],
 });
 
 /**
@@ -3596,7 +3702,7 @@ assignWaves(tickets);
 const width = printTree(tickets);
 const ignoreBodyBlockers = flag("--ignore-body-blockers");
 printMissingEdges(missingEdges, tickets, ignoreBodyBlockers);
-printNamed(namedEpics, unlabelled);
+printNamed(namedEpics, unlabelled, tickets);
 if (missingEdges.length > 0 && !ignoreBodyBlockers) {
   refuseOverBodyBlockers(!planOnly);
 }
@@ -3937,7 +4043,7 @@ try {
           [
             "./scripts/slice-session.sh",
             t.id,
-            ...sessionFlags,
+            ...flagsFor(t.id),
             "--prep-only",
             "--dispatched",
           ],
@@ -3993,11 +4099,17 @@ try {
     // Only when its counts change, or once a heartbeat. Counted from the
     // tickets as they are now, after this round's land and launches, so a
     // ticket that just landed is not "open" and a slice that is done and
-    // waiting its turn is not "blocked". The two middle buckets print only when
-    // they are not zero: a line with neither reads word for word as it always
-    // did, so a watcher that matches it keeps working.
+    // waiting its turn is not "blocked". `to land`, `queued` and `waiting on
+    // a human` print only when they are not zero: a line with none of them
+    // reads word for word as it always did, so a watcher that matches it keeps
+    // working. A ticket waiting on a person is counted there and not as
+    // blocked, even when its blocker is open: what it waits for is the person.
     const openNow = tickets.filter((t) => t.open);
     const stillOpen = new Set(openNow.map((t) => t.id));
+    const waiting = waitingOnHuman(tickets);
+    const onHuman = openNow.filter(
+      (t) => !occupied(t.id) && !parked.has(t.id) && waiting.has(t.id),
+    );
     const running = openNow.filter((t) => occupied(t.id));
     const toLand = openNow.filter(
       (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
@@ -4006,6 +4118,7 @@ try {
       (t) =>
         !occupied(t.id) &&
         !parked.has(t.id) &&
+        !waiting.has(t.id) &&
         (t.foreignBlockers.length > 0 ||
           t.blockedBy.some((b) => stillOpen.has(b))),
     );
@@ -4014,12 +4127,13 @@ try {
       running.length -
       toLand.length -
       blocked.length -
+      onHuman.length -
       openNow.filter((t) => parked.has(t.id) && !occupied(t.id)).length;
     const roundLine = `${running.length} running · ${
       toLand.length ? `${toLand.length} to land · ` : ""
     }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
-      openNow.length
-    } open${
+      onHuman.length ? `${onHuman.length} waiting on a human · ` : ""
+    }${openNow.length} open${
       parked.size ? ` · ${parked.size} parked` : ""
     } — land one to advance`;
     if (
@@ -4060,6 +4174,59 @@ try {
       })
     ) {
       console.log("\n  nothing can advance — every open slice is parked.");
+      break;
+    }
+
+    /**
+     * The same stop, when what holds the rest is a person: nothing running or
+     * startable, and every ticket left either waits on a `humanLabel` ticket
+     * or is parked with nothing due. It does not wait for the person, who may
+     * be days: it names the tickets to close and the command that picks the
+     * run up after.
+     */
+    if (
+      up.length === 0 &&
+      ready.length === 0 &&
+      onHuman.length > 0 &&
+      remaining.every((t) => {
+        if (waiting.has(t.id)) return true;
+        const p = parked.get(t.id);
+        return (
+          p !== undefined && !inProgress.has(t.id) && retryDue(t.id, p) === null
+        );
+      })
+    ) {
+      const gates = new Map<
+        TicketId,
+        { outside: boolean; blocks: TicketId[] }
+      >();
+      for (const t of openNow) {
+        if (t.human) gates.set(t.id, { outside: false, blocks: [] });
+      }
+      for (const t of openNow) {
+        for (const b of t.blockedBy) gates.get(b)?.blocks.push(t.id);
+        for (const b of t.foreignHuman) {
+          const g = gates.get(b) ?? { outside: true, blocks: [] };
+          g.blocks.push(t.id);
+          gates.set(b, g);
+        }
+      }
+      console.log("\n  nothing can advance — what is left waits on a human:");
+      for (const [id, g] of gates) {
+        console.log(
+          `    ${ref(id)}  ${config.humanLabel}${
+            g.outside ? ", outside this set" : ""
+          }${
+            g.blocks.length ? ` — blocks ${g.blocks.map(ref).join(", ")}` : ""
+          }`,
+        );
+      }
+      console.log(
+        `  Close ${
+          gates.size === 1 ? "it" : "them"
+        } when done, then pick the run up again:\n\n    ${resumeCommand()}`,
+      );
+      process.exitCode = 1;
       break;
     }
 

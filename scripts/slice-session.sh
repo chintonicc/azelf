@@ -59,6 +59,7 @@ prep_only=false
 dispatched=false
 autostart=true
 self_land=false
+named=false
 ticket=""
 
 usage() {
@@ -93,6 +94,12 @@ while [[ $# -gt 0 ]]; do
     # ignore it and leave the REPL open. That is why slice-done.sh clears the
     # liveness marker itself rather than relying on this script's EXIT trap.
     --self-land) self_land=true; shift ;;
+    # From slice-run.ts, for a ticket named on its command line without the
+    # ready label: the plan said it runs because it was named, so the label
+    # check below is skipped. The open-state and blocker checks are not, and
+    # a ticket carrying humanLabel is refused with it all the same. Not in
+    # the usage line, like --dispatched.
+    --named) named=true; shift ;;
     -h|--help) usage ;;
     -*) echo "unknown option: $1" >&2; usage ;;
     *)
@@ -166,22 +173,34 @@ ticket_ref="$(slice_ref "$ticket")"
 # ─── Validate the ticket ────────────────────────────────────────────────
 echo "── checking ticket $ticket_ref ─────────────────────"
 
+# A marker launcher's session starts with no flags and reads the rest from
+# .slice-flags further down, after this check. --named has to be known here,
+# so it alone is read early. Only ever to turn it on, as below.
+if ! $named && grep -qx -- "--named" "$(slice_worktree_for "$ticket")/.slice-flags" 2>/dev/null; then
+  named=true
+fi
+
 # Through the tracker bridge, not gh: the loader answers `state<TAB>ready<TAB>
-# title`, with `ready` already decided against readyLabel. (That also retires
-# the jq program the label used to be interpolated into.) On failure the
-# bridge prints why on stderr and nothing on stdout.
+# human<TAB>title`, with `ready` and `human` already decided against
+# readyLabel and humanLabel. (That also retires the jq program the label used
+# to be interpolated into.) On failure the bridge prints why on stderr and
+# nothing on stdout.
 issue_tsv=$(slice_tracker_get "$ticket" 2>&1) || {
   echo "error: couldn't fetch $ticket_ref from $SLICE_TRACKER_NAME:" >&2
   echo "$issue_tsv" >&2
   exit 1
 }
-IFS=$'\t' read -r state has_label title <<<"$issue_tsv"
+IFS=$'\t' read -r state has_label is_human title <<<"$issue_tsv"
 
 if [[ "$state" != "open" ]]; then
   echo "error: $ticket_ref is $state, not open." >&2
   exit 1
 fi
-if [[ "$has_label" != "true" ]]; then
+if [[ "$is_human" == "true" ]]; then
+  echo "error: $ticket_ref is labelled $SLICE_HUMAN_LABEL — a person does this one, not a session." >&2
+  exit 1
+fi
+if [[ "$has_label" != "true" ]] && ! $named; then
   echo "error: $ticket_ref is missing the '$SLICE_READY_LABEL' label." >&2
   echo "       run /mattpocock-skills:triage or /mattpocock-skills:to-tickets on it first." >&2
   exit 1
@@ -202,7 +221,11 @@ if [[ "$blocked_by" -gt 0 ]]; then
   exit 1
 fi
 
-echo "✓ $ticket_ref \"$title\" is $SLICE_READY_LABEL with no open blockers"
+if [[ "$has_label" == "true" ]]; then
+  echo "✓ $ticket_ref \"$title\" is $SLICE_READY_LABEL with no open blockers"
+else
+  echo "✓ $ticket_ref \"$title\" has no open blockers — not labelled $SLICE_READY_LABEL, run because it was named"
+fi
 
 # ─── DB lock ────────────────────────────────────────────────────────────
 # A notice, not a refusal. This used to exit here while any other worktree
@@ -345,6 +368,7 @@ if $prep_only; then
     # makes the and-list exit 1 and takes the whole script with it.
     : >"$flags_file"
     if $self_land; then echo "--self-land" >>"$flags_file"; fi
+    if $named; then echo "--named" >>"$flags_file"; fi
     if ! $autostart; then echo "--no-start" >>"$flags_file"; fi
   else
     rm -f "$flags_file"

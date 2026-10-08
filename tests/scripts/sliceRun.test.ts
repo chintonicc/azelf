@@ -1906,6 +1906,95 @@ describe("a parent is not a slice", () => {
 });
 
 /**
+ * A `humanLabel` ticket is a gate, not a slice: never dispatched, even when
+ * named, and its dependents wait for it. A run with nothing else to do stops
+ * and says which tickets to close.
+ */
+describe("a ticket for a person (humanLabel)", () => {
+  const HUMAN = 'humanLabel: "human",';
+
+  it("is held in the plan, and the plan says what waits on it", () => {
+    c = makeConsumer({ configExtra: HUMAN });
+    c.setTicket("2", { ready: false, labels: ["human"] });
+    c.setTicket("3", { blockedBy: ["2"] });
+    const r = runDispatcher(c, ["--plan", "2", "3"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("wave 1  1 ticket, 1 waiting on a human");
+    expect(r.out).toContain("#2  t  [waiting on a human]");
+    expect(r.out).toContain(
+      "⚠ #2 is labelled human — not starting it; #3 waits until it is closed",
+    );
+    expect(r.out).not.toContain("not labelled ready");
+    expect(r.out).toContain("widest wave: 1");
+  });
+
+  it("is never prepped, and a run with only it left stops with the resume line", () => {
+    c = makeConsumer({ remote: true, agent: ["true"], configExtra: HUMAN });
+    c.setTicket("2", { labels: ["human"] });
+    c.setTicket("3", { blockedBy: ["2"] });
+    const r = runDispatcher(c, ["-y", "--interval", "1", "2", "3"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain("prepping #2");
+    expect(r.out).toContain(
+      "[round 1] 0 running · 0 blocked · 2 waiting on a human · 2 open — land one to advance",
+    );
+    expect(r.out).toContain(
+      "nothing can advance — what is left waits on a human:\n    #2  human — blocks #3\n  Close it when done, then pick the run up again:\n\n    bunx azelf run -y --interval 1 2 3\n",
+    );
+  });
+
+  it("stops the same way when the person's ticket is outside the set", () => {
+    c = makeConsumer({ remote: true, agent: ["true"], configExtra: HUMAN });
+    c.setTicket("2", { ready: false, labels: ["human"] });
+    c.setTicket("3", { blockedBy: ["2"] });
+    const r = runDispatcher(c, ["-y", "--interval", "1"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "#3  t  ← blocked by #2 (outside this set, waiting on a human)",
+    );
+    expect(r.out).toContain(
+      "    #2  human, outside this set — blocks #3\n  Close it when done, then pick the run up again:\n\n    bunx azelf run -y --interval 1 3\n",
+    );
+  });
+
+  it("starts a ticket the round after its outside blocker is closed", async () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("3", { blockedBy: ["5"] });
+    c.setTicket("5", { ready: false });
+    d = startDispatcher(c, ["-y", "--interval", "1", "3"]);
+    await d.until("[round 2]");
+    expect(d.output()).not.toContain("prepping #3");
+
+    c.setTicket("5", { state: "closed" });
+    await d.until("prepping #3");
+    await d.until("✓ prepped");
+  }, 60_000);
+
+  it("refuses a humanLabel that is the readyLabel", () => {
+    c = makeConsumer({ configExtra: 'humanLabel: "ready",' });
+    c.setTicket("2", {});
+    expect(runDispatcher(c, ["--plan"]).out).toContain(
+      "humanLabel is the same as readyLabel",
+    );
+  });
+});
+
+describe("a named ticket without the ready label", () => {
+  it("is prepped, not refused for the label", () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("2", { ready: false });
+    const r = runDispatcher(c, ["--once", "-y", "2"]);
+
+    expect(r.out).toContain("prepping #2");
+    expect(r.out).toContain("✓ prepped");
+    expect(r.out).not.toContain("missing the 'ready' label");
+  });
+});
+
+/**
  * A body that names a blocker the tracker has no edge for. The plan is still
  * built from edges, but a dispatch does not start over the claim: someone
  * records the edge or says to run anyway.
