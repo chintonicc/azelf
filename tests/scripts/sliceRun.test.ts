@@ -276,6 +276,108 @@ describe("a tracker that stops answering", () => {
  * land" and not "blocked", and a slice cut on top of a landed one is not
  * reported as editing the same files.
  */
+/**
+ * The worktree was installed when it was prepped; a base that changed its
+ * dependencies since then leaves the gates running against the old ones.
+ * The base's package.json gains a postinstall, and it and the gate write to
+ * one log outside the worktree, so the order is visible.
+ */
+describe("a rebase that brings new dependencies", () => {
+  const prep = (postinstall: string) => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    const log = join(c.root, "order.log");
+    // Written after makeConsumer, because the gate needs the log's path.
+    const config = join(c.main, "slice.config.ts");
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        "gates: []",
+        `gates: [exitCode(["bash", "-c", "echo gate >> ${log}"])]`,
+      ),
+    );
+    git(c.main, "commit", "-qam", "chore: a gate");
+    git(c.main, "push", "-q", "origin", "main");
+    git(c.wt(40), "rebase", "-q", "main");
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    return {
+      log,
+      postinstall: postinstall.replace("LOG", log),
+    };
+  };
+  const read = (f: string) => (existsSync(f) ? readFileSync(f, "utf8") : "");
+
+  it("installs once in the worktree, before the gates", () => {
+    const { log, postinstall } = prep("echo install >> LOG");
+    commitIn(
+      c!.main,
+      "package.json",
+      JSON.stringify({ name: "fx", scripts: { postinstall } }),
+      "chore: a dependency",
+    );
+
+    const r = runDispatcher(c!, [
+      "--auto",
+      "--once",
+      "-y",
+      "--no-review",
+      "40",
+    ]);
+
+    expect(r.out).toContain(
+      "#40: the rebase brought a new package.json — reinstalling in its worktree …",
+    );
+    expect(read(log)).toBe("install\ngate\n");
+    expect(r.code).toBe(0);
+    expect(git(c!.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  });
+
+  it("installs nothing when the base moved without a manifest", () => {
+    const { log } = prep("");
+    commitIn(c!.main, "b.txt", "b\n", "feat: b");
+
+    const r = runDispatcher(c!, [
+      "--auto",
+      "--once",
+      "-y",
+      "--no-review",
+      "40",
+    ]);
+
+    expect(r.out).toContain("#40 is behind main — rebasing before the gates");
+    expect(r.out).not.toContain("reinstalling");
+    expect(read(log)).toBe("gate\n");
+    expect(r.code).toBe(0);
+  });
+
+  it("parks a slice whose install fails, and runs no gate", () => {
+    const { log, postinstall } = prep("echo broken lockfile >&2; exit 1");
+    commitIn(
+      c!.main,
+      "package.json",
+      JSON.stringify({ name: "fx", scripts: { postinstall } }),
+      "chore: a dependency",
+    );
+
+    const r = runDispatcher(c!, [
+      "--auto",
+      "--once",
+      "-y",
+      "--no-review",
+      "40",
+    ]);
+
+    expect(r.out).toContain(
+      "bun install failed after the rebase (the lockfile may not match package.json) — run bun install in the worktree, commit the lockfile if it changed, and azelf retry 40",
+    );
+    expect(r.out).toContain("broken lockfile");
+    expect(read(log)).toBe("");
+    expect(git(c!.main, "log", "-1", "--format=%s")).toBe(
+      "chore: a dependency",
+    );
+  });
+});
+
 describe("what the run log says after a land", () => {
   it("does not count the landed ticket, and preps the next in one line", async () => {
     c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });

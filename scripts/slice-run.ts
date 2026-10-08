@@ -3387,6 +3387,63 @@ let stopRequested = false;
 /** Resolver passes one land attempt gets when the base moves under it. */
 const RESOLVE_PASSES = 2;
 
+/** Slices whose install after a rebase failed, and the manifests that moved. */
+const reinstallOwed = new Map<TicketId, string[]>();
+
+/** The files whose change on the base means the worktree's install is stale. */
+const INSTALL_MANIFESTS = new Set(["package.json", "bun.lock", "bun.lockb"]);
+
+/**
+ * Install again when the rebase brought the base's dependency changes. The
+ * worktree was installed when it was prepped, against the base as it was then;
+ * a base that has since bumped a dependency leaves it running the gates
+ * against the old one, and the typecheck parks the slice for an error that is
+ * not in it (consumer-a, 2026-10-08: two slices, after a bump of this
+ * package). Only what the BASE moved counts: the slice's own manifest changes
+ * were installed by its session.
+ *
+ * False only when the install itself failed. The slice is then owed an
+ * install: its retry finds the branch already rebased, and would otherwise run
+ * the gates against the stale one.
+ */
+function reinstallAfterRebase(id: TicketId, before: string | null): boolean {
+  const after = mergeBase(id);
+  let names = reinstallOwed.get(id);
+  if (before && after && before !== after) {
+    const manifests = run(["git", "diff", "--name-only", before, after], {
+      allowFail: true,
+    })
+      .out.split("\n")
+      .map((l) => l.trim())
+      .filter((f) => f && INSTALL_MANIFESTS.has(f.split("/").pop() ?? ""))
+      .map((f) => f.split("/").pop() ?? f);
+    if (manifests.length > 0) {
+      names = [...new Set([...(names ?? []), ...manifests])];
+    }
+  }
+  if (!names) return true;
+  console.log(
+    `  ${ref(id)}: the rebase brought a new ${names.join(
+      ", ",
+    )} — reinstalling in its worktree …`,
+  );
+  // Frozen: the lockfile on the base is what was reviewed, and an install that
+  // rewrote it would dirty the worktree the gates are about to judge.
+  const { ok, out } = run(["bun", "install", "--frozen-lockfile"], {
+    cwd: worktreeFor(id),
+    allowFail: true,
+  });
+  if (ok) {
+    reinstallOwed.delete(id);
+    return true;
+  }
+  reinstallOwed.set(id, names);
+  for (const line of out.split("\n").slice(-8)) {
+    console.log(`     ${line}`);
+  }
+  return false;
+}
+
 function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
   // A loop, because a resolution is made against the base as it was when the
   // resolver started, and a land elsewhere can move it meanwhile. After a
@@ -3395,6 +3452,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
   // resolver pass when those conflict too. Then it parks — each pass is up to
   // twenty minutes a stop, and a base that outruns the resolver twice will a
   // third time.
+  const baseBefore = mergeBase(t.id);
   for (let passes = 0; ; passes += 1) {
     const rebase = rebaseOntoBase(t);
     if (rebase.ok) break;
@@ -3426,6 +3484,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
         decide ? undefined : rebase.conflicted,
       );
     }
+  }
+  if (!reinstallAfterRebase(t.id, baseBefore)) {
+    return park(
+      t,
+      "gates",
+      `bun install failed after the rebase (the lockfile may not match package.json) — run bun install in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
+    );
   }
   if (!gatesPass(t.id)) {
     return park(t, "gates", "the gates are red");
