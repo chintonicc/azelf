@@ -55,13 +55,84 @@ describe("github() — the adapter that ships", () => {
     expect(refFor(t.refTemplate, "42")).toBe("#42");
   });
 
-  it("listReady asks for open issues with the label and returns ids as strings", () => {
-    const { gh, calls } = fakeGh({
-      "issue list --state open --label ready-for-agent --limit 100 --json number":
-        { stdout: '[{"number":12},{"number":9}]' },
+  describe("listReady — the repository's issue list, not search", () => {
+    /** Answers every call with `answer`; records the arguments. */
+    const scripted = (answer: Answer) => {
+      const calls: string[][] = [];
+      const gh: GhRunner = (args) => {
+        calls.push(args);
+        return {
+          ok: answer.ok ?? true,
+          stdout: answer.stdout ?? "",
+          stderr: answer.stderr ?? "",
+        };
+      };
+      return { gh, calls };
+    };
+    const field = (args: string[], name: string) =>
+      args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1);
+
+    it("asks the paged GraphQL issue list for open issues with the label, newest first", () => {
+      const { gh, calls } = scripted({ stdout: "12\n9\n" });
+      expect(github({ gh }).listReady("ready-for-agent")).toEqual(["12", "9"]);
+      expect(calls).toHaveLength(1);
+      const args = calls[0] ?? [];
+      expect(args.slice(0, 3)).toEqual(["api", "graphql", "--paginate"]);
+      // gh fills these from the remote, as it does the REST paths.
+      expect(field(args, "owner")).toBe("{owner}");
+      expect(field(args, "repo")).toBe("{repo}");
+      expect(field(args, "label")).toBe("ready-for-agent");
+      const query = field(args, "query") ?? "";
+      expect(query).toMatch(/repository\(owner: \$owner, name: \$repo\)/);
+      expect(query).toMatch(/issues\(first: 100, after: \$endCursor/);
+      expect(query).toMatch(/states: OPEN, labels: \[\$label\]/);
+      expect(query).toMatch(/orderBy: \{field: CREATED_AT, direction: DESC\}/);
+      expect(query).toMatch(/pageInfo \{ hasNextPage endCursor \}/);
+      expect(query).not.toMatch(/search/);
+      expect(args.slice(-2)).toEqual([
+        "--jq",
+        ".data.repository.issues.nodes[].number",
+      ]);
+      // Not the search-backed listing the adapter used to call.
+      expect(args).not.toContain("list");
     });
-    expect(github({ gh }).listReady("ready-for-agent")).toEqual(["12", "9"]);
-    expect(calls).toHaveLength(1);
+
+    it("reads every page --paginate prints as one list", () => {
+      // 100 on the first page, two on the second: gh prints them one per line.
+      const first = Array.from({ length: 100 }, (_, i) => String(300 - i));
+      const { gh } = scripted({ stdout: `${first.join("\n")}\n150\n149\n` });
+      const ids = github({ gh }).listReady("ready-for-agent");
+      expect(ids).toHaveLength(102);
+      expect(ids.slice(98)).toEqual(["202", "201", "150", "149"]);
+    });
+
+    it("a label no open issue carries gives no tickets, not an error", () => {
+      expect(github({ gh: scripted({}).gh }).listReady("x")).toEqual([]);
+    });
+
+    it("passes a label with a comma or quotes through as one value", () => {
+      const { gh, calls } = scripted({ stdout: "3\n" });
+      github({ gh }).listReady('needs, "agent"');
+      expect(field(calls[0] ?? [], "label")).toBe('needs, "agent"');
+    });
+
+    it("output that is not issue numbers throws, and says what came back", () => {
+      const { gh } = scripted({ stdout: '{"data":null}\n' });
+      expect(() => github({ gh }).listReady("x")).toThrow(
+        /not a list of issue numbers:\n\{"data":null\}/,
+      );
+    });
+
+    it("a failure throws with gh's output under a '… failed:' header", () => {
+      const { gh } = scripted({
+        ok: false,
+        stderr:
+          "gh: Could not resolve to a Repository with the name 'o/gone'.\n",
+      });
+      expect(() => github({ gh }).listReady("x")).toThrow(
+        /^gh api graphql \(open issues labelled x\) failed:\ngh: Could not resolve to a Repository/,
+      );
+    });
   });
 
   it("parentClaims searches every state and returns id, state and body", () => {
@@ -215,7 +286,7 @@ describe("github() — the adapter that ships", () => {
 
   it("a failed gh call throws with gh's output — never an empty list", () => {
     const { gh } = fakeGh({
-      "issue list --state open --label x --limit 100 --json number": {
+      "issue view 1 --json body": {
         ok: false,
         stderr: "gh: Not logged in",
       },
@@ -223,7 +294,7 @@ describe("github() — the adapter that ships", () => {
         { ok: false, stderr: "HTTP 404" },
     });
     const t = github({ gh });
-    expect(() => t.listReady("x")).toThrow(/Not logged in/);
+    expect(() => t.body("1")).toThrow(/Not logged in/);
     expect(() => t.blockers("1")).toThrow(/HTTP 404/);
     expect(() => t.get("2")).toThrow(/unscripted/);
   });

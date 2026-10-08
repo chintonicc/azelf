@@ -490,6 +490,20 @@ const stateOf = (raw: string): TicketState =>
   raw.toLowerCase() === "closed" ? "closed" : "open";
 
 /**
+ * The ready list's query. `$endCursor` and `pageInfo` are what
+ * `gh api --paginate` needs to walk the pages; `{owner}` and `{repo}` are
+ * filled in by gh from the remote, as in the REST paths below.
+ */
+const READY_QUERY = `query($owner: String!, $repo: String!, $label: String!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    issues(first: 100, after: $endCursor, states: OPEN, labels: [$label], orderBy: {field: CREATED_AT, direction: DESC}) {
+      nodes { number }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}`;
+
+/**
  * The adapter for GitHub Issues with native issue dependencies, through `gh`.
  *
  * Ids are the issue numbers, as strings. Every failure throws with `gh`'s own
@@ -523,18 +537,50 @@ export function github(opts: GithubOptions = {}): Tracker {
     refTemplate: "#{n}",
 
     listReady(label) {
-      return call<{ number: number }[]>([
-        "issue",
-        "list",
-        "--state",
-        "open",
-        "--label",
-        label,
-        "--limit",
-        "100",
-        "--json",
-        "number",
-      ]).map((i) => String(i.number));
+      // Not `gh issue list --label`: gh answers that through the search API,
+      // which is indexed with a lag, so an issue filed seconds earlier was
+      // missing and --sync-edges never read its body. The REST issues list
+      // lags too. Probed on a scratch repo (gh 2.94.0, 2026-10-08) by filing
+      // a labelled issue and listing straight away: this connection had it
+      // 6 times out of 6 within 1.1s, the REST list had it 0 times out of 6
+      // at 2s, and REST and search both took 4–12s to catch up. It also pages
+      // (no cap of 100), returns no pull requests, and takes the label as a
+      // variable, so a comma in it is just a comma. Newest first, as before,
+      // so --max starts the same ticket.
+      const args = [
+        "api",
+        "graphql",
+        "--paginate",
+        "-F",
+        "owner={owner}",
+        "-F",
+        "repo={repo}",
+        "-f",
+        `label=${label}`,
+        "-f",
+        `query=${READY_QUERY}`,
+        "--jq",
+        ".data.repository.issues.nodes[].number",
+      ];
+      const r = gh(args);
+      if (!r.ok) {
+        throw new Error(
+          `gh api graphql (open issues labelled ${label}) failed:\n${(
+            r.stderr || r.stdout
+          ).trim()}`,
+        );
+      }
+      // --paginate with --jq prints one number per line, across all pages.
+      const numbers = r.stdout
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean);
+      if (!numbers.every((n) => /^[0-9]+$/.test(n))) {
+        throw new Error(
+          `gh api graphql (open issues labelled ${label}) returned something that is not a list of issue numbers:\n${r.stdout.trim()}`,
+        );
+      }
+      return numbers;
     },
 
     get(id) {
@@ -599,6 +645,10 @@ export function github(opts: GithubOptions = {}): Tracker {
       // Checked against a repo of 84 issues by filtering a full listing
       // locally: 67 carried the heading and the search returned all 67.
       // 1000 is the search API's own ceiling.
+      // Search is indexed with a lag (see listReady), so a child filed a
+      // moment ago may be missing here. The ones that matter most, the
+      // children in the ready set, are found through the ready set's own
+      // bodies, which findEpics reads directly, not through this.
       return call<{ number: number; state: string; body: string | null }[]>([
         "issue",
         "list",
