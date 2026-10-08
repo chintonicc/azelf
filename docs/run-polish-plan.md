@@ -1,6 +1,6 @@
 # Fresh tickets in the plan, and less noise in the run
 
-**Status:** IN PROGRESS — Phases 1 and 2 landed · **Written:** 2026-10-08
+**Status:** COMPLETE — all three phases landed 2026-10-08 · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log, entries dated 2026-10-02. The four larger open
 entries from the same log are in `docs/unattended-run-plan.md`. That plan goes first.
 
@@ -159,16 +159,16 @@ The proof is three tests in "the DB lock block", next to the round-line test:
 The first two fail on the old code. The README's heartbeat paragraph gained two
 sentences.
 
-## Phase 3 — the plan review needs two slices
+## Phase 3 — the plan review needs two slices (`5860525`)
 
-- [ ] **3a.** At the top of `reviewPlan`, after the `reviewEnabled` check: if
+- [x] **3a.** At the top of `reviewPlan`, after the `reviewEnabled` check: if
   `landedRanges.size < 2` (set in `tryLand`, `slice-run.ts:3039`), call no agent and
   return null. Print one line:
 
   > plan review: skipped — one slice landed in this run (#87), and its own review covered it.
 
   With nothing landed, there is no line.
-- [ ] **3b.** The README's review paragraph and the run header's review line
+- [x] **3b.** The README's review paragraph and the run header's review line
   (`slice-run.ts:3527-3536`, "plan-level review when the graph empties") gain "when two
   or more slices landed".
 
@@ -178,6 +178,16 @@ sentences.
     keep testing the review.
   - A new test lands only #40 and sees the skip line, and the fake reviewer is never
     asked (it writes a file when called; the file must not exist). Exit 0.
+
+**As landed.** As planned. The skip line is the run's last line, and the exit code is
+0. The README's paragraph says "two or more slices landed in the run", and it shows
+the skip line and says that with none landed there is no line. The header's review
+line ends "when the graph empties and two or more slices landed (findings exit 2)".
+
+The `landed` helper takes the slices to land, [40, 41] by default, so the five
+outcome tests read a real two-slice seam. The new test lands only #40. Its reviewer
+touches a file when the plan prompt reaches it, and the test asserts the file doesn't
+exist. It fails on the old code. The full suite passed: 425 of 425.
 
 ## Order and cost
 
