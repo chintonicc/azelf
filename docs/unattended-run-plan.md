@@ -1,6 +1,6 @@
 # An unattended run that outlives a flaky network and starts only agent work
 
-**Status:** IN PROGRESS — Phases 1 and 2 landed · **Written:** 2026-10-08
+**Status:** COMPLETE — all three phases landed 2026-10-08 · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), entries dated 2026-10-06 to 2026-10-08. `docs/run-polish-plan.md` covers
 the three smaller open entries from the same log.
@@ -298,9 +298,9 @@ failed under load; both pass alone, and `sliceRun.test.ts` passes 94/94 on its o
 **What the consumer does:** add `humanLabel: "ready-for-human"` to `slice.config.ts` by
 hand. `init` does not rewrite an existing config.
 
-## Phase 3 — a slice starts from what will land
+## Phase 3 — a slice starts from what will land (`e1ed517`)
 
-- [ ] **3a. The prep cuts from local when local is ahead.** In `slice-session.sh:236-249`,
+- [x] **3a. The prep cuts from local when local is ahead.** In `slice-session.sh:236-249`,
   after the fetch, for a new branch:
   - `origin/<base>` is an ancestor of local `<base>`: cut from local `<base>`, and say
     so when it adds commits:
@@ -315,7 +315,7 @@ hand. `init` does not rewrite an existing config.
   they are. This runs for a slice started by hand too, which is the point: a hand
   session and a dispatched one start from the same commit.
 
-- [ ] **3b. The plan says it before anything is cut.** After `printNamed`
+- [x] **3b. The plan says it before anything is cut.** After `printNamed`
   (`slice-run.ts:3425`):
   - The dispatcher runs `git fetch origin <base>`, for `--plan` too. If the fetch
     fails, it says so and compares against the last fetch.
@@ -341,6 +341,17 @@ hand. `init` does not rewrite an existing config.
     with the `✗` line, and `-y` exits 1 with "not dispatching" and no worktree.
   - Level: neither line appears. Existing tests already cover that, so check that none
     of them now prints the `ℹ` line.
+
+**As landed.** The plan skips the comparison silently when there is no `origin`
+remote, since there is nothing to push to, and most fixture tests have none. The fetch
+is `git fetch -q origin <base>`, and a failed one prints one line and compares against
+the last fetch. A cut from local uses `refs/heads/<base>`, which, unlike
+`origin/<base>`, sets no upstream on the ticket branch. Nothing reads that upstream:
+`session-commit.sh` pushes by name. The prep's divergence refusal also names both
+heads. The diverged test checks the prep refusal directly too, and the level case got
+its own test instead of an assertion added to existing ones. In the full suite, the
+heartbeat test sometimes fails under load (it asserts a change is printed within
+3.5s); it passes alone, and passed on the next full run.
 
 ## Order and cost
 
