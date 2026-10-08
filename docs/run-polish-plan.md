@@ -1,6 +1,6 @@
 # Fresh tickets in the plan, and less noise in the run
 
-**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phases 1 and 2 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log, entries dated 2026-10-02. The four larger open
 entries from the same log are in `docs/unattended-run-plan.md`. That plan goes first.
 
@@ -122,13 +122,13 @@ The real adapter, run from a checkout of the scratch repo, saw a just-filed issu
 
 The "a failed gh call throws" test now uses `body()` for its "Not logged in" case.
 
-## Phase 2 — the lock block is printed when it changes
+## Phase 2 — the lock block is printed when it changes (`ea88f12`)
 
-- [ ] **2a.** In the round loop (`slice-run.ts:3655-3680`), keep the last printed block
+- [x] **2a.** In the round loop (`slice-run.ts:3655-3680`), keep the last printed block
   without its round number, as `lastRoundLine` does (`slice-run.ts:3606`). The key is
   the holder text plus the "waiting for it" list. Print when the key changes, or when
   `heartbeatMs` has passed since it was last printed.
-- [ ] **2b.** When the lock goes from held to free and a held block was printed, print
+- [x] **2b.** When the lock goes from held to free and a held block was printed, print
   once:
 
   > [round 70] DB lock free
@@ -142,6 +142,22 @@ The "a failed gh call throws" test now uses `body()` for its "Not logged in" cas
     for four rounds: `DB lock held by:` appears once;
   - releasing it prints `DB lock free` once.
   - A second test claims, releases and claims again, and sees the block twice.
+
+**As landed.** `lastLockBlock` and `lastLockBlockAt` sit next to `lastRoundLine`. The
+key is the whole block without its round number: the holder text plus the "waiting
+for it" line. `DB lock free` is printed only after a held block was printed, and it
+clears the key, so a new claim prints the block again.
+
+The proof is three tests in "the DB lock block", next to the round-line test:
+
+- once while the same holder keeps it for about four rounds, then `DB lock free`
+  once, at least 3 rounds later;
+- claim, release, claim gives the block twice and the free line once;
+- with no lock ever held, no round mentions it. The run header's `DB lock: free` line
+  is unchanged.
+
+The first two fail on the old code. The README's heartbeat paragraph gained two
+sentences.
 
 ## Phase 3 — the plan review needs two slices
 
