@@ -1,6 +1,6 @@
 # A resolution a lock can't throw away, a review that sees what it needs, and `format.sh --help`
 
-**Status:** IN PROGRESS — Phase 1 landed 2026-10-08 · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phases 1 and 2 landed 2026-10-08 · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log, the three entries dated 2026-10-08 that came in
 after `docs/unattended-run-plan.md` was written. That plan and `docs/run-polish-plan.md`
 cover every other open entry, and both are complete.
@@ -143,16 +143,16 @@ not printed. The `--continue` path has no test of its own: a lock arriving betwe
 helper. The README's resolver section gained a paragraph. The full suite passed: 429 of
 429.
 
-## Phase 2 — the spec review sees what it needs, and says what it couldn't check
+## Phase 2 — the spec review sees what it needs, and says what it couldn't check (`c3fe730`)
 
-- [ ] **2a. The parent's budget, and where the rest is.** `PARENT_BUDGET` becomes
+- [x] **2a. The parent's budget, and where the rest is.** `PARENT_BUDGET` becomes
   60 000. When `parentSpec` cuts anyway and `<worktree>/.slice-parent.md` exists, the
   note reads:
 
   > [parent spec truncated to 60000 of 81234 chars — the whole text is in .slice-parent.md in your working directory; read it there]
 
   Without the file, the note stays as it is.
-- [ ] **2b. Say what already ran.** The spec prompt gains a paragraph before `SPEC:`:
+- [x] **2b. Say what already ran.** The spec prompt gains a paragraph before `SPEC:`:
 
   > The gates (<names from config.gates>) ran on this exact diff, rebased, and passed. Do not run tests, builds, git or gh: you will not be allowed to, and you don't need to. You can read the files in your working directory, which is the slice's worktree.
 
@@ -160,13 +160,13 @@ helper. The README's resolver section gained a paragraph. The full suite passed:
   (`slice-run.ts:1647`) uses the same names. The README's "The reviewer has no tools"
   (`README.md:821`) is corrected: it can read the worktree, it is refused anything that
   needs approval, and it is told so.
-- [ ] **2c. `UNVERIFIED:` lines.** The prompt asks for each thing the reviewer could not
+- [x] **2c. `UNVERIFIED:` lines.** The prompt asks for each thing the reviewer could not
   check on its own line, `UNVERIFIED: <what, and why>`, directly before the verdict.
   It is told that an unverified point is not a reason to BLOCK by itself.
   `reviewSpec` returns them beside `report` and `block`, read the way the verdict is
   (`slice-run.ts:1759`). `parentSpec`'s "could not be read" note is added to the
   list too.
-- [ ] **2d. One verdict line in the run log.** After `report saved:`
+- [x] **2d. One verdict line in the run log.** After `report saved:`
   (`slice-run.ts:2133`), always print:
 
   > spec review: PASS — 2 things it could not check:
@@ -185,6 +185,41 @@ helper. The README's resolver section gained a paragraph. The full suite passed:
   - a reviewer answering two `UNVERIFIED:` lines and `VERDICT: PASS` gives the summary
     line with both, and the slice lands;
   - a plain PASS prints `spec review: PASS` and nothing more.
+
+**As landed.** As planned, with two additions:
+
+- **A cut with no file to point at is a caveat too.** 2c named only the "could not be
+  read" note. A parent cut at 60 000 characters, in a worktree with no
+  `.slice-parent.md`, now gets a note of its own: `the parent spec #17 was cut to
+  60000 of N chars, and the worktree has no .slice-parent.md — reviewed against the
+  first part`. It goes in the report and in the summary list. A cut that points at
+  the file is not a caveat, because the reviewer can read the rest.
+- **A review with no verdict says so in the summary:** `spec review: no verdict — read
+  as BLOCK`.
+
+The paragraph from 2b is `alreadyRan()`, and both prompts use it. With no gates
+configured, it says nothing ran on the diff before the review. `reviewSpec` returns a
+`SpecReview`: `report`, `block`, `verdict`, and `unverified`. The `UNVERIFIED:` parser
+allows the same Markdown around the word that `IRRECONCILABLE:` does, and drops a line
+with nothing after the colon. The summary is printed straight after `report saved:`,
+so on a BLOCK it comes before the ✗ or ! line.
+
+The proof is in two places:
+
+- **"the spec review and the parent spec"** has the three parent tests. Its
+  "could not be read" test now also checks the summary line.
+- **A new describe, "what the spec review is told, and what it says it could not
+  check",** covers the rest:
+  - the gate names, using a fixture `gate: ["true"]`. The test also checks that the
+    standards prompt no longer says "biome, tsc, vitest";
+  - two `UNVERIFIED:` lines, one of them in bold;
+  - a plain PASS.
+
+All seven new checks fail on the old code. A `.slice-parent.md` written into a fixture
+worktree doesn't make it dirty, so the gates still run. The README's parent paragraph
+is corrected: the reviewer can read the worktree and is refused anything that needs
+approval. It also gives the 60 000-character budget. The section on a slice that won't
+land gains the summary line. The full suite passed: 435 of 435.
 
 ## Phase 3 — `format.sh --help` and `--check`
 
