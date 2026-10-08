@@ -4,6 +4,8 @@
 #
 #   ./scripts/format.sh                      # files changed vs HEAD
 #   ./scripts/format.sh lib/foo.ts app/bar.tsx   # exactly these
+#   ./scripts/format.sh --check lib/foo.ts   # say what would change, write nothing
+#   ./scripts/format.sh --help
 #
 # WHY THIS EXISTS
 # ---------------
@@ -35,6 +37,49 @@
 # deliberately (a real repo-wide sweep), never as the finish-a-task gate.
 
 set -euo pipefail
+
+usage() {
+  cat <<EOF
+usage: ${AZELF_INVOKED_AS:-$0} [--check] [--] [<path> ...]
+
+Runs biome on what changed, never on the whole tree.
+
+  (no paths)   the files changed vs HEAD, plus untracked ones
+  <path> ...   exactly these; a path that neither exists nor is known to git
+               is an error, and then nothing is formatted
+  --check      write nothing: biome reports what it would change, and the
+               exit status is non-zero when anything would
+  --           the end of the options, for a path that starts with -
+  -h, --help   this text
+EOF
+}
+
+# Options first, and before anything that needs a repository, so --help works
+# anywhere. A slice session asked for --help and got "no such path: --help",
+# with no way short of reading this file to learn whether a check-only mode
+# existed. Options may sit among the paths; after `--` everything is a path.
+# bash 3.2, as below: no bare "${paths[@]}" on an array that may be empty.
+check=0
+paths=()
+ended=0
+for arg in "$@"; do
+  if [ "$ended" -eq 0 ]; then
+    case "$arg" in
+      -h|--help) usage; exit 0 ;;
+      --check) check=1; continue ;;
+      --) ended=1; continue ;;
+      -*) echo "unknown option: $arg" >&2; usage >&2; exit 64 ;;
+    esac
+  fi
+  paths[${#paths[@]}]="$arg"
+done
+set -- ${paths[@]+"${paths[@]}"}
+what=format
+did=formatted
+if [ "$check" -eq 1 ]; then
+  what=check
+  did=checked
+fi
 
 # The CONSUMER repo's root — not this package's.
 #
@@ -82,8 +127,13 @@ existing=()
 
 add_if_present() {
   # A path git reports can be gone (deleted, or renamed away); handing biome a
-  # missing file is an error, not a no-op.
-  [ -e "$1" ] && existing[${#existing[@]}]="$1"
+  # missing file is an error, not a no-op. A path that starts with - goes to
+  # biome as ./-…, or biome would read it as a flag.
+  [ -e "$1" ] || return 0
+  case "$1" in
+    -*) existing[${#existing[@]}]="./$1" ;;
+    *) existing[${#existing[@]}]="$1" ;;
+  esac
   return 0
 }
 
@@ -116,11 +166,11 @@ if [ $# -gt 0 ]; then
         *) echo "error: no such path: $f" >&2 ;;
       esac
     done
-    echo "       Nothing was formatted." >&2
+    echo "       Nothing was $did." >&2
     exit 1
   fi
   if [ ${#existing[@]} -eq 0 ]; then
-    echo "nothing to format — the $deleted named path(s) are deleted."
+    echo "nothing to $what — the $deleted named path(s) are deleted."
     exit 0
   fi
 else
@@ -139,11 +189,17 @@ else
 fi
 
 if [ ${#existing[@]} -eq 0 ]; then
-  echo "nothing to format — no changed files."
+  echo "nothing to $what — no changed files."
   exit 0
 fi
 
-echo "▶ biome check --apply on ${#existing[@]} file(s)"
 # --no-errors-on-unmatched: the list carries .json, .md, .sql and images that
 # biome has no handler for, and an unmatched path is not a failure here.
-bunx biome check --no-errors-on-unmatched --apply "${existing[@]}"
+# Under --check, biome's exit status is the answer, and set -e passes it on.
+if [ "$check" -eq 1 ]; then
+  echo "▶ biome check on ${#existing[@]} file(s) (no changes written)"
+  bunx biome check --no-errors-on-unmatched "${existing[@]}"
+else
+  echo "▶ biome check --apply on ${#existing[@]} file(s)"
+  bunx biome check --no-errors-on-unmatched --apply "${existing[@]}"
+fi

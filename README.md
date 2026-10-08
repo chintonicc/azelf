@@ -320,12 +320,16 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
 ./scripts/slice-done.sh                                    # mark ready to land (you, or the session under --auto)
 ./scripts/format.sh                                        # the write half, by hand
+./scripts/format.sh --check path/to/file                   # the same, writing nothing
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths
 ./scripts/db-lock.sh status                                # who holds them, since when
 ```
 
 `format.sh` with named paths fails on one that does not exist and that git does not
-know, and formats nothing. A named path that was deleted is skipped.
+know, and formats nothing. A named path that was deleted is skipped. `--check` runs
+the same biome check without writing, and exits non-zero when it would change
+something. `--help` prints the usage, an unknown option exits 64, and `--` ends the
+options for a path that starts with `-`.
 
 ## Configuration reference
 

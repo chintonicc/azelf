@@ -61,13 +61,18 @@ export const sh = (cwd: string, script: string): string =>
 export const shResult = (
   cwd: string,
   script: string,
-): { ok: boolean; out: string } => {
+): { ok: boolean; out: string; code: number; stdout: string } => {
   const r = spawnSync("bash", ["-c", `set -euo pipefail\n${script}`], {
     cwd,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   });
-  return { ok: r.status === 0, out: `${r.stdout}${r.stderr}` };
+  return {
+    ok: r.status === 0,
+    out: `${r.stdout}${r.stderr}`,
+    code: r.status ?? -1,
+    stdout: r.stdout,
+  };
 };
 
 export type Consumer = {
