@@ -1,6 +1,6 @@
 # A resolution a lock can't throw away, a review that sees what it needs, and `format.sh --help`
 
-**Status:** NOT STARTED · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phase 1 landed 2026-10-08 · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log, the three entries dated 2026-10-08 that came in
 after `docs/unattended-run-plan.md` was written. That plan and `docs/run-polish-plan.md`
 cover every other open entry, and both are complete.
@@ -85,9 +85,9 @@ after the heading. Line numbers are as of `c8e12c4`.
 - **`format.sh` gets `-h`/`--help` and `--check`.** `--check` runs the same
   `biome check` without `--apply`, which is what the session ran by hand.
 
-## Phase 1 — a lock doesn't throw away a resolution
+## Phase 1 — a lock doesn't throw away a resolution (`6d618f9`)
 
-- [ ] **1a. A retrying git write in `resolveConflict`.** A small helper next to it:
+- [x] **1a. A retrying git write in `resolveConflict`.** A small helper next to it:
   run the git command; if it failed and its output matches
   `/index\.lock': File exists/`, wait and run it again. Use the backoff 250 ms, 500 ms,
   1 s, 2 s, 4 s, 8 s (about 16 s in all). Sleep with `Atomics.wait`, as
@@ -97,11 +97,11 @@ after the heading. Line numbers are as of `c8e12c4`.
 
   An env var, `SLICE_LOCK_RETRY_MS`, scales the base delay so tests don't wait 16 s.
   Name it in the helper's comment, like `SLICE_HEARTBEAT_SECONDS`.
-- [ ] **1b. Use it for both writes.** The `git add -A -- <files>`
+- [x] **1b. Use it for both writes.** The `git add -A -- <files>`
   (`slice-run.ts:2925`) and the `rebase --continue` (`slice-run.ts:2933`). For
   `--continue`, a lock failure that outlasts the retries must reject with the lock
   message, not fall through to "stopped with nothing left conflicted".
-- [ ] **1c. The rejection for a lock that stays.** The `give` reason becomes:
+- [x] **1c. The rejection for a lock that stays.** The `give` reason becomes:
 
   > the worktree's index stayed locked for 16 s (…/index.lock) — if no git process is running there, it is stale: remove it and run azelf retry 100
 
@@ -118,6 +118,30 @@ after the heading. Line numbers are as of `c8e12c4`.
     message and the lock path, and the slice is parked. The test removes the lock in
     its cleanup.
   - The first test fails on the old code (`git add failed`).
+
+**As landed.** As planned, with three differences:
+
+- **The abort is reported honestly.** 1c said to leave `give` as it is. But a lock that
+  stays also stops `git rebase --abort`, and `give` would then print "the branch is as it
+  was" over a worktree still mid-rebase. It now checks: when the rebase is still in
+  progress, it says `the rebase could not be aborted either — it is still in progress in
+  <worktree>. Finish or abort it there.` The dispatcher already leaves such a worktree
+  alone, so it waits for a person.
+- **The parser is `heldIndexLock` in `slice-resolve.ts`,** next to the other decisions
+  over git output. It returns the lock path, so the message names the real file. Only
+  `index.lock` counts: a `HEAD.lock` or any other failure is rejected at once.
+- **The backoff is in units of `SLICE_LOCK_RETRY_MS`** (default 250): 1, 2, 4, 8, 16, 32,
+  about 16 s in all. The message gives the total in seconds.
+
+The proof is as planned, plus parser tests in `sliceResolve.test.ts`. The lock tests take
+the lock with `--absolute-git-dir`, and the background `rm` gets its own stdio, so the
+dispatcher doesn't wait on the pipe it holds open. `runDispatcher` takes `env`, like
+`startDispatcher`. Both dispatcher tests fail on the old code. The persistent-lock test
+also checks that the rebase is still in progress, and that "the branch is as it was" is
+not printed. The `--continue` path has no test of its own: a lock arriving between the
+`add` and the `--continue` can't be staged from a resolver. It goes through the same
+helper. The README's resolver section gained a paragraph. The full suite passed: 429 of
+429.
 
 ## Phase 2 — the spec review sees what it needs, and says what it couldn't check
 
