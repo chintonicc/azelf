@@ -1,6 +1,6 @@
 # A land that finishes, one dispatcher per ticket, and a hold on hand work
 
-**Status:** NOT STARTED · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log: the five entries dated 2026-10-08 that
 `docs/lock-and-review-plan.md` left open, and two more from later the same day (a
 rebase that doesn't reinstall, and a worktree re-added by hand). Every other entry is
@@ -118,9 +118,9 @@ after the heading. Line numbers are as of `826db6f`.
   when the new base commits touched none of the slice's files, because then the
   slice's diff is byte-identical. The gates always run again.
 
-## Phase 1 — a rebase that brings new dependencies installs them
+## Phase 1 — a rebase that brings new dependencies installs them (a2e10be)
 
-- [ ] **1a. Reinstall after the pre-gate rebase.** In `tryLand` (`slice-run.ts:3390`),
+- [x] **1a. Reinstall after the pre-gate rebase.** In `tryLand` (`slice-run.ts:3390`),
   read the slice's merge-base before the rebase loop and again after it. If they
   differ and `git diff --name-only <before> <after>` names a `package.json`,
   `bun.lock` or `bun.lockb` (by basename, as `MANIFESTS` matches at
@@ -131,7 +131,7 @@ after the heading. Line numbers are as of `826db6f`.
 
   The slice's own dependency changes don't count: its session installed them. The
   resolver path ends at the same place, so it is covered.
-- [ ] **1b. A failed install parks** as `gates`, with reason `bun install failed after
+- [x] **1b. A failed install parks** as `gates`, with reason `bun install failed after
   the rebase (the lockfile may not match package.json) — run bun install in the
   worktree, commit the lockfile if it changed, and azelf retry <id>`. Its last few lines
   of output are printed under it.
@@ -141,6 +141,22 @@ after the heading. Line numbers are as of `826db6f`.
   root `postinstall` that writes a marker, or a stub install the test can see. A base
   move that touches no manifest installs nothing. A failing install parks with the
   reason above. The first test fails on the old code.
+
+**As landed.** `reinstallAfterRebase` in `slice-run.ts`, called between the rebase loop
+and `gatesPass`. It matches its own set (`INSTALL_MANIFESTS`: `package.json`,
+`bun.lock`, `bun.lockb`), not the wider `MANIFESTS`, because only those three make a
+bun install stale. Two changes from the plan:
+- The last eight lines of the install's output are printed *before* the park's
+  reason, not under it. The reason is printed by `askAboutBlocked`, which may recurse
+  into a retry, so nothing can follow it.
+- A failed install leaves the slice in `reinstallOwed`. Its in-run retry finds the
+  branch already rebased and the merge-base unchanged, so without this it would run
+  the gates against the stale install. A new dispatcher starts with the map empty,
+  which is right: the reason tells whoever restarts it to install by hand first.
+
+Proof: three tests in `sliceRun.test.ts` under "a rebase that brings new
+dependencies". The install-then-gate order and the failed-install park fail on the old
+code; the no-manifest case is a guard and passes on both. Suite 444/444.
 
 ## Phase 2 — an interrupted land is finished, not restarted
 
