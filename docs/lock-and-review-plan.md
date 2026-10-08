@@ -1,6 +1,6 @@
 # A resolution a lock can't throw away, a review that sees what it needs, and `format.sh --help`
 
-**Status:** IN PROGRESS — Phases 1 and 2 landed 2026-10-08 · **Written:** 2026-10-08
+**Status:** COMPLETE — all three phases landed 2026-10-08 · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log, the three entries dated 2026-10-08 that came in
 after `docs/unattended-run-plan.md` was written. That plan and `docs/run-polish-plan.md`
 cover every other open entry, and both are complete.
@@ -221,9 +221,9 @@ is corrected: the reviewer can read the worktree and is refused anything that ne
 approval. It also gives the 60 000-character budget. The section on a slice that won't
 land gains the summary line. The full suite passed: 435 of 435.
 
-## Phase 3 — `format.sh --help` and `--check`
+## Phase 3 — `format.sh --help` and `--check` (`e7274ae`)
 
-- [ ] **3a.** `scripts/format.sh` reads its options before the paths:
+- [x] **3a.** `scripts/format.sh` reads its options before the paths:
   - `-h`/`--help` prints usage to stdout and exits 0. The usage covers no arguments,
     named paths, `--check`, and that it formats only what changed;
   - `--check` runs `bunx biome check --no-errors-on-unmatched` without `--apply` on
@@ -232,7 +232,7 @@ land gains the summary line. The full suite passed: 435 of 435.
   - `--` ends the options, so a path that starts with `-` still works;
   - any other `-…` before `--` is an unknown option: usage on stderr, exit 64, as
     `session-commit.sh:59` does.
-- [ ] **3b.** The README's command list (`README.md:322`) gains the `--check` form, and
+- [x] **3b.** The README's command list (`README.md:322`) gains the `--check` form, and
   its paragraph (`README.md:327`) one sentence on `--help`.
 
   *Proof:* **`format.test.ts`**:
@@ -241,6 +241,27 @@ land gains the summary line. The full suite passed: 435 of 435.
     formatted file it exits 0;
   - `--bogus` exits 64 with usage on stderr;
   - `-- -odd.ts` formats a file named `-odd.ts`.
+
+**As landed.** As planned, with three differences:
+
+- **Options can come after the paths,** as in `format.sh a.ts --check`, which is how
+  people type it. Only `--` ends them. Options are read before the repository check,
+  so `--help` also works outside a checkout.
+- **A dash path reaches biome as `./-odd.ts`.** Accepting `-odd.ts` was half the job:
+  biome would have read the bare name as a flag. `add_if_present` adds the `./`, so a
+  changed file git reports with a leading dash is covered too.
+- **Messages follow the mode:** in check mode, "nothing to check — no changed files."
+  and "Nothing was checked."
+
+The tests' `bunx` is still a fake, so they check the arguments rather than biome's
+verdict: no `--apply` under `--check`, the exit status passed on (the fake fails while
+a marker file exists), and the `▶` line. One run by hand used the real biome: an
+unformatted probe file made `--check` exit 1 and was left unchanged, and two formatted
+files exited 0. Six tests are in a nested "options" describe. The outer describe is
+now "format.sh". There are tests for `--check` after a path, for check mode with
+nothing changed, and for `--check` after `--` read as a path. `shResult` in the
+fixture now returns `code` and `stdout`. All six tests fail on the old script, and the
+full suite passed: 441 of 441.
 
 ## Order and cost
 
