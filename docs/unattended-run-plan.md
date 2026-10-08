@@ -1,6 +1,6 @@
 # An unattended run that outlives a flaky network and starts only agent work
 
-**Status:** NOT STARTED · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), entries dated 2026-10-06 to 2026-10-08. `docs/run-polish-plan.md` covers
 the three smaller open entries from the same log.
@@ -94,9 +94,9 @@ after. The three marked *(user)* were chosen by the maintainer on 2026-10-08.
   and that the first land pushes them. If the two have diverged, the dispatch refuses,
   because no land could push.
 
-## Phase 1 — a flaky tracker does not end the run
+## Phase 1 — a flaky tracker does not end the run (`28c5777`)
 
-- [ ] **1a. `refreshOpenState` reads each ticket on its own, and failures don't throw.**
+- [x] **1a. `refreshOpenState` reads each ticket on its own, and failures don't throw.**
   - **The change.** A try/catch per ticket. On failure the ticket keeps `t.open` as it
     was. The function returns the failures (`{ id, error }[]`) and whether every read
     failed. It no longer reads tickets this run landed (1b).
@@ -123,7 +123,7 @@ after. The three marked *(user)* were chosen by the maintainer on 2026-10-08.
     where a failure stops before anything has started, which is the right failure. Only
     the loop has something to lose, so only the loop learns to wait.
 
-- [ ] **1b. A landed ticket is not reopened, and its close is retried.**
+- [x] **1b. A landed ticket is not reopened, and its close is retried.**
   - `tryLand` already records `landedHeads` (`slice-run.ts:3037`). `refreshOpenState`
     skips those tickets' `t.open`, which stays `false`.
   - **Separately**, once per round, each landed ticket the tracker has not yet confirmed
@@ -141,7 +141,7 @@ after. The three marked *(user)* were chosen by the maintainer on 2026-10-08.
     (`slice-session.sh:195-202`), "failed to prep — skipping this round" retries them
     every round, and they start the round after the close goes through.
 
-- [ ] **1c. A round that throws ends the run with what it left behind.**
+- [x] **1c. A round that throws ends the run with what it left behind.**
   - Wrap the round body (`slice-run.ts:3610-3891`) in a try/catch. On catch, and on 1a's
     outage, one shared function prints:
 
@@ -172,6 +172,21 @@ after. The three marked *(user)* were chosen by the maintainer on 2026-10-08.
     the run prints the retry's success, and the tickets file reads #40 closed.
   - The catch in 1c is three lines, and its output comes from the same function the
     long-outage test covers. It gets no test of its own.
+
+**As landed.** The lines name `tracker.name`, not GitHub, since azelf takes other
+trackers. They read "GitHub" on consumer-a and "Fake" in the tests. The try/catch is
+around the whole loop, not the round body: a throw leaves the loop and goes to the
+same ending, with no body re-indented twice. It also prints the error's stack, because
+a network blip never reaches it, so anything that does is a bug. Landed tickets are
+skipped by `landedFiles`, which every land sets, rather than by `landedHeads`, which is
+set only when the head reads back. When the close fails, `slice-land.sh` saves the
+comment it would have left in `.git/azelf-close-<id>.txt`, and the dispatcher's retry
+posts that comment, so the unticked checks still reach the ticket. The ending reads
+pending closes once more before the block, so a run that ends in the round of its
+last land does not list a close that went through. The block is titled "landed, not
+seen closed on <tracker>", because an unreadable ticket may already be closed. It sets
+exit 1, since a ticket is left to close. The full suite passes (404). vitest's
+"Timeout calling onTaskUpdate" errors under load also show up on `cf908c5`.
 
 **What the consumer does:** the bump. Then drop the shell loop that restarts the
 dispatcher on this crash. It would now hide a real error behind a restart.
