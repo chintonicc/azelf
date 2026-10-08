@@ -818,12 +818,15 @@ step one.
 
 **The parent spec travels with it.** When the ticket's body names a parent under
 `## Parent`, that ticket's title and body are written to `.slice-parent.md` beside
-it, and pasted into the spec review as `PARENT SPEC`. The reviewer has no tools: it
-cannot fetch the parent, and without it a slice that follows the parent against its
-own ticket's wording was read as wrong. The review is told that the ticket says what
-the slice does, that the parent decides where the two disagree (reported as "ticket
-and parent disagree", never a BLOCK), and that a requirement only the parent states
-is another slice's.
+it, and pasted into the spec review as `PARENT SPEC`. The reviewer can read files in
+the worktree it runs in, but it is refused anything that needs an approval, `gh`
+included: it cannot fetch the parent, and without it a slice that follows the parent
+against its own ticket's wording was read as wrong. The review is told that the ticket
+says what the slice does, that the parent decides where the two disagree (reported as
+"ticket and parent disagree", never a BLOCK), and that a requirement only the parent
+states is another slice's. The parent gets up to 60 000 characters of the prompt. A
+longer one is cut, and the cut says the whole text is in `.slice-parent.md`, when the
+worktree has one.
 
 This works through the `## Parent` convention. `Tracker` has `children(id)` and no
 child-to-parent call, so a parent recorded only in the tracker's own hierarchy is
@@ -975,6 +978,21 @@ slice: `ticket-<n>.md` for its reviews, `conflict-<n>.md` for its resolutions. E
 attempt is added as `## Attempt k — <date> HH:MM`, newest last, so the BLOCK that
 parked a slice is still there after the review that later passed it. A blocked land
 names its file on the line under the ✗, as `review: /…/.slice-reviews/ticket-14.md`.
+
+**Every spec review ends on one line in the run log**, under the review's text:
+
+```
+  spec review: PASS — 2 things it could not check:
+    - the rejected alternatives in the parent spec (cut off)
+    - the swipe, on a device
+```
+
+The reviewer puts each thing it could not check on an `UNVERIFIED:` line before its
+verdict, and they are listed here, along with a parent spec it could not read or got
+only in part. They never change the verdict; they make a PASS with holes look
+different from a PASS. Both reviews are told which gates already passed on the diff,
+and to run nothing: on consumer-a a review tried to run the tests, was refused, and
+called them unconfirmed.
 
 **The plan-level review is the run's last word.** When review is on, every ticket
 has closed, and two or more slices landed in the run, the agent reads the whole plan

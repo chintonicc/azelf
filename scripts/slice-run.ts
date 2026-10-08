@@ -1502,8 +1502,14 @@ function ticketBody(n: TicketId): string {
   }
 }
 
-/** What a parent spec may take of the spec review's prompt. */
-const PARENT_BUDGET = 20_000;
+/**
+ * What a parent spec may take of the spec review's prompt. It was 20 000, and
+ * consumer-a's parent specs outgrew it: one of 22 912 characters lost its
+ * closing section, and the reviewer said so inside a PASS. Half the diff's
+ * budget, and when that is not enough either, the note says where the whole
+ * text is.
+ */
+const PARENT_BUDGET = 60_000;
 
 /**
  * The ticket this one hangs under, or null.
@@ -1529,27 +1535,23 @@ function parentOf(id: TicketId): TicketId | null {
 /**
  * The parent spec for the review's prompt: its title and body, cut to a
  * budget of its own. `text` is null with no parent, and with one the tracker
- * cannot read; the second case carries a `note` for the report, because a
- * review that could not see the parent is a weaker review.
+ * cannot read. A `note` says what the review could not see, for the report
+ * and the run log, because a review that could not see the parent is a
+ * weaker review.
+ *
+ * A cut parent points at `.slice-parent.md` when the worktree has one: the
+ * reviewer runs in the worktree and can read a file there, where a `gh` call
+ * needs an approval nobody is there to give. Only a cut with no file to point
+ * at is a note.
  */
 function parentSpec(id: TicketId): { text: string | null; note?: string } {
   const parent = parentOf(id);
   if (!parent) return { text: null };
+  let full: string;
   try {
     const title = tracker.get(parent).title;
     const body = tracker.body(parent) || "(no body)";
-    const full = `${ref(parent)} — ${title}\n\n${body}`;
-    return {
-      text:
-        full.length <= PARENT_BUDGET
-          ? full
-          : `${full.slice(
-              0,
-              PARENT_BUDGET,
-            )}\n\n[parent spec truncated to ${PARENT_BUDGET} of ${
-              full.length
-            } chars]`,
-    };
+    full = `${ref(parent)} — ${title}\n\n${body}`;
   } catch {
     return {
       text: null,
@@ -1558,6 +1560,38 @@ function parentSpec(id: TicketId): { text: string | null; note?: string } {
       )} could not be read — reviewed against the ticket alone)`,
     };
   }
+  if (full.length <= PARENT_BUDGET) return { text: full };
+  const cut = `${full.slice(
+    0,
+    PARENT_BUDGET,
+  )}\n\n[parent spec truncated to ${PARENT_BUDGET} of ${full.length} chars`;
+  if (existsSync(join(worktreeFor(id), ".slice-parent.md"))) {
+    return {
+      text: `${cut} — the whole text is in .slice-parent.md in your working directory; read it there]`,
+    };
+  }
+  return {
+    text: `${cut}]`,
+    note: `(the parent spec ${ref(parent)} was cut to ${PARENT_BUDGET} of ${
+      full.length
+    } chars, and the worktree has no .slice-parent.md — reviewed against the first part)`,
+  };
+}
+
+/**
+ * The paragraph both reviews get about what ran before them, and that they
+ * run nothing. Without it the spec review on consumer-a tried to run the test
+ * suite, was refused, and reported "the test results are unconfirmed" on a
+ * slice whose gates had passed minutes before. The review always comes after
+ * the gates (`tryLand`), so this is true whenever it is said.
+ */
+function alreadyRan(): string {
+  const names = config.gates.map((g) => `\`${g.name}\``).join(", ");
+  return `${
+    names
+      ? `The gates (${names}) ran on this exact diff, rebased onto ${baseBranch}, and passed.`
+      : "This repository configures no gates, so nothing ran on this diff before you."
+  } Do not run tests, builds, git or gh: you will not be allowed to, and you don't need to. You can read the files in your working directory, which is the slice's worktree.`;
 }
 
 /** `git diff` for a range, capped so an enormous branch can't blow the prompt. */
@@ -1645,7 +1679,7 @@ Read CLAUDE.md and any standards docs in the repo for the documented rules — a
 Generic smell baseline (Fowler ch.3), each a labelled judgement call, never a hard violation:
 ${SMELLS}
 
-Skip anything tooling already enforces (biome, tsc, vitest all run separately and passed).
+Skip anything tooling already enforces. ${alreadyRan()}
 
 Report per file/hunk: documented-standard breaches (cite the rule) and baseline smells (name it, quote the hunk). Distinguish the two. Be concrete; no praise, no summary of what the code does. Under 400 words. If nothing is worth raising, say exactly: "No standards findings."
 
@@ -1676,8 +1710,34 @@ type SpecContext = {
 };
 
 /**
+ * What the spec review decided, and what it says it could not check.
+ * `verdict` is null when it gave none, which `block` reads as BLOCK.
+ */
+type SpecReview = {
+  report: string;
+  block: boolean;
+  verdict: "PASS" | "BLOCK" | null;
+  unverified: string[];
+};
+
+/**
+ * The reviewer's `UNVERIFIED:` lines, in order. Markdown emphasis and a list
+ * dash around the word are tolerated, as for `IRRECONCILABLE:`; a line with
+ * nothing after the colon says nothing and is dropped.
+ */
+const unverifiedLines = (out: string): string[] =>
+  [...out.matchAll(/^[ \t>*_-]*UNVERIFIED:[*_]*[ \t]*(.*)$/gm)]
+    .map((m) => (m[1] ?? "").replace(/[*\s]+$/, ""))
+    .filter(Boolean);
+
+/**
  * Spec axis. Returns a verdict, because this is the one that can block:
  * "does the diff do what the ticket asked, and only that".
+ *
+ * And what the reviewer could not check, as `UNVERIFIED:` lines. On
+ * consumer-a a PASS said, in its prose, that the tests were unconfirmed and
+ * the parent spec had been cut off; nothing in the run log showed it, so a
+ * PASS with holes read like any other. The lines never change the verdict.
  */
 function reviewSpec(
   spec: string,
@@ -1686,7 +1746,7 @@ function reviewSpec(
   diff: string,
   cwd: string,
   context: SpecContext = {},
-): { report: string; block: boolean } {
+): SpecReview {
   const out = askAgent(
     `You are reviewing a diff on ONE axis only: does it faithfully implement the spec below?
 
@@ -1703,6 +1763,10 @@ Quote the spec line for each finding${
       context.landed ? ", or for (d) the landed line" : ""
     }. Do not comment on style, naming or structure — a separate axis covers that. Under 400 words.
 
+Before the verdict, put each thing you could not check on a line of its own:
+UNVERIFIED: <what you could not check, and why>
+Leave these out when you checked everything. Something you could not check is not, by itself, a reason to BLOCK.
+
 Then, as the FINAL line and nothing after it, print exactly one of:
 VERDICT: PASS
 VERDICT: BLOCK
@@ -1718,6 +1782,8 @@ BLOCK only for (a)${
 The SPEC is what this slice must do. The PARENT SPEC is the larger spec it is one slice of: it says why, and it decides wherever the two disagree. Where the diff follows the parent against the ticket's wording, report that as "ticket and parent disagree" — it is not (a) and not (c), and never a reason to BLOCK. A requirement only the parent states belongs to another slice: it is not missing from this one.`
         : ""
     }
+
+${alreadyRan()}
 
 SPEC:
 ${spec}
@@ -1755,16 +1821,21 @@ ${context.landed}`
       report:
         "(spec review did not return — treating as BLOCK; see the fail-closed note above)",
       block: true,
+      verdict: null,
+      unverified: [],
     };
   }
+  const unverified = unverifiedLines(out);
   const verdict = out.match(/^VERDICT:\s*(PASS|BLOCK)\s*$/m)?.[1];
-  if (!verdict) {
+  if (verdict !== "PASS" && verdict !== "BLOCK") {
     return {
       report: `${out}\n\n(no parseable VERDICT line — treating as BLOCK)`,
       block: true,
+      verdict: null,
+      unverified,
     };
   }
-  return { report: out, block: verdict === "BLOCK" };
+  return { report: out, block: verdict === "BLOCK", verdict, unverified };
 }
 
 /** What the landed diffs may take of the spec review's prompt. */
@@ -2132,6 +2203,24 @@ function reviewSlice(t: Ticket): boolean {
 
   console.log(`\n${heading}\n\n${body}`);
   console.log(`  report saved: ${path}`);
+
+  // One line to find whatever the prose above said: the verdict, and what the
+  // review could not check — its own UNVERIFIED lines, and a parent spec it
+  // could not read or got only in part.
+  const unchecked = [
+    ...(parent.note ? [parent.note.replace(/^\(|\)$/g, "")] : []),
+    ...spec.unverified,
+  ];
+  console.log(
+    `  spec review: ${spec.verdict ?? "no verdict — read as BLOCK"}${
+      unchecked.length
+        ? ` — ${unchecked.length} thing${
+            unchecked.length === 1 ? "" : "s"
+          } it could not check:`
+        : ""
+    }`,
+  );
+  for (const u of unchecked) console.log(`    - ${u}`);
 
   if (spec.block && (reviewBlocks || resolvedByAgent.has(t.id))) {
     console.log(

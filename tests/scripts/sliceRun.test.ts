@@ -398,8 +398,127 @@ describe("the spec review and the parent spec", () => {
     expect(r.out).toContain(
       "(the parent spec #17 could not be read — reviewed against the ticket alone)",
     );
+    expect(r.out).toContain(
+      "  spec review: PASS — 1 thing it could not check:\n    - the parent spec #17 could not be read — reviewed against the ticket alone\n",
+    );
     expect(specPrompt(fx)).not.toContain("PARENT SPEC");
     expect(r.out).toContain("landing #40");
+  });
+
+  /** #40 under a parent whose body is `size` characters and ends in END. */
+  const withParent = (size: number, opts: { file: boolean }) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, review: RECORD });
+    c = fx;
+    fx.setTicket("40", {
+      title: "Filter pills",
+      body: "Build.\n\n## Parent\n\n#17\n",
+    });
+    fx.setTicket("17", {
+      title: "Spec: the feed",
+      body: `${"x".repeat(size - 3)}END`,
+      ready: false,
+    });
+    if (opts.file) {
+      writeFileSync(join(fx.wt(40), ".slice-parent.md"), "the whole parent\n");
+    }
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+    expect(r.out).toContain("landing #40");
+    return { fx, r };
+  };
+
+  // consumer-a's parent was 22 912 characters, and the old budget of 20 000
+  // cut its last section off.
+  it("pastes a 30 000-character parent whole", () => {
+    const { fx } = withParent(30_000, { file: false });
+    expect(specPrompt(fx)).toContain("xEND");
+    expect(specPrompt(fx)).not.toContain("truncated");
+  });
+
+  it("cuts a longer one, and points at .slice-parent.md when the worktree has it", () => {
+    const { fx, r } = withParent(70_000, { file: true });
+    const prompt = specPrompt(fx);
+    expect(prompt).not.toContain("xEND");
+    expect(prompt).toMatch(
+      /\[parent spec truncated to 60000 of \d+ chars — the whole text is in \.slice-parent\.md in your working directory; read it there\]/,
+    );
+    // The reviewer can read the rest, so the cut is nothing it missed.
+    expect(r.out).toContain("  spec review: PASS\n");
+  });
+
+  it("says in the run log what was cut when there is no file to point at", () => {
+    const { fx, r } = withParent(70_000, { file: false });
+    expect(specPrompt(fx)).toMatch(
+      /\[parent spec truncated to 60000 of \d+ chars\]\n/,
+    );
+    expect(r.out).toContain(
+      "  spec review: PASS — 1 thing it could not check:",
+    );
+    expect(r.out).toMatch(
+      /\n {4}- the parent spec #17 was cut to 60000 of \d+ chars, and the worktree has no \.slice-parent\.md — reviewed against the first part\n/,
+    );
+  });
+});
+
+/**
+ * Both reviews run after the gates, and on consumer-a the spec review still
+ * tried to run the tests, was refused, and called them unconfirmed in a PASS.
+ */
+describe("what the spec review is told, and what it says it could not check", () => {
+  const land = (opts: Parameters<typeof makeConsumer>[0]) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, ...opts });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+    expect(r.out).toContain("landing #40");
+    return { fx, r };
+  };
+
+  it("names the gates that passed to both reviews, and tells them to run nothing", () => {
+    const { fx } = land({
+      gate: ["true"],
+      review: [
+        "bash",
+        "-c",
+        'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+        "reviewer",
+      ],
+    });
+    const prompts = readFileSync(join(fx.root, "prompts"), "utf8").split(
+      "\n=====\n",
+    );
+    const said =
+      "The gates (`true`) ran on this exact diff, rebased onto main, and passed. Do not run tests, builds, git or gh";
+    expect(prompts.find((p) => p.includes("faithfully implement"))).toContain(
+      said,
+    );
+    const standards = prompts.find((p) => p.includes("coding standards")) ?? "";
+    expect(standards).toContain(said);
+    expect(standards).not.toContain("biome, tsc, vitest");
+  });
+
+  it("lists the review's UNVERIFIED lines under its verdict, and still lands", () => {
+    const { r } = land({
+      review: [
+        "bash",
+        "-c",
+        "printf '%s\\n' 'Looks right.' 'UNVERIFIED: the rejected alternatives (cut off)' '**UNVERIFIED:** the swipe, on a device' 'VERDICT: PASS'",
+        "reviewer",
+      ],
+    });
+    expect(r.out).toContain(
+      "  spec review: PASS — 2 things it could not check:\n    - the rejected alternatives (cut off)\n    - the swipe, on a device\n",
+    );
+  });
+
+  it("prints the verdict alone when there is nothing it could not check", () => {
+    const { r } = land({
+      review: ["bash", "-c", "echo 'VERDICT: PASS'", "reviewer"],
+    });
+    expect(r.out).toContain("  spec review: PASS\n");
+    expect(r.out).not.toContain("could not check");
   });
 });
 
