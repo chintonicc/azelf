@@ -388,4 +388,10 @@ if close_err=$(slice_tracker_close "$ticket" "$close_comment" 2>&1); then
 else
   echo "warning: couldn't close $ticket_ref — close it by hand or its dependents stay blocked:" >&2
   echo "$close_err" >&2
+  # Kept for whoever closes it later: a dispatcher retries the close with this
+  # comment, so the unticked checks above still reach the ticket.
+  close_saved="$_slice_common/azelf-close-$ticket.txt"
+  if printf '%s\n' "$close_comment" >"$close_saved" 2>/dev/null; then
+    echo "  the comment it would have left is in $close_saved" >&2
+  fi
 fi

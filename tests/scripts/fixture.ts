@@ -9,6 +9,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,6 +32,10 @@ import { EXCLUDE_BLOCK } from "../../scripts/slice-init";
  * `<id>\n<comment>` and marks the ticket closed — so a test can read back
  * what a land wrote to the ticket without a network, and `slice-land.sh`'s
  * close step succeeds instead of printing a gh error.
+ *
+ * Two switches stand in for a network that comes and goes, each a file in
+ * the fixture root: while `tracker-down` exists, `get` and `body` throw as
+ * the GitHub adapter does; while `close-fails` exists, `close` throws.
  */
 export const AZELF = resolve(__dirname, "..", "..");
 
@@ -76,6 +81,10 @@ export type Consumer = {
   ticketsFile: string;
   /** Change what the fake tracker answers for one ticket from now on. */
   setTicket: (id: string, patch: FakeTicket) => void;
+  /** Make the fake tracker's reads throw, or answer again. */
+  trackerDown: (down: boolean) => void;
+  /** Make the fake tracker's `close` throw, or work again. */
+  closeFails: (fails: boolean) => void;
   /** A linked worktree's path, by ticket number. */
   wt: (n: number) => string;
   /** The DB lock's claim dir and log, in the common git dir. */
@@ -214,11 +223,16 @@ export function makeConsumer(opts: {
   writeFileSync(
     join(main, "slice.config.ts"),
     `import { spawn } from "node:child_process";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringify(
       join(AZELF, "index.ts"),
     )};
 const TICKETS = ${JSON.stringify(ticketsFile)};
+const DOWN = ${JSON.stringify(join(root, "tracker-down"))};
+const CLOSE_FAILS = ${JSON.stringify(join(root, "close-fails"))};
+const unreachable = (what: string): never => {
+  throw new Error(\`gh \${what} failed:\\nPost "https://api.github.com/graphql": EOF\`);
+};
 type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[]; blockedBy?: string[] };
 const all = (): Record<string, Fake> => JSON.parse(readFileSync(TICKETS, "utf8"));
 const ticket = (id: string) => ({
@@ -239,6 +253,7 @@ const tracker: Tracker = {
       return t.state === "open" && t.ready !== false;
     }),
   get: (id) => {
+    if (existsSync(DOWN)) unreachable(\`issue view \${id}\`);
     const t = ticket(id);
     return {
       id,
@@ -255,13 +270,17 @@ const tracker: Tracker = {
     next[id] = { ...next[id], blockedBy: [...(next[id]?.blockedBy ?? []), blockerId] };
     writeFileSync(TICKETS, JSON.stringify(next));
   },
-  body: (id) => ticket(id).body,
+  body: (id) => {
+    if (existsSync(DOWN)) unreachable(\`issue view \${id}\`);
+    return ticket(id).body;
+  },
   children: (id) => ticket(id).children ?? [],
   parentClaims: () =>
     Object.keys(all())
       .map((id) => ({ id, state: ticket(id).state, body: ticket(id).body }))
       .filter((t) => /^## Parent/m.test(t.body)),
   close: (id, comment) => {
+    if (existsSync(CLOSE_FAILS)) unreachable(\`issue close \${id}\`);
     appendFileSync(${JSON.stringify(closeFile)}, \`\${id}\\n\${comment}\\n\`);
     const next = all();
     next[id] = { ...next[id], state: "closed" };
@@ -317,12 +336,18 @@ export default {
     now[id] = { ...now[id], ...patch };
     writeFileSync(ticketsFile, JSON.stringify(now));
   };
+  const toggle = (name: string) => (on: boolean) => {
+    if (on) writeFileSync(join(root, name), "");
+    else rmSync(join(root, name), { force: true });
+  };
   return {
     root,
     main,
     closeFile,
     ticketsFile,
     setTicket,
+    trackerDown: toggle("tracker-down"),
+    closeFails: toggle("close-fails"),
     wt,
     lockDir: join(main, ".git", "azelf-db.lock"),
     lockLog: join(main, ".git", "azelf-db.log"),

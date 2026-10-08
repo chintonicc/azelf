@@ -940,8 +940,118 @@ function dbLockStatusLine(): string {
   return out.trim();
 }
 
-function refreshOpenState(tickets: Ticket[]): void {
-  for (const t of tickets) t.open = tracker.get(t.id).state === "open";
+/**
+ * Every ticket's state, read again at the top of a round. Each read on its
+ * own: one that fails leaves that ticket as it was, and is returned rather
+ * than thrown. The adapter throws on any failed `gh` call, and is right to at
+ * plan time, where nothing has started yet. Here it ended runs: one `EOF` from
+ * GitHub, seconds before it answered normally again, and the live sessions
+ * were left with nothing to land them. A state read a round late is safe: a
+ * ticket that is really closed waits one more round.
+ *
+ * Not the tickets this run landed. Their state is ours: a close that failed
+ * after the land would read them open again, and `runnable` would prep a
+ * fresh worktree for work that is already on the base branch. Their close is
+ * retried instead, in `retryCloses`.
+ */
+function refreshOpenState(tickets: Ticket[]): {
+  failed: { id: TicketId; error: string }[];
+  allFailed: boolean;
+} {
+  const failed: { id: TicketId; error: string }[] = [];
+  let read = 0;
+  for (const t of tickets) {
+    // Set at every land, where landedHeads is only when the head read back.
+    if (landedFiles.has(t.id)) continue;
+    read += 1;
+    try {
+      t.open = tracker.get(t.id).state === "open";
+    } catch (e) {
+      failed.push({ id: t.id, error: errorLine(e) });
+    }
+  }
+  return { failed, allFailed: read > 0 && failed.length === read };
+}
+
+/**
+ * The line of an error worth printing. The GitHub adapter's message is
+ * `gh … failed:` with all of `gh`'s stderr below it, and the line after that
+ * header is the one that says what happened.
+ */
+function errorLine(e: unknown): string {
+  const lines = (e instanceof Error ? e.message : String(e))
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const at = lines.length > 1 && lines[0]?.endsWith("failed:") ? 1 : 0;
+  return lines[at] ?? "no message";
+}
+
+// How long every read may fail before the run gives up: long enough to ride
+// out a VPN reconnecting, short enough that a run whose network is gone for
+// good says so the same morning. Seconds, like SLICE_HEARTBEAT_SECONDS, so a
+// test can wait two of them instead of thirty minutes.
+const trackerOutageMs =
+  Number(process.env.SLICE_TRACKER_OUTAGE_SECONDS ?? 1800) * 1000;
+
+/** `30 minutes`, `2 seconds`. */
+function duration(ms: number): string {
+  const s = Math.round(ms / 1000);
+  if (s < 120) return `${s} second${s === 1 ? "" : "s"}`;
+  return `${Math.round(s / 60)} minutes`;
+}
+
+// The streak of rounds with a failed read: which tickets, how many rounds,
+// when it was last said, and since when every read has failed.
+const unreadable = new Set<TicketId>();
+let unreadableRounds = 0;
+let unreadableSaidAt = 0;
+let outageSince: number | null = null;
+
+/**
+ * What a round's failed reads print: the first round of a streak, the
+ * heartbeat while it lasts, and the round it ends. Returns why the run must
+ * stop, once every read has failed for `trackerOutageMs`.
+ */
+function noteUnreadable(
+  failed: { id: TicketId; error: string }[],
+  allFailed: boolean,
+): string | null {
+  outageSince = allFailed ? outageSince ?? Date.now() : null;
+  if (failed.length === 0) {
+    if (unreadableRounds > 0) {
+      console.log(
+        `\n[round ${round}] ${tracker.name} answers again (${[...unreadable]
+          .map(ref)
+          .join(", ")} unreadable for ${unreadableRounds} round${
+          unreadableRounds === 1 ? "" : "s"
+        })`,
+      );
+    }
+    unreadable.clear();
+    unreadableRounds = 0;
+    return null;
+  }
+  for (const f of failed) unreadable.add(f.id);
+  unreadableRounds += 1;
+  const ids = failed.map((f) => ref(f.id)).join(", ");
+  const its = failed.length === 1 ? "its" : "their";
+  const error = (failed[0] as { error: string }).error;
+  if (unreadableRounds === 1) {
+    console.log(
+      `\n[round ${round}] couldn't read ${ids} from ${tracker.name} — keeping ${its} last state, trying again next round: ${error}`,
+    );
+    unreadableSaidAt = Date.now();
+  } else if (Date.now() - unreadableSaidAt >= heartbeatMs) {
+    console.log(
+      `\n[round ${round}] still can't read ${ids} from ${tracker.name}, ${unreadableRounds} rounds now — keeping ${its} last state: ${error}`,
+    );
+    unreadableSaidAt = Date.now();
+  }
+  if (outageSince !== null && Date.now() - outageSince >= trackerOutageMs) {
+    return `${tracker.name} has not answered for ${duration(trackerOutageMs)}`;
+  }
+  return null;
 }
 
 /**
@@ -3033,6 +3143,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     );
   }
   landedFiles.set(t.id, landing);
+  closePending.set(t.id, { said: false });
   const landedAt = baseHead();
   if (landedAt) landedHeads.set(t.id, landedAt);
   if (landedFrom && landedAt) {
@@ -3199,6 +3310,69 @@ const landedHeads = new Map<TicketId, string>();
 
 /** The base branch before and after each land: that slice's commits. */
 const landedRanges = new Map<TicketId, { from: string; to: string }>();
+
+/**
+ * Landed tickets the tracker has not yet been read as closed, and whether a
+ * retry of the close has failed and said so. Kept from the land on.
+ */
+const closePending = new Map<TicketId, { said: boolean }>();
+
+/**
+ * The close after a land is `slice-land.sh`'s, and a failed one is only a
+ * warning there: the code is pushed. On the same flaky network that ends a
+ * read, it leaves a ticket open whose dependents' preps refuse while it is.
+ * So once a round each landed ticket not yet seen closed is read, and if it
+ * is still open the dispatcher closes it itself, with the comment the land
+ * saved (see slice-land.sh) and a line saying whose close this is. A failed
+ * read or close is tried again next round; seen closed, it is not read again.
+ */
+function retryCloses(): void {
+  for (const [id, state] of closePending) {
+    let open: boolean;
+    try {
+      open = tracker.get(id).state === "open";
+    } catch {
+      continue;
+    }
+    if (!open) {
+      closePending.delete(id);
+      continue;
+    }
+    const saved = join(
+      run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .out,
+      `azelf-close-${id}.txt`,
+    );
+    const head = landedHeads.get(id)?.slice(0, 7);
+    let landed = `Landed on ${baseBranch}${head ? ` as ${head}` : ""}.`;
+    try {
+      landed = readFileSync(saved, "utf8").trim();
+    } catch {}
+    try {
+      tracker.close(
+        id,
+        `${landed}\n\nClosed by the dispatcher on a later round: the close right after the land failed.`,
+      );
+    } catch (e) {
+      if (!state.said) {
+        console.log(
+          `\n[round ${round}] couldn't close ${ref(id)} on ${
+            tracker.name
+          } — it landed; trying again every round: ${errorLine(e)}`,
+        );
+        state.said = true;
+      }
+      continue;
+    }
+    console.log(
+      `\n[round ${round}] closed ${ref(
+        id,
+      )} — the close after its land had failed`,
+    );
+    rmSync(saved, { force: true });
+    closePending.delete(id);
+  }
+}
 
 /**
  * For each slice, the slices that landed while it had a branch, in order.
@@ -3607,288 +3781,347 @@ let lastRoundLine = "";
 let lastRoundLineAt = 0;
 // The exclusiveLockLabel line last printed, so a long wait says it once.
 let lastLabelLine = "";
-for (;;) {
-  round += 1;
-  sessionAnswers.clear();
-  noteAzelfChange();
-  if (round > 1) {
-    refreshOpenState(tickets);
-    unparkClosed(tickets);
-  }
+// Set when the run stopped on an error rather than finishing or parking: the
+// ending prints the resume command for it too.
+let stoppedOnError = false;
 
-  const remaining = tickets.filter((t) => t.open);
-  if (remaining.length === 0) {
-    console.log("\n✓ every ticket closed — plan complete.");
-    planReview = reviewPlan(tickets, planBase);
-    break;
-  }
-
-  reportOverlaps(tickets);
-  noteHandWork(tickets);
-
-  // Land before launching, so a slot freed this round is refilled this round.
-  // One per round: every land fast-forwards the same master in the same main
-  // worktree, so they cannot be done concurrently.
-  const finished = tickets.filter((t) => awaitingLand(t, isParked));
-  if (finished.length) {
+/**
+ * The run cannot go on, and slices may still be running: say so, name them,
+ * and leave through the normal ending, which prints what is left and the
+ * command that picks the run up. A restart adopts live sessions as they are.
+ * Shared by a round that threw and by a tracker that stopped answering.
+ */
+function stopOnError(why: string): void {
+  console.log(`\n✗ the dispatcher stopped in round ${round}: ${why}`);
+  const live = tickets.filter((t) => t.open && occupied(t.id));
+  if (live.length) {
     console.log(
-      `\n[round ${round}] ${finished.length} marked done — landing one`,
-    );
-    tryLand(finished[0] as Ticket);
-  }
-
-  if (stopRequested) {
-    console.log(
-      "\n  stopping at your request. Nothing has been left half-landed.",
-    );
-    break;
-  }
-
-  // The DB lock, read once per round. A held lock no longer stops the wave:
-  // it used to ("DB lock held — not starting anything"), and on consumer-a
-  // that turned one holder into a run that started nothing and said so once.
-  // The claim protocol makes starting safe — a slice that needs the lock is
-  // refused at `db-lock.sh claim`, exits, and is parked here until the lock
-  // frees — so the only tickets held back are the ones that already tried.
-  // The holder text is printed whole, indented, because it can be more than
-  // a name: when worktrees are dirty with no claim it carries the diagnosis.
-  const holder = dbLockHolder();
-  const lockParked = tickets.filter(
-    (t) => t.open && holder !== "" && isWaitingOnLock(t.id),
-  );
-  if (holder) {
-    console.log(
-      `\n[round ${round}] DB lock held by:\n${holder
-        .split("\n")
-        .map((l) => `    ${l}`)
-        .join("\n")}${
-        lockParked.length
-          ? `\n  waiting for it: ${lockParked
-              .map((t) => ref(t.id))
-              .join(", ")} — relaunched when it frees`
-          : ""
-      }`,
-    );
-  }
-
-  const up = tickets.filter((t) => t.open && occupied(t.id));
-  const free = maxParallel - up.length;
-  const ready = runnable(tickets, holder !== "");
-
-  // Once when it changes: a label wait lasts as long as a whole slice does.
-  const flying = exclusiveInFlight(tickets);
-  const labelWaiting = flying
-    ? tickets.filter((t) => t.open && t.exclusive && t.id !== flying.id)
-    : [];
-  const labelLine = labelWaiting.length
-    ? `[${config.exclusiveLockLabel}] one at a time: ${ref(
-        (flying as Ticket).id,
-      )} in flight; waiting on it: ${labelWaiting
+      `  still running, with nothing to land them: ${live
         .map((t) => ref(t.id))
-        .join(", ")}`
-    : "";
-  if (labelLine && labelLine !== lastLabelLine) {
-    console.log(`\n[round ${round}] ${labelLine}`);
-  }
-  lastLabelLine = labelLine;
-
-  // Below minFreeDiskGb, a slice that needs a NEW worktree waits. A relaunch
-  // reuses its worktree, costs next to nothing on disk, and leads to a land,
-  // which is what frees space, so it is never held. The first new one is
-  // checked before the round's line, so a held round does not announce
-  // starts it will not make.
-  const wanted = free > 0 ? ready.slice(0, free) : [];
-  const isNew = (t: Ticket) => !hasWorktree(t.id);
-  const firstNew = wanted.find(isNew);
-  let room = firstNew === undefined || roomToPrep(firstNew.id);
-  const heldOnDisk = room ? [] : wanted.filter(isNew);
-  const starting = wanted.filter((t) => !heldOnDisk.includes(t));
-  const prepped: TicketId[] = [];
-
-  if (starting.length > 0) {
-    console.log(
-      `\n[round ${round}] starting ${starting
-        .map((t) => `${ref(t.id)}`)
-        .join(", ")}`,
+        .join(" ")}`,
     );
-    for (const t of starting) {
-      // Serially, on purpose: concurrent `git worktree add` against one repo
-      // contends on ref locks, and parallel `bun install`s are a pointless
-      // spike. A failure here is reported and skipped, never fatal — the
-      // other slices in this wave should still start.
-      //
-      // The disk is read again before every new worktree: the one before it
-      // took its share.
-      const fresh = isNew(t);
-      if (fresh && !(room && roomToPrep(t.id))) {
-        room = false;
-        heldOnDisk.push(t);
-        continue;
+  }
+  stoppedOnError = true;
+  process.exitCode = 1;
+}
+
+// Around the loop, so a round that throws ends it the way the stops inside it
+// do. A plan-time error is left to throw: nothing had started.
+try {
+  for (;;) {
+    round += 1;
+    sessionAnswers.clear();
+    noteAzelfChange();
+    if (round > 1) {
+      const { failed, allFailed } = refreshOpenState(tickets);
+      const outage = noteUnreadable(failed, allFailed);
+      if (outage) {
+        stopOnError(outage);
+        break;
       }
-      console.log(`  prepping ${ref(t.id)} …`);
-      const { ok } = run(
-        [
-          "./scripts/slice-session.sh",
-          t.id,
-          ...sessionFlags,
-          "--prep-only",
-          "--dispatched",
-        ],
-        { inherit: true, allowFail: true },
+      retryCloses();
+      unparkClosed(tickets);
+    }
+
+    const remaining = tickets.filter((t) => t.open);
+    if (remaining.length === 0) {
+      console.log("\n✓ every ticket closed — plan complete.");
+      planReview = reviewPlan(tickets, planBase);
+      break;
+    }
+
+    reportOverlaps(tickets);
+    noteHandWork(tickets);
+
+    // Land before launching, so a slot freed this round is refilled this round.
+    // One per round: every land fast-forwards the same master in the same main
+    // worktree, so they cannot be done concurrently.
+    const finished = tickets.filter((t) => awaitingLand(t, isParked));
+    if (finished.length) {
+      console.log(
+        `\n[round ${round}] ${finished.length} marked done — landing one`,
       );
-      if (ok) {
-        prepped.push(t.id);
-        continue;
+      tryLand(finished[0] as Ticket);
+    }
+
+    if (stopRequested) {
+      console.log(
+        "\n  stopping at your request. Nothing has been left half-landed.",
+      );
+      break;
+    }
+
+    // The DB lock, read once per round. A held lock no longer stops the wave:
+    // it used to ("DB lock held — not starting anything"), and on consumer-a
+    // that turned one holder into a run that started nothing and said so once.
+    // The claim protocol makes starting safe — a slice that needs the lock is
+    // refused at `db-lock.sh claim`, exits, and is parked here until the lock
+    // frees — so the only tickets held back are the ones that already tried.
+    // The holder text is printed whole, indented, because it can be more than
+    // a name: when worktrees are dirty with no claim it carries the diagnosis.
+    const holder = dbLockHolder();
+    const lockParked = tickets.filter(
+      (t) => t.open && holder !== "" && isWaitingOnLock(t.id),
+    );
+    if (holder) {
+      console.log(
+        `\n[round ${round}] DB lock held by:\n${holder
+          .split("\n")
+          .map((l) => `    ${l}`)
+          .join("\n")}${
+          lockParked.length
+            ? `\n  waiting for it: ${lockParked
+                .map((t) => ref(t.id))
+                .join(", ")} — relaunched when it frees`
+            : ""
+        }`,
+      );
+    }
+
+    const up = tickets.filter((t) => t.open && occupied(t.id));
+    const free = maxParallel - up.length;
+    const ready = runnable(tickets, holder !== "");
+
+    // Once when it changes: a label wait lasts as long as a whole slice does.
+    const flying = exclusiveInFlight(tickets);
+    const labelWaiting = flying
+      ? tickets.filter((t) => t.open && t.exclusive && t.id !== flying.id)
+      : [];
+    const labelLine = labelWaiting.length
+      ? `[${config.exclusiveLockLabel}] one at a time: ${ref(
+          (flying as Ticket).id,
+        )} in flight; waiting on it: ${labelWaiting
+          .map((t) => ref(t.id))
+          .join(", ")}`
+      : "";
+    if (labelLine && labelLine !== lastLabelLine) {
+      console.log(`\n[round ${round}] ${labelLine}`);
+    }
+    lastLabelLine = labelLine;
+
+    // Below minFreeDiskGb, a slice that needs a NEW worktree waits. A relaunch
+    // reuses its worktree, costs next to nothing on disk, and leads to a land,
+    // which is what frees space, so it is never held. The first new one is
+    // checked before the round's line, so a held round does not announce
+    // starts it will not make.
+    const wanted = free > 0 ? ready.slice(0, free) : [];
+    const isNew = (t: Ticket) => !hasWorktree(t.id);
+    const firstNew = wanted.find(isNew);
+    let room = firstNew === undefined || roomToPrep(firstNew.id);
+    const heldOnDisk = room ? [] : wanted.filter(isNew);
+    const starting = wanted.filter((t) => !heldOnDisk.includes(t));
+    const prepped: TicketId[] = [];
+
+    if (starting.length > 0) {
+      console.log(
+        `\n[round ${round}] starting ${starting
+          .map((t) => `${ref(t.id)}`)
+          .join(", ")}`,
+      );
+      for (const t of starting) {
+        // Serially, on purpose: concurrent `git worktree add` against one repo
+        // contends on ref locks, and parallel `bun install`s are a pointless
+        // spike. A failure here is reported and skipped, never fatal — the
+        // other slices in this wave should still start.
+        //
+        // The disk is read again before every new worktree: the one before it
+        // took its share.
+        const fresh = isNew(t);
+        if (fresh && !(room && roomToPrep(t.id))) {
+          room = false;
+          heldOnDisk.push(t);
+          continue;
+        }
+        console.log(`  prepping ${ref(t.id)} …`);
+        const { ok } = run(
+          [
+            "./scripts/slice-session.sh",
+            t.id,
+            ...sessionFlags,
+            "--prep-only",
+            "--dispatched",
+          ],
+          { inherit: true, allowFail: true },
+        );
+        if (ok) {
+          prepped.push(t.id);
+          continue;
+        }
+        console.log(`  ! ${ref(t.id)} failed to prep — skipping this round`);
+        if (fresh) removeHalfPrepped(t.id);
+        // Running out of space is the usual way a prep fails partway, and says
+        // so only in `bun install`'s output, which went straight to the
+        // terminal. The disk is read instead: below the floor, the rest of this
+        // round's new worktrees wait, and so does every round after it until a
+        // land frees space. That is what stops the retries.
+        if (!roomToPrep(t.id)) room = false;
       }
-      console.log(`  ! ${ref(t.id)} failed to prep — skipping this round`);
-      if (fresh) removeHalfPrepped(t.id);
-      // Running out of space is the usual way a prep fails partway, and says
-      // so only in `bun install`'s output, which went straight to the
-      // terminal. The disk is read instead: below the floor, the rest of this
-      // round's new worktrees wait, and so does every round after it until a
-      // land frees space. That is what stops the retries.
-      if (!roomToPrep(t.id)) room = false;
+      if (prepped.length) {
+        for (const n of prepped) launchedAt.set(n, Date.now());
+        openSessions(prepped);
+      }
     }
-    if (prepped.length) {
-      for (const n of prepped) launchedAt.set(n, Date.now());
-      openSessions(prepped);
+
+    if (once) {
+      console.log("\n--once: stopping here.");
+      break;
     }
-  }
 
-  if (once) {
-    console.log("\n--once: stopping here.");
-    break;
-  }
+    // A session that has been SEEN is one that came up. Forgetting the launch
+    // time here is what keeps a slice that came up, worked, and exited without
+    // declaring done — a refused DB-lock claim is the usual reason — from being
+    // reported below as one that "never came up". `occupied` does not need the
+    // entry once the live marker exists, and the marker outlives the window.
+    for (const t of tickets) if (hasSession(t.id)) launchedAt.delete(t.id);
 
-  // A session that has been SEEN is one that came up. Forgetting the launch
-  // time here is what keeps a slice that came up, worked, and exited without
-  // declaring done — a refused DB-lock claim is the usual reason — from being
-  // reported below as one that "never came up". `occupied` does not need the
-  // entry once the live marker exists, and the marker outlives the window.
-  for (const t of tickets) if (hasSession(t.id)) launchedAt.delete(t.id);
-
-  // Keyed off the launcher's own grace window, so under Warp this means "the
-  // tab opened and nothing ran in it — the hook, most likely" and under
-  // manual it means "nobody has pasted the command yet"; either way the
-  // launch is retried next round.
-  const idle = idleWorktrees(tickets).filter((t) => launchedAt.has(t.id));
-  if (idle.length) {
-    console.log(
-      `[round ${round}] never came up: ${idle
-        .map((t) => `${ref(t.id)}`)
-        .join(", ")} — launched via ${launcher.name} over ${Math.round(
-        launcher.startingGraceMs / 1000,
-      )}s ago and no session has started. Check where it should have opened; it will be relaunched.`,
-    );
-    for (const t of idle) launchedAt.delete(t.id);
-  }
-
-  // Only when its counts change, or once a heartbeat. Counted from the
-  // tickets as they are now, after this round's land and launches, so a
-  // ticket that just landed is not "open" and a slice that is done and
-  // waiting its turn is not "blocked". The two middle buckets print only when
-  // they are not zero: a line with neither reads word for word as it always
-  // did, so a watcher that matches it keeps working.
-  const openNow = tickets.filter((t) => t.open);
-  const stillOpen = new Set(openNow.map((t) => t.id));
-  const running = openNow.filter((t) => occupied(t.id));
-  const toLand = openNow.filter(
-    (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
-  );
-  const blocked = openNow.filter(
-    (t) =>
-      !occupied(t.id) &&
-      !parked.has(t.id) &&
-      (t.foreignBlockers.length > 0 ||
-        t.blockedBy.some((b) => stillOpen.has(b))),
-  );
-  const queued =
-    openNow.length -
-    running.length -
-    toLand.length -
-    blocked.length -
-    openNow.filter((t) => parked.has(t.id) && !occupied(t.id)).length;
-  const roundLine = `${running.length} running · ${
-    toLand.length ? `${toLand.length} to land · ` : ""
-  }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
-    openNow.length
-  } open${parked.size ? ` · ${parked.size} parked` : ""} — land one to advance`;
-  if (
-    roundLine !== lastRoundLine ||
-    Date.now() - lastRoundLineAt >= heartbeatMs
-  ) {
-    console.log(`[round ${round}] ${roundLine}`);
-    lastRoundLine = roundLine;
-    lastRoundLineAt = Date.now();
-  }
-
-  /**
-   * Nothing running, nothing startable, and everything left is parked: the run
-   * cannot advance on its own, and every further round is a sleep that prints
-   * the same line. Stop and say what is holding it, rather than looking busy.
-   *
-   * This is only reachable because parking exists. The old code could not
-   * stall here — it retried the failing land forever instead, which looked
-   * like progress and cost a review call every round.
-   *
-   * Not while a parked slice is already due a retry. Its triggers are outside
-   * events, except one: this round's own land moved the base branch, and a
-   * `gates` park waiting on exactly that must get its next round.
-   *
-   * Nor while someone has a rebase or merge in progress in a parked slice's
-   * worktree: finishing it moves the branch, which retries the land, so this
-   * run still has something coming.
-   */
-  if (
-    up.length === 0 &&
-    ready.length === 0 &&
-    remaining.length > 0 &&
-    remaining.every((t) => {
-      const p = parked.get(t.id);
-      return (
-        p !== undefined && !inProgress.has(t.id) && retryDue(t.id, p) === null
+    // Keyed off the launcher's own grace window, so under Warp this means "the
+    // tab opened and nothing ran in it — the hook, most likely" and under
+    // manual it means "nobody has pasted the command yet"; either way the
+    // launch is retried next round.
+    const idle = idleWorktrees(tickets).filter((t) => launchedAt.has(t.id));
+    if (idle.length) {
+      console.log(
+        `[round ${round}] never came up: ${idle
+          .map((t) => `${ref(t.id)}`)
+          .join(", ")} — launched via ${launcher.name} over ${Math.round(
+          launcher.startingGraceMs / 1000,
+        )}s ago and no session has started. Check where it should have opened; it will be relaunched.`,
       );
-    })
-  ) {
-    console.log("\n  nothing can advance — every open slice is parked.");
-    break;
-  }
+      for (const t of idle) launchedAt.delete(t.id);
+    }
 
-  /**
-   * The same stop, when the disk is what holds the rest: nothing running,
-   * nothing left to land, and a slice that could start is held below
-   * minFreeDiskGb. Only a land frees space inside a run, and none is coming.
-   * Exits 1 even with nothing parked, because the work is not done.
-   */
-  if (
-    heldOnDisk.length > 0 &&
-    up.length === 0 &&
-    prepped.length === 0 &&
-    remaining.every((t) => {
-      if (inProgress.has(t.id)) return false;
-      const p = parked.get(t.id);
-      if (p) return retryDue(t.id, p) === null;
-      return !(
-        hasWorktree(t.id) &&
-        (isReadyToLand(t.id) || (autoLand && autoFinished(t.id)))
-      );
-    })
-  ) {
-    const left = freeGbFor((heldOnDisk[0] as Ticket).id);
-    console.log(
-      `\n  nothing can advance — nothing is running or left to land, and ${heldOnDisk
-        .map((t) => ref(t.id))
-        .join(", ")} cannot start: ${
-        left === null
-          ? "the disk is"
-          : `${gb(left)} free where the worktrees go,`
-      } below minFreeDiskGb (${minFreeDiskGb}). Nothing in this run will free space; free some, or lower minFreeDiskGb in slice.config.ts, and run again:\n\n    ${resumeCommand()}`,
+    // Only when its counts change, or once a heartbeat. Counted from the
+    // tickets as they are now, after this round's land and launches, so a
+    // ticket that just landed is not "open" and a slice that is done and
+    // waiting its turn is not "blocked". The two middle buckets print only when
+    // they are not zero: a line with neither reads word for word as it always
+    // did, so a watcher that matches it keeps working.
+    const openNow = tickets.filter((t) => t.open);
+    const stillOpen = new Set(openNow.map((t) => t.id));
+    const running = openNow.filter((t) => occupied(t.id));
+    const toLand = openNow.filter(
+      (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
     );
-    process.exitCode = 1;
-    break;
-  }
+    const blocked = openNow.filter(
+      (t) =>
+        !occupied(t.id) &&
+        !parked.has(t.id) &&
+        (t.foreignBlockers.length > 0 ||
+          t.blockedBy.some((b) => stillOpen.has(b))),
+    );
+    const queued =
+      openNow.length -
+      running.length -
+      toLand.length -
+      blocked.length -
+      openNow.filter((t) => parked.has(t.id) && !occupied(t.id)).length;
+    const roundLine = `${running.length} running · ${
+      toLand.length ? `${toLand.length} to land · ` : ""
+    }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
+      openNow.length
+    } open${
+      parked.size ? ` · ${parked.size} parked` : ""
+    } — land one to advance`;
+    if (
+      roundLine !== lastRoundLine ||
+      Date.now() - lastRoundLineAt >= heartbeatMs
+    ) {
+      console.log(`[round ${round}] ${roundLine}`);
+      lastRoundLine = roundLine;
+      lastRoundLineAt = Date.now();
+    }
 
-  await new Promise((r) => setTimeout(r, intervalMs));
+    /**
+     * Nothing running, nothing startable, and everything left is parked: the run
+     * cannot advance on its own, and every further round is a sleep that prints
+     * the same line. Stop and say what is holding it, rather than looking busy.
+     *
+     * This is only reachable because parking exists. The old code could not
+     * stall here — it retried the failing land forever instead, which looked
+     * like progress and cost a review call every round.
+     *
+     * Not while a parked slice is already due a retry. Its triggers are outside
+     * events, except one: this round's own land moved the base branch, and a
+     * `gates` park waiting on exactly that must get its next round.
+     *
+     * Nor while someone has a rebase or merge in progress in a parked slice's
+     * worktree: finishing it moves the branch, which retries the land, so this
+     * run still has something coming.
+     */
+    if (
+      up.length === 0 &&
+      ready.length === 0 &&
+      remaining.length > 0 &&
+      remaining.every((t) => {
+        const p = parked.get(t.id);
+        return (
+          p !== undefined && !inProgress.has(t.id) && retryDue(t.id, p) === null
+        );
+      })
+    ) {
+      console.log("\n  nothing can advance — every open slice is parked.");
+      break;
+    }
+
+    /**
+     * The same stop, when the disk is what holds the rest: nothing running,
+     * nothing left to land, and a slice that could start is held below
+     * minFreeDiskGb. Only a land frees space inside a run, and none is coming.
+     * Exits 1 even with nothing parked, because the work is not done.
+     */
+    if (
+      heldOnDisk.length > 0 &&
+      up.length === 0 &&
+      prepped.length === 0 &&
+      remaining.every((t) => {
+        if (inProgress.has(t.id)) return false;
+        const p = parked.get(t.id);
+        if (p) return retryDue(t.id, p) === null;
+        return !(
+          hasWorktree(t.id) &&
+          (isReadyToLand(t.id) || (autoLand && autoFinished(t.id)))
+        );
+      })
+    ) {
+      const left = freeGbFor((heldOnDisk[0] as Ticket).id);
+      console.log(
+        `\n  nothing can advance — nothing is running or left to land, and ${heldOnDisk
+          .map((t) => ref(t.id))
+          .join(", ")} cannot start: ${
+          left === null
+            ? "the disk is"
+            : `${gb(left)} free where the worktrees go,`
+        } below minFreeDiskGb (${minFreeDiskGb}). Nothing in this run will free space; free some, or lower minFreeDiskGb in slice.config.ts, and run again:\n\n    ${resumeCommand()}`,
+      );
+      process.exitCode = 1;
+      break;
+    }
+
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+} catch (e) {
+  stopOnError(errorLine(e));
+  // Not a network blip, which never reaches here: a bug, and its stack is
+  // what finds it.
+  console.error(e);
+}
+
+// A landed ticket the tracker has not been read as closed. Read once more
+// first, so a run that ends the round of its last land does not list a close
+// that went through, and a close that failed gets one more try.
+retryCloses();
+if (closePending.size > 0) {
+  console.log(
+    `\n── landed, not seen closed on ${tracker.name} (${closePending.size}) ─────────`,
+  );
+  for (const id of closePending.keys()) {
+    console.log(
+      `  ${ref(
+        id,
+      )}  close it by hand if it is still open: its dependents' sessions refuse to start while it is`,
+    );
+  }
+  process.exitCode ||= 1;
 }
 
 // Landed, but only because a gate was re-run. Before the parked list, which
@@ -3952,6 +4185,8 @@ if (parked.size > 0) {
   );
   console.log(`  To pick the run up again:\n\n    ${resumeCommand()}`);
   process.exitCode = 1;
+} else if (stoppedOnError) {
+  console.log(`\n  To pick the run up again:\n\n    ${resumeCommand()}`);
 }
 
 // The very last line, because it is the one an unwatched run is read by. Exit

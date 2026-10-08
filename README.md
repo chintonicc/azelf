@@ -265,9 +265,25 @@ and `N queued` for slices that could start but have no slot, no disk or no lock:
 [round 14] 1 running · 2 to land · 1 queued · 0 blocked · 4 open — land one to advance
 ```
 
-A run that stops with work left (everything parked, or the disk below
-`minFreeDiskGb`) ends with the command that picks it up again: the same flags minus
-`--once`, and the tickets it left open.
+A tracker read that fails mid-run (a `gh` call that times out, an `EOF`, a VPN
+reconnecting) does not end the run. The ticket keeps its last state, the run says so
+once, and once more when the tracker answers again:
+
+```
+[round 45] couldn't read #114 from GitHub — keeping its last state, trying again next round: Post "https://api.github.com/graphql": EOF
+[round 47] GitHub answers again (#114 unreadable for 2 rounds)
+```
+
+Only when every read has failed for 30 minutes does the run stop
+(`SLICE_TRACKER_OUTAGE_SECONDS` changes that). A ticket this run landed is never
+started again, even if the close after its land failed. The dispatcher retries that
+close every round, and a run that ends with it still unconfirmed lists it under
+`landed, not seen closed`.
+
+A run that stops with work left (everything parked, the disk below `minFreeDiskGb`,
+the tracker gone, or an error in a round) ends with the command that picks it up
+again: the same flags minus `--once`, and the tickets it left open. A restart adopts
+the sessions that are still running.
 
 ```
   To pick the run up again:

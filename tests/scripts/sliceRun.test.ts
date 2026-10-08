@@ -116,6 +116,95 @@ describe("the round line", () => {
 });
 
 /**
+ * A tracker read that fails mid-run is no news: the ticket keeps its last
+ * state and the round goes on. Only a tracker that has stopped answering
+ * altogether ends the run, and then through its normal ending.
+ */
+describe("a tracker that stops answering", () => {
+  const count = (text: string, want: string) => text.split(want).length - 1;
+
+  it("rides out a brief outage, says so once each way, and lands", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sessions.push(fakeSession(c, 40));
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"], {
+      env: { SLICE_HEARTBEAT_SECONDS: "600" },
+    });
+    await d.until("[round 1] 1 running");
+
+    c.trackerDown(true);
+    await d.until(
+      'couldn\'t read #40 from Fake — keeping its last state, trying again next round: Post "https://api.github.com/graphql": EOF',
+    );
+    await new Promise((r) => setTimeout(r, 3_000));
+    c.trackerDown(false);
+    await d.until(/Fake answers again \(#40 unreadable for \d+ rounds\)/);
+
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    await d.until("plan complete");
+    expect(await d.exited).toBe(0);
+    expect(count(d.output(), "couldn't read")).toBe(1);
+    expect(count(d.output(), "answers again")).toBe(1);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("stops after the outage ceiling, names what is still running, and says how to resume", async () => {
+    c = makeConsumer({ worktrees: [40] });
+    sessions.push(fakeSession(c, 40));
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"], {
+      env: {
+        SLICE_HEARTBEAT_SECONDS: "600",
+        SLICE_TRACKER_OUTAGE_SECONDS: "2",
+      },
+    });
+    await d.until("[round 1] 1 running");
+
+    c.trackerDown(true);
+    expect(await d.exited).toBe(1);
+    const out = d.output();
+    expect(out).toMatch(
+      /✗ the dispatcher stopped in round \d+: Fake has not answered for 2 seconds\n {2}still running, with nothing to land them: #40\n/,
+    );
+    expect(out).toContain(
+      "To pick the run up again:\n\n    bunx azelf run -y --interval 1 40\n",
+    );
+  }, 60_000);
+
+  it("does not start a landed ticket whose close failed, and closes it itself", async () => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true, agent: ["true"] });
+    c.setTicket("40", {});
+    c.setTicket("41", {});
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    sessions.push(fakeSession(c, 41));
+    c.closeFails(true);
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "40", "41"], {
+      env: { SLICE_HEARTBEAT_SECONDS: "600" },
+    });
+    await d.until("warning: couldn't close #40");
+    await d.until(
+      "couldn't close #40 on Fake — it landed; trying again every round: Post",
+    );
+    // The rounds in between read #40 open. None of them starts it again.
+    await new Promise((r) => setTimeout(r, 2_500));
+    expect(d.output()).not.toContain("prepping #40");
+    expect(count(d.output(), "couldn't close #40 on Fake")).toBe(1);
+
+    c.closeFails(false);
+    await d.until("closed #40 — the close after its land had failed");
+    const tickets = JSON.parse(readFileSync(c.ticketsFile, "utf8"));
+    expect(tickets["40"].state).toBe("closed");
+    // With the comment the land would have left, and whose close this was.
+    const closes = readFileSync(c.closeFile, "utf8");
+    expect(closes).toContain("40\nLanded on main via slice-land.sh.");
+    expect(closes).toContain("Closed by the dispatcher on a later round");
+    expect(existsSync(join(c.main, ".git", "azelf-close-40.txt"))).toBe(false);
+    expect(d.output()).not.toContain("prepping #40");
+  }, 60_000);
+});
+
+/**
  * The line is counted after the round's land and launches. A ticket that
  * just landed is not open, a slice that is done and waiting its turn is "to
  * land" and not "blocked", and a slice cut on top of a landed one is not
