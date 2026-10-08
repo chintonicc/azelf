@@ -3,6 +3,7 @@ import {
   type StopState,
   droppedFiles,
   hasConflictMarkers,
+  heldIndexLock,
   irreconcilable,
   resolutionProblem,
   stopProblem,
@@ -193,5 +194,27 @@ describe("droppedFiles", () => {
       "a.ts",
       "b.ts",
     ]);
+  });
+});
+
+describe("heldIndexLock", () => {
+  it("names the lock file git could not create", () => {
+    expect(
+      heldIndexLock(
+        "fatal: Unable to create '/r/.git/worktrees/ticket-40/index.lock': File exists.\n\nAnother git process seems to be running in this repository",
+      ),
+    ).toBe("/r/.git/worktrees/ticket-40/index.lock");
+  });
+
+  it("is null for any other failure, so only a lock is retried", () => {
+    expect(
+      heldIndexLock("fatal: pathspec 'a.txt' did not match any files"),
+    ).toBeNull();
+    expect(
+      heldIndexLock(
+        "fatal: Unable to create '/r/.git/HEAD.lock': File exists.",
+      ),
+    ).toBeNull();
+    expect(heldIndexLock("")).toBeNull();
   });
 });

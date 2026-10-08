@@ -1043,6 +1043,16 @@ resolution is rejected. This split exists because a resolver told to finish the
 rebase itself needed permission for `git add`, which `acceptEdits` does not grant,
 and correct resolutions were thrown away with the rebase still in progress.
 
+**A held index lock is waited out, not judged.** If the `git add` or the
+`rebase --continue` fails because another process holds the worktree's
+`index.lock` (an editor's background `git status`, say), the dispatcher prints
+`the worktree's index is locked (another git process?) — waiting for it …` and tries
+again, for about 16 seconds in all (`SLICE_LOCK_RETRY_MS`, default 250, scales the
+waits). A lock still there after that rejects the resolution with the lock file's
+path: a git process that died holding it leaves it behind, and removing it is yours
+to decide. That lock stops the abort too, so the run says the rebase is still in
+progress in the worktree instead of "the branch is as it was".
+
 **Nothing takes the resolver's word for it.** Once the rebase is through, the
 dispatcher checks the worktree itself: `git status` clean, the base commit the
 rebase started from actually an ancestor of `HEAD`, and no conflict markers left in

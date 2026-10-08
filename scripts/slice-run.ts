@@ -104,6 +104,7 @@ import {
   type ResolutionState,
   droppedFiles,
   hasConflictMarkers,
+  heldIndexLock,
   resolutionProblem,
   stopProblem,
 } from "./slice-resolve";
@@ -2723,6 +2724,44 @@ next commit stops too. Reading git — \`git diff\`, \`git log\`, \`git show\` �
 fine. To resolve a conflict by deleting a file, delete it.`;
 }
 
+// The waits between tries of a git write that met a held index lock, in units
+// of LOCK_RETRY_MS: 63 units, about 16 s at the default. SLICE_LOCK_RETRY_MS
+// scales them, so a test can hold a lock without holding the suite for 16 s.
+const LOCK_BACKOFF = [1, 2, 4, 8, 16, 32];
+const LOCK_RETRY_MS = Number(process.env.SLICE_LOCK_RETRY_MS ?? 250);
+const LOCK_WAIT_S = Math.round(
+  (LOCK_BACKOFF.reduce((a, b) => a + b, 0) * LOCK_RETRY_MS) / 1000,
+);
+
+/**
+ * One git write in a worktree, tried again while another process holds its
+ * index lock. `lock` is the lock file when the last try still failed on it,
+ * and null otherwise. See `heldIndexLock` for why only a lock is retried.
+ */
+function gitWrite(
+  args: string[],
+  wt: string,
+  env?: Record<string, string>,
+): { ok: boolean; out: string; lock: string | null } {
+  let r = run(["git", ...args], { cwd: wt, allowFail: true, env });
+  for (const [i, units] of LOCK_BACKOFF.entries()) {
+    if (r.ok || !heldIndexLock(r.out)) break;
+    if (i === 0) {
+      console.log(
+        "     the worktree's index is locked (another git process?) — waiting for it …",
+      );
+    }
+    Atomics.wait(
+      new Int32Array(new SharedArrayBuffer(4)),
+      0,
+      0,
+      units * LOCK_RETRY_MS,
+    );
+    r = run(["git", ...args], { cwd: wt, allowFail: true, env });
+  }
+  return { ...r, lock: r.ok ? null : heldIndexLock(r.out) };
+}
+
 /**
  * Let the agent resolve a rebase conflict, then check its work.
  *
@@ -2850,10 +2889,24 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     }
     const path = report(`REJECTED: ${why}`);
     console.log(`     ✗ resolution rejected — ${why}`);
-    console.log(`     the rebase was aborted; the branch is as it was.`);
+    // A lock that outlasted `gitWrite`'s retries stops the abort as well, and
+    // the worktree is left mid-rebase. Said rather than claimed otherwise; the
+    // dispatcher leaves a worktree mid-rebase alone, so it waits for a person.
+    console.log(
+      rebaseInProgress(wt)
+        ? `     the rebase could not be aborted either — it is still in progress in ${wt}. Finish or abort it there.`
+        : `     the rebase was aborted; the branch is as it was.`,
+    );
     console.log(`     transcript: ${path}`);
     return false;
   };
+
+  // A lock still held after every retry is not a moment's contention: a git
+  // process that died holding it leaves it behind. `give` aborts as usual, and
+  // that abort may meet the same lock; the park line points at the worktree,
+  // and removing the file is a person's call, not ours.
+  const stillLocked = (lock: string) =>
+    `the worktree's index stayed locked for ${LOCK_WAIT_S} s (${lock}) — if no git process is running there, it is stale: remove it and run azelf retry ${t.id}`;
 
   // What the last `--continue` said, for a rebase that then stops on nothing.
   let continued = "";
@@ -2922,19 +2975,17 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
     });
     if (problem) return give(problem);
 
-    const add = run(["git", "add", "-A", "--", ...files], {
-      cwd: wt,
-      allowFail: true,
-    });
+    const add = gitWrite(["add", "-A", "--", ...files], wt);
+    if (add.lock) return give(stillLocked(add.lock));
     if (!add.ok) return give(`git add failed: ${add.out}`);
     // GIT_EDITOR rather than `-c core.editor`: the environment variable wins
     // over the config, so an exported GIT_EDITOR would otherwise open an
     // editor nobody is at.
-    continued = run(["git", "rebase", "--continue"], {
-      cwd: wt,
-      allowFail: true,
-      env: { GIT_EDITOR: "true" },
-    }).out;
+    const cont = gitWrite(["rebase", "--continue"], wt, { GIT_EDITOR: "true" });
+    // Checked here, because the loop would read a `--continue` that failed on
+    // the lock as a rebase that stopped with nothing conflicted.
+    if (cont.lock) return give(stillLocked(cont.lock));
+    continued = cont.out;
   }
 
   const after = changedIn(wt, `${onto}...HEAD`);

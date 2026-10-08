@@ -398,12 +398,16 @@ const dispatcherEnv = (c: Consumer, env: Record<string, string> = {}) => ({
 export function runDispatcher(
   c: Consumer,
   args: string[],
+  opts: {
+    /** Added to its environment. */
+    env?: Record<string, string>;
+  } = {},
 ): { code: number; out: string; stdout: string } {
   const r = spawnSync("bun", [DISPATCHER, ...args], {
     cwd: c.main,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
-    env: dispatcherEnv(c),
+    env: dispatcherEnv(c, opts.env),
   });
   // `out` is stdout THEN stderr, not interleaved: `stdout` alone is what to
   // read a last line from.

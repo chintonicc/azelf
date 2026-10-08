@@ -173,3 +173,22 @@ export function droppedFiles(before: string[], after: string[]): string[] {
   const kept = new Set(after);
   return [...new Set(before)].filter((f) => !kept.has(f)).sort();
 }
+
+/**
+ * The lock file a git write failed on, when it failed because another process
+ * held the index; null for every other failure.
+ *
+ * Told apart from the rest because it says nothing about the resolution. On
+ * consumer-a a resolver fixed both files of a stop, every check passed, and
+ * the `git add` after it met `index.lock: File exists`. The resolution was
+ * rejected, the rebase aborted, and seconds later the lock was gone with no
+ * git process running in that worktree. Something outside the dispatcher held
+ * it for a moment, and a paid resolver run went with it. A lock is a reason to
+ * wait, so the caller retries on this and on nothing else.
+ */
+export function heldIndexLock(output: string): string | null {
+  return (
+    output.match(/Unable to create '([^'\n]*index\.lock)': File exists/)?.[1] ??
+    null
+  );
+}

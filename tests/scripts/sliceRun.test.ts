@@ -1136,6 +1136,65 @@ ${body}`;
   });
 
   /**
+   * Another process holds the worktree's index lock when azelf stages the
+   * resolution: on consumer-a it was gone seconds later, and a correct
+   * resolution had been thrown away. The resolver here resolves, then takes
+   * the lock itself, the way that outside process did.
+   */
+  describe("when the worktree's index is locked", () => {
+    // Its own stdio, or the dispatcher would wait for the pipe it holds open.
+    const takeLock = (releaseAfter: string | null) => `${RESOLVE_BOTH}
+lock="$(git rev-parse --absolute-git-dir)/index.lock"
+touch "$lock"
+${
+  releaseAfter
+    ? `(sleep ${releaseAfter}; rm -f "$lock") </dev/null >/dev/null 2>&1 &`
+    : ""
+}`;
+    const fast = { env: { SLICE_LOCK_RETRY_MS: "40" } };
+
+    it("waits for a lock that goes, and keeps the resolution", () => {
+      c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+      writeFileSync(join(c.root, "resolver.sh"), takeLock("1"));
+
+      const r = runDispatcher(c, auto, fast);
+
+      expect(
+        r.out.match(
+          /the worktree's index is locked \(another git process\?\)/g,
+        ),
+      ).toHaveLength(1);
+      expect(r.out).toContain("✓ rebased onto main, clean, no markers left");
+      expect(r.out).not.toContain("resolution rejected");
+      expect(r.code).toBe(0);
+      expect(readFileSync(join(c.main, "a.txt"), "utf8")).toBe(
+        "main\nbranch\n",
+      );
+    });
+
+    it("rejects with the lock's path when it stays, and says the rebase is still there", () => {
+      c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+      writeFileSync(join(c.root, "resolver.sh"), takeLock(null));
+
+      const r = runDispatcher(c, auto, fast);
+
+      const lock = join(
+        git(c.wt(40), "rev-parse", "--absolute-git-dir"),
+        "index.lock",
+      );
+      expect(r.out).toContain(
+        `✗ resolution rejected — the worktree's index stayed locked for 3 s (${lock}) — if no git process is running there, it is stale: remove it and run azelf retry 40`,
+      );
+      expect(r.out).toContain(
+        "the rebase could not be aborted either — it is still in progress in",
+      );
+      expect(r.out).not.toContain("the branch is as it was");
+      expect(r.code).toBe(1);
+      expect(rebaseInProgress(c.wt(40))).toBe(true);
+    });
+  });
+
+  /**
    * A land elsewhere moves the base while the resolver works: a second
    * dispatcher on consumer-a did, a minute before a two-stop resolution
    * finished, and the resolution was judged against the new commit.
