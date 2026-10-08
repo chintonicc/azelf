@@ -1,6 +1,6 @@
 # An unattended run that outlives a flaky network and starts only agent work
 
-**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phases 1 and 2 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log (an untracked file in its main checkout, not in
 this repo), entries dated 2026-10-06 to 2026-10-08. `docs/run-polish-plan.md` covers
 the three smaller open entries from the same log.
@@ -191,16 +191,16 @@ exit 1, since a ticket is left to close. The full suite passes (404). vitest's
 **What the consumer does:** the bump. Then drop the shell loop that restarts the
 dispatcher on this crash. It would now hide a real error behind a restart.
 
-## Phase 2 — a human ticket is a gate, not a slice
+## Phase 2 — a human ticket is a gate, not a slice (`94b01bb`)
 
-- [ ] **2a. `humanLabel` in the config.**
+- [x] **2a. `humanLabel` in the config.**
   - `SliceConfig` gains `humanLabel?: string`, documented next to `exclusiveLockLabel`
     (`slice-config.ts:87`). It is validated as a non-empty string, and not equal to
     `readyLabel`.
   - The preset writes `humanLabel: "ready-for-human"` (`slice-preset.ts:366`), so a new
     `init` gets it. README's configuration table gains a row.
 
-- [ ] **2b. Held in the plan, whoever named it.**
+- [x] **2b. Held in the plan, whoever named it.**
   - **`loadTickets`** (`slice-run.ts:266`) sets `human: true` on a set ticket carrying
     the label. A bare run only meets one when it also carries the ready label, so the
     case that matters is a ticket named explicitly.
@@ -215,14 +215,14 @@ dispatcher on this crash. It would now hide a real error behind a restart.
 
     > ⚠ #99 is labelled ready-for-human — not starting it; #105 waits until it is closed
 
-- [ ] **2c. A blocker outside the set is read again every round.**
+- [x] **2c. A blocker outside the set is read again every round.**
   - `refreshOpenState` also reads each distinct outside blocker, which is a handful of
     extra calls per round, and drops the closed ones from `t.foreignBlockers`. A
     ticket held by an outside blocker then starts the round after a person, or another
     dispatcher, closes that blocker.
   - Failures follow 1a: a blocker that can't be read keeps holding.
 
-- [ ] **2d. The run stops when only human work is left.**
+- [x] **2d. The run stops when only human work is left.**
   - **Next to the parked rule** (`slice-run.ts:3842-3855`), a ticket is "waiting on a
     human" when it is `human`, when an outside blocker is `foreignHuman`, or when an
     open blocker in the set is itself waiting on a human. That last case takes a
@@ -246,7 +246,7 @@ dispatcher on this crash. It would now hide a real error behind a restart.
     that the wait can now end. Two dispatchers on one repo is the case: one closes what
     the other waits on.
 
-- [ ] **2e. A named ticket without the ready label is prepped.**
+- [x] **2e. A named ticket without the ready label is prepped.**
   - **The dispatcher** passes `--named` to `slice-session.sh` for each id in
     `unlabelled`. It goes both on the prep call (`slice-run.ts:3726-3737`) and on the
     session command (`sessionFor`, `slice-run.ts:1151`). Under a marker launcher, prep
@@ -280,6 +280,20 @@ dispatcher on this crash. It would now hide a real error behind a restart.
     `human`-labelled ticket is refused with `--named`; an unlabelled one is refused
     without it and prepped with it.
   - **`sliceInit.test.ts`**: the preset carries `humanLabel`.
+
+**As landed.** The wave header keeps its count and adds the held ones (`wave 1  2
+tickets, 1 waiting on a human  (runnable now)`), and the widest-wave figure leaves them
+out. An outside blocker that carries the label shows as `(outside this set, waiting on
+a human)`. A ticket waiting on a human is counted under that bucket and not under
+`blocked`, even when its blocker is open. The stop lists the gates with "blocks …"
+naming direct dependents, and an outside gate says so. Under a marker launcher, the
+session starts with no flags and reads `.slice-flags` only after the ticket check, so
+`slice-session.sh` reads `--named` alone from that file before validating. The shell
+gets `SLICE_HUMAN_LABEL` for the refusal's wording. The session tests landed in
+`sliceSessionClose.test.ts`, and the preset test in `slicePreset.test.ts` (where the
+preset is tested), not `sliceInit.test.ts`. The command file
+(`agent/commands/azelf.md`) gained a paragraph. In the full suite, two timing tests
+failed under load; both pass alone, and `sliceRun.test.ts` passes 94/94 on its own.
 
 **What the consumer does:** add `humanLabel: "ready-for-human"` to `slice.config.ts` by
 hand. `init` does not rewrite an existing config.
