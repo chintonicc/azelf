@@ -1,6 +1,6 @@
 # Fresh tickets in the plan, and less noise in the run
 
-**Status:** NOT STARTED · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log, entries dated 2026-10-02. The four larger open
 entries from the same log are in `docs/unattended-run-plan.md`. That plan goes first.
 
@@ -40,14 +40,16 @@ or made it harder to read.
   not search-indexed, and it pages, so the cap of 100 goes too. `parentClaims` stays on
   search, because it needs body text across closed issues. The children that matter
   most, the ones in the ready set, are read directly by `findEpics`.
+  *(Landed as the GraphQL issue connection instead: the check found that REST lags
+  too. See Phase 1's "as landed".)*
 - **The lock block is printed when it changes, on the heartbeat, and once when the
   lock frees.**
 - **The plan review needs two slices landed by this run.** With fewer, it prints one
   line and calls no agent.
 
-## Phase 1 — the plan sees a ticket filed a moment ago
+## Phase 1 — the plan sees a ticket filed a moment ago (`098352c`)
 
-- [ ] **1a. `listReady` through REST.**
+- [x] **1a. `listReady` through REST.** *(Landed through GraphQL instead — see 1b.)*
   - **The call** in `github()` (`slice-tracker.ts:525-538`) becomes:
 
     ```
@@ -66,12 +68,12 @@ or made it harder to read.
   - **Labels.** REST reads a comma in `labels` as "and". Config validation refuses a
     `readyLabel` containing a comma (`slice-config.ts:339`), and so does `humanLabel`'s
     validation from the other plan.
-- [ ] **1b. Check first, and record the result.** On a scratch repository, file a
+- [x] **1b. Check first, and record the result.** On a scratch repository, file a
   labelled issue and list it immediately both ways. Repeat a few times. The expected
   result: REST shows it at once, and search sometimes doesn't. If REST lags too, stop
   and write down what was seen. The fix would then need a different shape, and `--sync-edges`
   would have to say "ran N seconds after the newest issue was filed" instead.
-- [ ] **1c. The comment on `parentClaims`** gains one sentence: search lags, so a
+- [x] **1c. The comment on `parentClaims`** gains one sentence: search lags, so a
   just-filed child is found through the ready set's own bodies, not through this.
 
   *Proof:* **`sliceTracker.test.ts`**, with the injected `gh` (`sliceTracker.test.ts:58`):
@@ -81,6 +83,44 @@ or made it harder to read.
   - a failure throws with `gh`'s stderr attached, as the existing "Not logged in" test
     does (`sliceTracker.test.ts:220`).
   - `slice-config` refuses a `readyLabel` containing a comma.
+
+**As landed.** The check in 1b came out against the plan: **REST lags too.** On a
+private scratch repo with gh 2.94.0, a labelled issue was filed and then listed
+straight away, 15 times over three runs:
+
+- the REST labelled list (`issues?state=open&labels=…`) didn't have it in 6 of 6
+  tries at 1.4–2.1 s. The unlabelled REST list lagged the same way;
+- search (`gh issue list --label`) lagged as well. Both took 4–12 s to catch up;
+- a direct `GET issues/<n>` was always fresh, labels included;
+- the GraphQL connection `repository.issues(states: OPEN, labels: [$label])` had it in 6 of
+  6 tries at 0.7–1.1 s, and in every earlier probe as well.
+
+So `listReady` calls `gh api graphql --paginate` on that connection, with
+`-F owner={owner} -F repo={repo}` (gh fills both from the remote, as it does the REST
+paths), `-f label=<label>`, and `--jq '.data.repository.issues.nodes[].number'`, so
+every page prints one number per line. Everything else 1a asked for still holds:
+
+- it pages, so the cap of 100 is gone;
+- it orders by `CREATED_AT DESC`, so it's newest first;
+- errors read `gh api graphql (open issues labelled <label>) failed:` with gh's
+  output.
+
+Two items from 1a dropped out:
+
+- **No pull-request filter.** The `issues` connection returns no pull requests.
+- **No comma refusal.** The label is a GraphQL variable, so a comma is just a comma.
+  (`gh issue list --label "a,b"` split it in two, so this fixes a case that had been
+  silently wrong.)
+
+The real adapter, run from a checkout of the scratch repo, saw a just-filed issue in
+3 of 3 tries at about 0.6 s. The proof tests cover:
+
+- the arguments and the query's shape (paged, open, label, newest first, not search);
+- two pages read as one list of 102;
+- a label with a comma and quotes passed through intact;
+- output that isn't numbers, and a failure. Both throw with what gh said.
+
+The "a failed gh call throws" test now uses `body()` for its "Not logged in" case.
 
 ## Phase 2 — the lock block is printed when it changes
 
