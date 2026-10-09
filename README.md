@@ -302,8 +302,9 @@ the sessions that are still running.
 ### `azelf retry <ticket>`
 
 Retries a parked slice's land in the running dispatcher's next round, whatever it
-parked on. If no dispatcher is running, `azelf run --auto <ticket>` does the same. See
-[What retries a parked slice](#what-retries-a-parked-slice).
+parked on. It names the dispatcher that has the ticket (`the running dispatcher (pid
+45696) retries #103 next round`), or says that none does; then `azelf run --auto
+<ticket>` starts one. See [What retries a parked slice](#what-retries-a-parked-slice).
 
 ### `azelf hook`
 
@@ -1182,6 +1183,14 @@ account, and it says so once:
 Without that, a land that found the branch behind the base started its own rebase,
 failed on yours, and ran `git rebase --abort`, which threw your resolution away.
 
+A rebase the conflict resolver started belongs to its dispatcher, and a dispatcher
+killed in the middle of one leaves it stopped with nothing to finish it. The next run
+says so instead:
+
+```
+  #54: a rebase is in progress in its worktree, left by the conflict resolver of a dispatcher that is no longer running (pid 30498). Nothing will finish it: finish it by hand, or git -C ../repo-ticket-54 rebase --abort — either way it is back in the run once the rebase is over.
+```
+
 One gap is left: the seconds between a commit and the rebase you run after it. The
 commit moves the branch, which retries a parked land, and a land that starts in that
 gap rebases first. Your `git rebase` then fails with git's "already a rebase-merge
@@ -1219,12 +1228,29 @@ gets one line, naming the command.
 ## Two dispatchers on one repo
 
 A second dispatcher can run a different set of tickets while the first is still
-going, say `azelf run 31 32` next to `azelf run --auto 24 25`. Give each run its own
-tickets. Each lands one slice per round, which keeps its own lands apart and nobody
-else's, so two locks in the common git dir keep the runs off each other:
+going, say `azelf run 31 32` next to `azelf run --auto 24 25`. Each run claims its
+tickets before `proceed?`, and a run over a ticket that a running dispatcher already
+has refuses to start:
+
+```
+✗ #102, #103 are already being dispatched by another run (pid 45696, since 14:55): azelf run -y --auto 102 103 104 107 108
+  Two dispatchers on one ticket race each other's rebases, sessions and lands. Stop that one first, or run the rest on their own:
+
+    bunx azelf run -y --auto 107 108
+```
+
+It refuses rather than dropping the held tickets, because that would change the plan
+you just read. `--plan` names the holder and claims nothing. The claims are released
+when the run exits. A run that was killed leaves them behind, and the next run takes
+them over with a line (`took over #102 from a dispatcher that is no longer running
+(pid 30498)`).
+
+Each run lands one slice per round, which keeps its own lands apart and nobody
+else's, so locks in the common git dir keep the runs off each other:
 
 | lock | taken by | held for | when it is taken |
 | --- | --- | --- | --- |
+| `azelf-run-<ticket>.lock` | a dispatcher, for each ticket in its plan | the whole run | never waits: a live holder stops the run before `proceed?` |
 | `azelf-land.lock` | `slice-land.sh`, whoever runs it | the whole land: fast-forward, push, cleanup, ticket close | waits up to five minutes, then refuses |
 | `azelf-gates.lock` | a dispatcher's gate run, and `azelf run --gates` | one slice's gates | waits as long as the holder is running |
 

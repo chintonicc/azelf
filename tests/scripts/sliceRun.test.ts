@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  mkdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -1269,6 +1270,34 @@ describe("a hand fix in progress", () => {
     );
   }, 60_000);
 
+  it("names the dead dispatcher whose resolver left the rebase", () => {
+    c = midRebase();
+    const dead = spawnSync("true").pid;
+    writeFileSync(
+      join(
+        git(
+          c.wt(40),
+          "rev-parse",
+          "--path-format=absolute",
+          "--git-path",
+          "rebase-merge",
+        ),
+        "azelf-resolver",
+      ),
+      `pid=${dead}\nstarted=\nlabel=#40\nsince=2026-10-09T12:00:00.000Z\n`,
+    );
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      `#40: a rebase is in progress in its worktree, left by the conflict resolver of a dispatcher that is no longer running (pid ${dead}). Nothing will finish it: finish it by hand, or git -C ${c.wt(
+        40,
+      )} rebase --abort — either way it is back in the run once the rebase is over.`,
+    );
+    expect(r.out).not.toContain(SEEN);
+    expect(rebaseInProgress(c.wt(40))).toBe(true);
+  });
+
   it("names a merge in progress, and leaves it alone too", () => {
     c = makeConsumer({ worktrees: [40], remote: true });
     commitIn(c.wt(40), "a.txt", "branch\n", "feat: a");
@@ -1390,6 +1419,21 @@ ${body}`;
     expect(prompt).toContain("  a.txt");
     expect(prompt).toMatch(/stopped replaying [0-9a-f]+ feat: a\.txt/);
     expect(prompt).toContain("azelf stages the files above");
+  });
+
+  it("says in the rebase's own state that the rebase is its resolver's", () => {
+    c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+    writeFileSync(
+      join(c.root, "resolver.sh"),
+      `cp "$(git rev-parse --git-path rebase-merge)/azelf-resolver" ../mark
+${RESOLVE_BOTH}`,
+    );
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.code).toBe(0);
+    const mark = readFileSync(join(c.root, "mark"), "utf8");
+    expect(mark).toMatch(/^pid=\d+\nstarted=.+\nlabel=#40\nsince=/);
   });
 
   it("calls the resolver again for every commit that stops", () => {
@@ -1948,7 +1992,7 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
 
     const r = azelfRetry(c, "40");
     expect(r.out).toContain(
-      "the running dispatcher retries #40 next round; if none is running, `azelf run --auto 40` does",
+      `the running dispatcher (pid ${d.pid}) retries #40 next round`,
     );
     expect(r.code).toBe(0);
     await d.until("#40: retry requested — retrying the land.");
@@ -2106,6 +2150,129 @@ describe("azelf retry", () => {
     const r = azelfRetry(c, "99");
     expect(r.out).toContain("#99: no worktree at");
     expect(r.code).toBe(1);
+  });
+
+  it("names the running dispatcher that has the ticket, or says none does", () => {
+    c = makeConsumer({ worktrees: [40] });
+    expect(azelfRetry(c, "40").out).toContain(
+      "no running dispatcher has #40 — azelf run --auto 40 starts one",
+    );
+
+    holdClaim(c, "40", process.pid, "azelf run -y --auto 40");
+    const r = azelfRetry(c, "40");
+    expect(r.out).toContain(
+      `the running dispatcher (pid ${process.pid}) retries #40 next round`,
+    );
+    expect(r.code).toBe(0);
+    expect(existsSync(join(c.wt(40), ".slice-retry"))).toBe(true);
+  });
+});
+
+/**
+ * A claim on `id` as another dispatcher leaves one: the lock directory with
+ * its owner file, for `pid` as it is running now.
+ */
+function holdClaim(fx: Consumer, id: string, pid: number, label: string) {
+  const dir = join(fx.main, ".git", `azelf-run-${id}.lock`);
+  mkdirSync(dir);
+  const started = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+  }).stdout.trim();
+  writeFileSync(
+    join(dir, "owner"),
+    `pid=${pid}\nstarted=${started}\nlabel=${label}\nsince=${new Date().toISOString()}\n`,
+  );
+  return dir;
+}
+
+const claimOf = (fx: Consumer, id: string) =>
+  join(fx.main, ".git", `azelf-run-${id}.lock`);
+
+/**
+ * One dispatcher per ticket: a second run over a ticket another running
+ * dispatcher holds refuses before `proceed?`, and names that run.
+ */
+describe("one dispatcher per ticket", () => {
+  /** ticket/40, marked done, ready to land. */
+  const doneSlice = () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+
+  it("refuses a run over a held ticket, names the holder and the rest, and preps nothing", () => {
+    c = makeConsumer({ agent: ["true"] });
+    holdClaim(c, "41", process.pid, "azelf run -y --auto 41 42");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "40", "41"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(
+      new RegExp(
+        `✗ #41 is already being dispatched by another run \\(pid ${process.pid}, since \\d\\d:\\d\\d\\): azelf run -y --auto 41 42`,
+      ),
+    );
+    expect(r.out).toContain(
+      "Two dispatchers on one ticket race each other's rebases, sessions and lands. Stop that one first, or run the rest on their own:\n\n    bunx azelf run --auto -y 40\n",
+    );
+    expect(r.out).not.toContain("prepping");
+    expect(existsSync(c.wt(40))).toBe(false);
+    expect(existsSync(claimOf(c, "40"))).toBe(false);
+    expect(readFileSync(join(claimOf(c, "41"), "owner"), "utf8")).toContain(
+      `pid=${process.pid}\n`,
+    );
+  });
+
+  it("gives no command when every ticket is held", () => {
+    c = makeConsumer({ agent: ["true"] });
+    holdClaim(c, "40", process.pid, "azelf run 40");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "40"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("sessions and lands. Stop that one first.\n");
+    expect(r.out).not.toContain("bunx azelf run");
+  });
+
+  it("runs beside a dispatcher holding other tickets, and lets its own go", () => {
+    c = doneSlice();
+    holdClaim(c, "41", process.pid, "azelf run 41");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.code).toBe(0);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    expect(existsSync(claimOf(c, "40"))).toBe(false);
+    expect(existsSync(claimOf(c, "41"))).toBe(true);
+  });
+
+  it("takes over a claim left by a dispatcher that is no longer running", () => {
+    c = doneSlice();
+    const dead = spawnSync("true").pid;
+    holdClaim(c, "40", dead, "azelf run 40");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      `took over #40 from a dispatcher that is no longer running (pid ${dead})`,
+    );
+    expect(r.code).toBe(0);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  });
+
+  it("only reports the holder under --plan, and takes nothing", () => {
+    c = makeConsumer({});
+    holdClaim(c, "41", process.pid, "azelf run 41");
+
+    const r = runDispatcher(c, ["--plan", "40", "41"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("⚠ #41 is already being dispatched by another run");
+    expect(r.out).toContain(
+      "A dispatch of this plan stops there until that run ends.",
+    );
+    expect(existsSync(claimOf(c, "40"))).toBe(false);
   });
 });
 

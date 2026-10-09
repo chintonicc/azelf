@@ -95,7 +95,17 @@ import { type Flaky, runGates } from "./slice-gates";
 // imported here because it is the fallback as well as the default.
 import { type Launcher, type Session, manual } from "./slice-launcher";
 // One gate run per repo at a time, across dispatchers; see gatesPass.
-import { acquire, release } from "./slice-lock";
+import {
+  type Owner,
+  acquire,
+  formatOwner,
+  isRunning,
+  parseOwner,
+  processStart,
+  readOwner,
+  release,
+  tryTake,
+} from "./slice-lock";
 // The pure half of the overlap report; the git that feeds it is below, in the
 // overlap section, because only this file knows where a slice's branch is.
 import { findOverlaps, ignores } from "./slice-overlap";
@@ -2706,6 +2716,37 @@ function handWork(wt: string): string | null {
  * git's "already a rebase-merge directory": seen, and nothing lost.
  */
 const inProgress = new Map<TicketId, string>();
+
+/**
+ * Where `resolveConflict` says a rebase is its own: a file inside the
+ * rebase's state directory, so it goes when the rebase does, however that
+ * ends. A dispatcher killed mid-resolution leaves the rebase stopped with this
+ * in it, and nothing will ever finish that rebase — not the person
+ * `noteHandWork` would otherwise say is fixing it by hand.
+ */
+const RESOLVER_MARK = "azelf-resolver";
+function resolverMark(wt: string): string | null {
+  for (const dir of ["rebase-merge", "rebase-apply"]) {
+    const p = gitPath(wt, dir);
+    if (existsSync(p)) return join(p, RESOLVER_MARK);
+  }
+  return null;
+}
+
+/** The resolver that left this worktree's rebase, if it is no longer running. */
+function deadResolver(wt: string): Owner | null {
+  const mark = resolverMark(wt);
+  if (!mark) return null;
+  let text: string;
+  try {
+    text = readFileSync(mark, "utf8");
+  } catch {
+    return null;
+  }
+  const o = parseOwner(text);
+  return o && !isRunning(o) ? o : null;
+}
+
 /** The ones announced, so each is printed once when seen and once when it ends. */
 const announced = new Set<TicketId>();
 
@@ -2725,10 +2766,18 @@ function noteHandWork(tickets: Ticket[]): void {
     // mid-operation, which leaves the same state a person would.
     if (what && !announced.has(t.id) && !occupied(t.id)) {
       announced.add(t.id);
+      const wt = worktreeFor(t.id);
+      const gone = what === "rebase" ? deadResolver(wt) : null;
       console.log(
-        `  ${ref(
-          t.id,
-        )}: a ${what} is in progress in its worktree, with no session running there — someone is fixing it by hand, most likely. Not landing or relaunching it until the ${what} is finished or aborted.`,
+        gone
+          ? `  ${ref(
+              t.id,
+            )}: a rebase is in progress in its worktree, left by the conflict resolver of a dispatcher that is no longer running (pid ${
+              gone.pid
+            }). Nothing will finish it: finish it by hand, or git -C ${wt} rebase --abort — either way it is back in the run once the rebase is over.`
+          : `  ${ref(
+              t.id,
+            )}: a ${what} is in progress in its worktree, with no session running there — someone is fixing it by hand, most likely. Not landing or relaunching it until the ${what} is finished or aborted.`,
       );
     } else if (!what && announced.delete(t.id)) {
       console.log(
@@ -2874,6 +2923,15 @@ function gitWrite(
  * worktree.
  */
 function resolveConflict(t: Ticket, conflicted: string[]): boolean {
+  try {
+    return resolveStops(t, conflicted);
+  } finally {
+    const mark = resolverMark(worktreeFor(t.id));
+    if (mark) rmSync(mark, { force: true });
+  }
+}
+
+function resolveStops(t: Ticket, conflicted: string[]): boolean {
   const argvFor = agent.resolve;
   if (!argvFor) return false;
   const wt = worktreeFor(t.id);
@@ -2939,6 +2997,18 @@ function resolveConflict(t: Ticket, conflicted: string[]): boolean {
       `     ✓ the rebase applied cleanly this time — nothing for the resolver to do.`,
     );
     return true;
+  }
+  const mark = resolverMark(wt);
+  if (mark) {
+    writeFileSync(
+      mark,
+      formatOwner({
+        pid: process.pid,
+        started: processStart(process.pid) ?? "",
+        label: ref(t.id),
+        since: new Date().toISOString(),
+      }),
+    );
   }
 
   // One entry per stop: the files the resolver was given and what it printed.
@@ -3732,6 +3802,130 @@ function dropFinishedRecord(id: TicketId): void {
 }
 
 /**
+ * One dispatcher per ticket. On consumer-a a second run started on the same
+ * five tickets fifteen seconds after the first, without a word: it read the
+ * first one's conflict resolver at work as someone's hand rebase, and opened
+ * a session of its own beside it. So a run takes `azelf-run-<ticket>.lock`
+ * for every ticket in its plan before `proceed?`, and refuses to start over
+ * any ticket a running process holds — rather than dropping those tickets
+ * quietly, which would change the plan the person just approved. The lock is
+ * slice-lock.ts's, so a holder that is no longer running is taken over, as
+ * the land and gate locks are. `--gates` and `--retry` take none: they start
+ * no session and land nothing.
+ */
+const runLock = (id: TicketId) => join(commonDir(), `azelf-run-${id}.lock`);
+
+/** The running dispatcher that holds `id`, if there is one. */
+function liveClaim(id: TicketId): Owner | null {
+  const o = readOwner(runLock(id));
+  return o && o.pid !== process.pid && isRunning(o) ? o : null;
+}
+
+/** Each holder once, with the tickets it holds, in the order first met. */
+function byHolder(
+  held: { id: TicketId; holder: Owner | null }[],
+): { holder: Owner | null; ids: TicketId[] }[] {
+  const groups: { holder: Owner | null; ids: TicketId[] }[] = [];
+  for (const { id, holder } of held) {
+    const g = groups.find(
+      (o) => o.holder?.pid === holder?.pid && o.holder?.since === holder?.since,
+    );
+    if (g) g.ids.push(id);
+    else groups.push({ holder, ids: [id] });
+  }
+  return groups;
+}
+
+const heldLine = (holder: Owner | null, ids: TicketId[]): string => {
+  const list = ids.map(ref).join(", ");
+  const verb = ids.length === 1 ? "is" : "are";
+  if (!holder) return `${list} ${verb} already being dispatched by another run`;
+  const since = new Date(holder.since);
+  const at = Number.isNaN(since.getTime())
+    ? ""
+    : `, since ${since.toLocaleTimeString("en-GB", {
+        hour12: false,
+        hour: "2-digit",
+        minute: "2-digit",
+      })}`;
+  return `${list} ${verb} already being dispatched by another run (pid ${holder.pid}${at}): ${holder.label}`;
+};
+
+/** `--plan`: who holds what, said and nothing taken. */
+function noteClaims(plan: Ticket[]): void {
+  const held = plan.flatMap((t) => {
+    const holder = liveClaim(t.id);
+    return holder ? [{ id: t.id, holder }] : [];
+  });
+  if (held.length === 0) return;
+  console.log("");
+  for (const g of byHolder(held)) {
+    console.log(`  ⚠ ${heldLine(g.holder, g.ids)}`);
+  }
+  console.log("    A dispatch of this plan stops there until that run ends.");
+}
+
+const claimed: TicketId[] = [];
+function releaseClaims(): void {
+  for (const id of claimed.splice(0)) release(runLock(id), process.pid);
+}
+
+/**
+ * Takes every ticket of the plan, or none and exits 1. Released when this
+ * process exits. A run stopped by a signal leaves them to the next run's
+ * takeover: a JS signal handler runs only between rounds here, so one would
+ * hold Ctrl-C back for as long as a gate or a resolver takes.
+ */
+function claimTickets(plan: Ticket[]): void {
+  process.on("exit", releaseClaims);
+  const me: Owner = {
+    pid: process.pid,
+    started: processStart(process.pid) ?? "",
+    label: ["azelf run", ...argv].join(" "),
+    since: new Date().toISOString(),
+  };
+  const held: { id: TicketId; holder: Owner | null }[] = [];
+  const tookOver: { id: TicketId; holder: Owner | null }[] = [];
+  for (const t of plan) {
+    const a = tryTake(runLock(t.id), me);
+    if (!a.taken) held.push({ id: t.id, holder: a.holder });
+    else {
+      claimed.push(t.id);
+      if (a.tookOver !== undefined) {
+        tookOver.push({ id: t.id, holder: a.tookOver });
+      }
+    }
+  }
+  if (held.length > 0) {
+    releaseClaims();
+    console.error("");
+    for (const g of byHolder(held)) {
+      console.error(`✗ ${heldLine(g.holder, g.ids)}`);
+    }
+    const rest = plan
+      .map((t) => t.id)
+      .filter((id) => !held.some((h) => h.id === id));
+    console.error(
+      `  Two dispatchers on one ticket race each other's rebases, sessions and lands. ${
+        rest.length
+          ? "Stop that one first, or run the rest on their own:"
+          : "Stop that one first."
+      }`,
+    );
+    if (rest.length) console.error(`\n    ${runCommand(rest)}`);
+    process.exit(1);
+  }
+  for (const { holder, ids } of byHolder(tookOver)) {
+    const list = ids.map(ref).join(", ");
+    console.log(
+      holder
+        ? `  took over ${list} from a dispatcher that is no longer running (pid ${holder.pid})`
+        : `  took over ${list}, whose claim named no dispatcher`,
+    );
+  }
+}
+
+/**
  * Landed tickets the tracker has not yet been read as closed, and whether a
  * retry of the close has failed and said so. Kept from the land on.
  */
@@ -3961,10 +4155,15 @@ if (flag("--retry")) {
     process.exit(1);
   }
   writeFileSync(join(worktreeFor(id), RETRY_MARKER), `${Date.now()}\n`);
+  const holder = liveClaim(id);
   console.log(
-    `  the running dispatcher retries ${ref(
-      id,
-    )} next round; if none is running, \`azelf run --auto ${id}\` does`,
+    holder
+      ? `  the running dispatcher (pid ${holder.pid}) retries ${ref(
+          id,
+        )} next round`
+      : `  no running dispatcher has ${ref(
+          id,
+        )} — azelf run --auto ${id} starts one`,
   );
   process.exit(0);
 }
@@ -4025,7 +4224,11 @@ if (missingEdges.length > 0 && !ignoreBodyBlockers) {
 }
 const maxParallel = Number(value("--max") ?? width);
 
-if (planOnly) process.exit(0);
+if (planOnly) {
+  noteClaims(tickets);
+  process.exit(0);
+}
+claimTickets(tickets);
 
 if (flag("--auto-resolve") && !agent.resolve) {
   console.error(
@@ -4683,12 +4886,16 @@ if (landedOnRetry.size > 0) {
  * ticket would plan again from the tracker, and that can be a different set.
  */
 function resumeCommand(): string {
+  return runCommand(tickets.filter((t) => t.open).map((t) => t.id));
+}
+
+/** This run's own command, minus `--once`, over `ids` instead of its own. */
+function runCommand(ids: TicketId[]): string {
   const flags = argv.filter(
     (a, i) =>
       a !== "--once" && !(isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? "")),
   );
-  const open = tickets.filter((t) => t.open).map((t) => t.id);
-  return ["bunx azelf run", ...flags, ...open].join(" ");
+  return ["bunx azelf run", ...flags, ...ids].join(" ");
 }
 
 /**

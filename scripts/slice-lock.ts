@@ -98,6 +98,11 @@ export function readOwner(dir: string): Owner | null | undefined {
   } catch {
     return existsSync(dir) ? null : undefined;
   }
+  return parseOwner(text);
+}
+
+/** An owner file's text, or `null` when it names no pid. */
+export function parseOwner(text: string): Owner | null {
   const field = (k: string) =>
     text.match(new RegExp(`^${k}=(.*)$`, "m"))?.[1] ?? "";
   const pid = Number(field("pid"));
@@ -113,7 +118,8 @@ export function readOwner(dir: string): Owner | null | undefined {
 const sameOwner = (a: Owner | null | undefined, b: Owner | null | undefined) =>
   a === b || (!!a && !!b && a.pid === b.pid && a.since === b.since);
 
-const format = (o: Owner) =>
+/** What an owner file holds. Also the shape of slice-run's `azelf-resolver`. */
+export const formatOwner = (o: Owner) =>
   `pid=${o.pid}\nstarted=${o.started}\nlabel=${o.label}\nsince=${o.since}\n`;
 
 /** rename(2), answering false when something is already at `to`. */
@@ -140,7 +146,7 @@ export type Attempt =
 export function tryTake(dir: string, me: Owner): Attempt {
   const mine = aside(dir, "take");
   mkdirSync(mine);
-  writeFileSync(join(mine, "owner"), format(me));
+  writeFileSync(join(mine, "owner"), formatOwner(me));
   let tookOver: Owner | null | undefined;
   try {
     // Twice at most: once as found, and once more after moving a dead
