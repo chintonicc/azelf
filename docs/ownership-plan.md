@@ -1,6 +1,6 @@
 # A land that finishes, one dispatcher per ticket, and a hold on hand work
 
-**Status:** IN PROGRESS — Phases 1–3 landed · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phases 1–4 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log: the five entries dated 2026-10-08 that
 `docs/lock-and-review-plan.md` left open, and two more from later the same day (a
 rebase that doesn't reinstall, and a worktree re-added by hand). Every other entry is
@@ -337,9 +337,9 @@ Proof:
   On the old code the first test preps.
 - Suite: 459 of 459.
 
-## Phase 4 — hand work in a worktree is held
+## Phase 4 — hand work in a worktree is held (32d0786)
 
-- [ ] **4a. `azelf hold <ticket> [--by <who>] [--why <text>]` and
+- [x] **4a. `azelf hold <ticket> [--by <who>] [--why <text>]` and
   `azelf release <ticket>`.** In `bin/azelf.ts` (`bin/azelf.ts:69`), as
   `retry` is: spawned into `slice-run.ts` with a flag handled before the plan.
   - `hold` runs `git worktree lock --reason "azelf hold: <who> — <why>" <wt>`, adds
@@ -349,7 +349,7 @@ Proof:
   - If there is no worktree, `hold` refuses. If the ticket is already held, it prints
     the holder and exits 1.
   - `release` unlocks and removes the note. If the ticket isn't held, it says so.
-- [ ] **4b. Who respects a hold.**
+- [x] **4b. Who respects a hold.**
   - **The dispatcher** reads holds once a round from `git worktree list --porcelain`
     (`locked azelf hold: …`). A held slice is not landed, relaunched, rebased, or
     auto-finished. The dispatcher says so once when it sees the hold, and once when
@@ -365,7 +365,7 @@ Proof:
     `git worktree remove` would fail on the git lock with a misleading message.
   - **`slice-session.sh`** won't launch a session into a held worktree. Provisioning
     (4c) is allowed.
-- [ ] **4c. `azelf provision <ticket>`.** For a worktree re-added by hand, or one
+- [x] **4c. `azelf provision <ticket>`.** For a worktree re-added by hand, or one
   missing its files: `slice-session.sh <ticket> --provision`. It re-adds the worktree
   from the branch if git no longer lists it. It copies the `provisionCopy` files that
   are missing, and names the ones already there (it never overwrites). It runs
@@ -373,7 +373,7 @@ Proof:
   label, blocker and open-state checks, writes no `.slice-flags`, and launches
   nothing. It refuses when a live session is in the worktree, and when there is
   neither a worktree nor a branch (`azelf run <id>` starts it).
-- [ ] **4d. The next step after IRRECONCILABLE.** When a park's reason is the
+- [x] **4d. The next step after IRRECONCILABLE.** When a park's reason is the
   resolver's refusal (`stopProblem`, `slice-resolve.ts:121`), `askAboutBlocked`
   (`slice-run.ts:3339`) prints two more lines. The first names the collision, from
   `landedWhileOpen` and `landedFiles` intersected with the conflicted files, and only
@@ -382,7 +382,7 @@ Proof:
   > it collides with #101, which landed components/capture/VideoEditor.tsx while #102 was open
   > to re-port it by hand: azelf hold 102, rebase it onto master in its worktree and commit, then azelf release 102 — the moved branch retries the land
 
-- [ ] **4e. `/azelf` says what not to do in someone else's worktree.**
+- [x] **4e. `/azelf` says what not to do in someone else's worktree.**
   `agent/commands/azelf.md` gains a short section on taking over or cleaning up after
   a run:
   - never `git rebase --abort`, `reset --hard`, or remove a slice worktree you didn't
@@ -403,6 +403,55 @@ Proof:
     left alone.
   - **An IRRECONCILABLE park** prints the collision and the recipe.
   - The init tests count the new exclude line.
+
+*As landed:*
+- **`scripts/slice-hold.ts`** holds the hold: the reason's format
+  (`azelf hold: <who> since <ISO> — <why>`), its parse, one
+  `git worktree list --porcelain -z` per read, and a `describe` command line the two
+  shell scripts ask. `-z` because without it git C-quotes a reason with `—` in it.
+  Paths are compared resolved, through the parent when the worktree is gone, because
+  git still lists a deleted worktree that is locked.
+- **Any git lock on a slice worktree counts as a hold**, not only `azelf hold: …`.
+  It is shown as `locked in git (<reason>)` with `git worktree unlock <wt>` as its
+  release, and `azelf release` refuses it and names that command.
+- **`azelf hold` over a running session** is allowed, with a line saying the session
+  carries on and is neither landed nor relaunched. The plan didn't say.
+- **The holder is named in the hold line, not by `noteHandWork`.** Under a hold
+  `noteHandWork` records the rebase but says nothing, and the hold's line adds
+  `, with a rebase in progress in its worktree` when there is one. A rebase still
+  going when the hold is released is announced then, as a hand rebase.
+- **`handsOff`** (`inProgress` or a hold) replaces `inProgress` in `runnable`,
+  `autoFinished`, `awaitingLand` and the three stop checks, so a held slice keeps the
+  run waiting exactly as a hand rebase does. `slice-land.sh` checks first of all,
+  before the land record too, because the record's cleanup removes the worktree.
+- **`azelf provision`** is spawned by `bin/azelf.ts` straight into the package's
+  `slice-session.sh --provision`, not through `slice-run.ts`. The session refusal
+  for a hold is checked before the ticket checks, so it costs no tracker call.
+- **4d** keeps the files the rebase stopped on up to the refusal (`refusals`), and
+  `askAboutBlocked` prints the collision only when this run landed the other slice.
+
+Proof:
+- `sliceRun.test.ts`, "a held worktree": a done slice is not landed while held; the
+  hold line is printed once and the round line counts `1 held`; after `azelf release`
+  the dispatcher says `back in the run` and lands it. The command line: no worktree,
+  already held, the note, `git worktree remove --force` failing, release, release
+  again. A running session is named. A lock put on with git is respected, listed at
+  the run's end, and refused by `release`. A held worktree gets no session but can be
+  provisioned.
+- "azelf provision": missing files copied and an edited one left alone, the brief
+  written, nothing launched; a worktree git no longer lists re-added from its branch;
+  refused with no worktree and no branch, and while a session runs.
+- "resolving a rebase conflict": the recipe on a refusal, and the collision with a
+  sibling this run landed.
+- `sliceLand.test.ts`: a held ticket is refused while a live process holds the land
+  lock, without waiting for it.
+- The init test counts twelve exclude lines.
+- All of these fail on the old code. There, the land test waits out the full 300 s
+  on the land lock.
+- Suite: 469 of 469. Seven of them ran with `minFreeDiskGb: 0` put in the fixture by
+  hand, because this machine had 9.8 GB free, under the fixture's 10 GB floor, and
+  they prep. The fixture is unchanged.
+
 
 ## Phase 5 — a land overtaken during the review rebases again
 
