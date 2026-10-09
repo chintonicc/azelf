@@ -1,6 +1,6 @@
 # A land that finishes, one dispatcher per ticket, and a hold on hand work
 
-**Status:** IN PROGRESS — Phases 1–2 landed · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phases 1–3 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log: the five entries dated 2026-10-08 that
 `docs/lock-and-review-plan.md` left open, and two more from later the same day (a
 rebase that doesn't reinstall, and a worktree re-added by hand). Every other entry is
@@ -253,9 +253,9 @@ Proof:
 - Suite: 451 of 451. An earlier run under a machine load average near 300 timed out
   two unrelated tests at 30 s; they passed alone and in the clean run.
 
-## Phase 3 — one dispatcher per ticket
+## Phase 3 — one dispatcher per ticket (496593c)
 
-- [ ] **3a. Claims.** Before "proceed?" (`slice-run.ts:4060`), the dispatcher takes
+- [x] **3a. Claims.** Before "proceed?" (`slice-run.ts:4060`), the dispatcher takes
   `<common>/azelf-run-<ticket>.lock` for every ticket in its plan. It uses
   `tryTake` from `slice-lock.ts`, with no wait. The owner is its own pid, start time,
   and its argv as the label. If any ticket's lock is held by a running process, it
@@ -271,12 +271,12 @@ Proof:
   `took over #102 from a dispatcher that is no longer running (pid 30498)`. The claims
   are released on exit. `--plan` only reports the holder, and takes nothing.
   `--gates` and `--retry` don't claim.
-- [ ] **3b. `azelf retry` names its dispatcher.** `--retry` (`slice-run.ts:3850`) reads
+- [x] **3b. `azelf retry` names its dispatcher.** `--retry` (`slice-run.ts:3850`) reads
   the claim. With a live holder it says
   `the running dispatcher (pid 45696) retries #103 next round`. With none it says
   `no running dispatcher has #103 — azelf run --auto 103 starts one`, and still writes
   the marker.
-- [ ] **3c. A rebase the resolver left behind.** `resolveConflict`
+- [x] **3c. A rebase the resolver left behind.** `resolveConflict`
   (`slice-run.ts:2874`) writes `azelf-resolver` into the slice's **git dir**
   (`git rev-parse --git-path`, so it is never a tree change) with the dispatcher's pid
   and start time, and removes it when it returns. `noteHandWork`
@@ -294,6 +294,48 @@ Proof:
 
   A worktree mid-rebase, with an `azelf-resolver` naming a dead pid, gets the new
   line. On the old code, the first test preps.
+
+**As landed.**
+- **The claims** are taken right after the plan is printed and before the header
+  block, so a refused run prints nothing about agents or gates. They use slice-lock.ts
+  with `tryTake` and are released by a `process.on("exit")` handler. The refusal and
+  the takeover print one line per holder, so a dispatcher that held five tickets gets
+  one line, not five. The rest-command is `runCommand(ids)`, factored out of
+  `resumeCommand`. `--plan` prints `⚠ … A dispatch of this plan stops there until
+  that run ends.` and exits 0.
+- **No signal handlers.** A handler for SIGINT, SIGTERM or SIGHUP would release the
+  claims on Ctrl-C. But bun runs a JS signal handler only between rounds, and that
+  would hold Ctrl-C back for as long as a gate or a resolver takes. A run stopped by
+  a signal therefore leaves its claims behind, and the next run takes them over with
+  one line.
+- **`azelf retry`** names a live holder other than itself, or prints
+  `no running dispatcher has #N — azelf run --auto N starts one`. Either way it
+  writes the marker. An existing test now expects the pid.
+- **The resolver's mark** goes inside the rebase's own state directory
+  (`<git-path rebase-merge>/azelf-resolver`), not loose in the git dir. Git deletes
+  that directory when the rebase ends, however it ends, so the mark can never outlive
+  its rebase and blame a later hand rebase on a dead resolver. It is written once the
+  rebase has stopped, and also removed in a `finally` (`resolveConflict` now wraps
+  `resolveStops`). It is in the owner file's format (`formatOwner`/`parseOwner`, now
+  exported).
+- **The dead-resolver line** doesn't end with "and azelf retry N", unlike the plan's
+  wording. A slice waiting on a rebase isn't parked, so it is back in the run as soon
+  as the rebase is over. The line says that instead.
+
+Proof:
+- `sliceRun.test.ts`, "one dispatcher per ticket", five tests:
+  - an overlapping run exits 1 with the holder's line and the command for the rest,
+    preps nothing, and leaves the other run's claim as it was;
+  - every ticket held gives no command;
+  - a disjoint run lands, and releases its own claim;
+  - a dead holder's claim is taken over and the run lands;
+  - `--plan` only reports.
+- "azelf retry": the live holder or none.
+- "a hand fix in progress": a dead resolver's mark gets the new line.
+- "resolving a rebase conflict": the resolver sees the mark in the rebase's state.
+- All of these fail on the old code except the disjoint one, which already worked.
+  On the old code the first test preps.
+- Suite: 459 of 459.
 
 ## Phase 4 — hand work in a worktree is held
 
