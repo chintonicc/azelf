@@ -204,7 +204,7 @@ describe("slice-land.sh and the land lock", () => {
 
         writeFileSync(go, "");
         expect(await first.exited).toBe(0);
-        expect(await second.exited).toBe(1);
+        expect(await second.exited).toBe(75);
       } finally {
         await second.stop();
       }

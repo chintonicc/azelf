@@ -136,7 +136,10 @@ from then on runs the new one. Restart it when nothing is landing.
 takes a land lock and a dispatcher's gate run takes a gate lock, both in the common
 git dir, so the runs wait for each other ("waiting for ticket/41's land (pid …)")
 instead of landing into one checkout at once or running their gates on top of each
-other. A lock whose holder has exited is taken over. A gate with `retries` re-runs
+other. When another run lands while a slice is being gated or reviewed, the
+dispatcher rebases it and gates it again on its own (twice at most), reviewing it
+again only if the new commits touched its files. "rebasing again" needs nothing from
+you. A lock whose holder has exited is taken over. A gate with `retries` re-runs
 after a failure; a slice that passes only on a retry lands, and the run's summary
 names it as flaky.
 

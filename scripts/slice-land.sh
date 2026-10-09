@@ -7,6 +7,9 @@
 #   ./scripts/slice-land.sh 123 --end-session   # also end the agent still
 #                                                # sitting in the removed worktree
 #
+# Exits 75 when the base branch has moved and the slice needs a rebase before
+# it can land, and 1 for every other refusal.
+#
 # WHY THIS EXISTS
 # ---------------
 # docs/adr/0001-parallel-slice-sessions.md settled on "direct to master via
@@ -176,8 +179,8 @@ fi
 # dispatchers on consumer-a, five slices landed onto one master in one main
 # checkout, and a hand land during a running wave raced them too. Two `git
 # merge`s at once fail on git's index.lock, which reads as a broken land; one
-# after the other, the second refuses as "diverged" below, which a dispatcher
-# parks and retries when the base moves.
+# after the other, the second refuses as "diverged" below, exit 75, and a
+# dispatcher rebases it and tries again.
 #
 # Here and not in the dispatcher, because hand lands race too. Taken after the
 # checks above, so a land that was never going to happen waits for nobody, and
@@ -232,9 +235,19 @@ else
   base_before="$(git rev-parse HEAD)"
 
   echo "── fast-forwarding $SLICE_BASE_BRANCH onto $branch ──────────────"
-  if ! git merge --ff-only "$branch"; then
+  # Diverged gets its own exit, 75 (EX_TEMPFAIL: try again), because it is the
+  # one refusal a rebase fixes. It is also the common one: the base moved
+  # while the slice was gated and reviewed, or while this script waited for
+  # the land lock above, and a dispatcher rebases again on 75 instead of
+  # parking. Asked of ancestry rather than read from a failed merge, which also
+  # fails on a dirty main checkout, and a rebase fixes nothing there.
+  if ! git merge-base --is-ancestor HEAD "$branch"; then
     echo "error: $SLICE_BASE_BRANCH can't fast-forward onto $branch — it has diverged." >&2
     echo "       rebase $branch onto $SLICE_BASE_BRANCH from its worktree first, then retry." >&2
+    exit 75
+  fi
+  if ! git merge --ff-only "$branch"; then
+    echo "error: $SLICE_BASE_BRANCH couldn't fast-forward onto $branch — see git's message above." >&2
     exit 1
   fi
   echo "✓ $SLICE_BASE_BRANCH now includes $branch"

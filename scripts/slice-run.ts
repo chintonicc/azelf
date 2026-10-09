@@ -222,7 +222,7 @@ function run(
     /** Added to this process's environment, not in place of it. */
     env?: Record<string, string>;
   } = {},
-): { ok: boolean; out: string } {
+): { ok: boolean; out: string; status: number | null } {
   const [bin, ...args] = cmd;
   const proc = spawnSync(bin as string, args, {
     cwd: opts.cwd ?? repoRoot,
@@ -244,7 +244,7 @@ function run(
   if (!ok && !opts.allowFail) {
     throw new Error(`${cmd.join(" ")} failed:\n${out}`);
   }
-  return { ok, out };
+  return { ok, out, status: proc.status };
 }
 
 // ─── the graph ────────────────────────────────────────────────────────────
@@ -3645,112 +3645,188 @@ function reinstallAfterRebase(id: TicketId, before: string | null): boolean {
   return false;
 }
 
-function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
-  // A loop, because a resolution is made against the base as it was when the
-  // resolver started, and a land elsewhere can move it meanwhile. After a
-  // resolution the rebase is asked again: one `is-ancestor` call when nothing
-  // moved, a clean rebase over the new commits most other times, and a second
-  // resolver pass when those conflict too. Then it parks — each pass is up to
-  // twenty minutes a stop, and a base that outruns the resolver twice will a
-  // third time.
-  const baseBefore = mergeBase(t.id);
-  for (let passes = 0; ; passes += 1) {
-    const rebase = rebaseOntoBase(t);
-    if (rebase.ok) break;
-    // Under --auto there is nobody at the prompt to press [a], so the decision
-    // is made here instead of being offered. The argument: --auto already lets
-    // an unwatched agent write code that reaches the base branch gated only by
-    // the gates and the spec review, and a resolution passes through the SAME
-    // gates and the same review of the rebased diff. It is strictly less
-    // exposure than the slice it is fixing. --no-auto-resolve opts out, and an
-    // interactive run is asked rather than told. --auto-resolve asks for the
-    // same without --auto, where `-y` or a missing TTY parks before any offer.
-    const decide = resolveUnasked;
-    if (decide && passes >= RESOLVE_PASSES) {
-      return park(
-        t,
-        "rebase",
-        `${baseBranch} moved twice while the agent was resolving, and the newest commits conflict too`,
-      );
-    }
-    if (!decide || !resolveConflict(t, rebase.conflicted)) {
-      return park(
-        t,
-        "rebase",
-        decide
-          ? "the rebase failed and the agent could not resolve it"
-          : "the rebase onto the base branch failed",
-        // No second [a] after an attempt that already failed: one attempt per
-        // branch head, which is the rule `Parked` already encodes for reviews.
-        decide ? undefined : rebase.conflicted,
-      );
-    }
-  }
-  if (!reinstallAfterRebase(t.id, baseBefore)) {
-    return park(
-      t,
-      "gates",
-      `bun install failed after the rebase (the lockfile may not match package.json) — run bun install in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
-    );
-  }
-  if (!gatesPass(t.id)) {
-    return park(t, "gates", "the gates are red");
-  }
-  // After the gates, not before: no point paying for a review of something
-  // that doesn't compile, and the reviewer should see the rebased diff that
-  // is actually about to land.
-  if (!opts.force && !reviewSlice(t)) {
-    return park(t, "review", "the spec review says BLOCK");
-  }
-  console.log(`  landing ${ref(t.id)} …`);
-  // Read the file set BEFORE landing, because afterwards there is nothing to
-  // read it from: `slice-land.sh` deletes the branch, and even before that the
-  // fast-forward makes `base...branch` empty by definition. Taken here rather
-  // than at the top of the function so it is the REBASED diff — what actually
-  // reaches the base branch — and so a slice that never got past the gates
-  // contributes nothing.
-  const landing = changedFiles(t.id);
-  // The slice is rebased, so this is where its commits start.
-  const landedFrom = baseHead();
-  // `--end-session` under --auto only: the session in that tab was launched
-  // with --self-land, nobody is reading it, and ending its agent after the
-  // removal is what lets the tab close. A manual land never ends a session.
-  const { ok } = run(
-    ["./scripts/slice-land.sh", t.id, ...(autoLand ? ["--end-session"] : [])],
-    {
-      inherit: true,
+/** Times one `tryLand` rebases again when the base moved before it could land. */
+const LAND_RACES = 2;
+
+/** `slice-land.sh`'s exit for a base that moved: rebase, and try again. */
+const LAND_DIVERGED = 75;
+
+/**
+ * The files the base changed between two of its commits that this slice
+ * changes too. None means the slice's diff is the same on both, byte for
+ * byte. `--no-renames` on both sides, so a rename counts as both of its paths.
+ */
+function baseTouched(id: TicketId, from: string, to: string): string[] {
+  const names = (range: string) =>
+    run(["git", "diff", "--no-renames", "--name-only", range], {
       allowFail: true,
-    },
-  );
-  if (!ok) {
-    return park(
-      t,
-      "land",
-      "slice-land.sh refused — the branch is not fast-forwardable, or a hook rejected it",
+    })
+      .out.split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+  // Not `sharedFiles`: what the overlap report ignores still changes the diff.
+  const mine = new Set(names(`${baseBranch}...${branchFor(id)}`));
+  return names(`${from}..${to}`).filter((f) => mine.has(f));
+}
+
+function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
+  // The merge-base the review passed against in this call, while the base
+  // keeps moving under it. See "rebasing again" below.
+  let reviewedOn: string | null = null;
+  for (let races = 0; ; races += 1) {
+    // A loop, because a resolution is made against the base as it was when the
+    // resolver started, and a land elsewhere can move it meanwhile. After a
+    // resolution the rebase is asked again: one `is-ancestor` call when nothing
+    // moved, a clean rebase over the new commits most other times, and a second
+    // resolver pass when those conflict too. Then it parks — each pass is up to
+    // twenty minutes a stop, and a base that outruns the resolver twice will a
+    // third time.
+    const baseBefore = mergeBase(t.id);
+    let resolved = false;
+    for (let passes = 0; ; passes += 1) {
+      const rebase = rebaseOntoBase(t);
+      if (rebase.ok) break;
+      // Under --auto there is nobody at the prompt to press [a], so the decision
+      // is made here instead of being offered. The argument: --auto already lets
+      // an unwatched agent write code that reaches the base branch gated only by
+      // the gates and the spec review, and a resolution passes through the SAME
+      // gates and the same review of the rebased diff. It is strictly less
+      // exposure than the slice it is fixing. --no-auto-resolve opts out, and an
+      // interactive run is asked rather than told. --auto-resolve asks for the
+      // same without --auto, where `-y` or a missing TTY parks before any offer.
+      const decide = resolveUnasked;
+      if (decide && passes >= RESOLVE_PASSES) {
+        return park(
+          t,
+          "rebase",
+          `${baseBranch} moved twice while the agent was resolving, and the newest commits conflict too`,
+        );
+      }
+      if (!decide || !resolveConflict(t, rebase.conflicted)) {
+        return park(
+          t,
+          "rebase",
+          decide
+            ? "the rebase failed and the agent could not resolve it"
+            : "the rebase onto the base branch failed",
+          // No second [a] after an attempt that already failed: one attempt per
+          // branch head, which is the rule `Parked` already encodes for reviews.
+          decide ? undefined : rebase.conflicted,
+        );
+      }
+      resolved = true;
+    }
+    if (!reinstallAfterRebase(t.id, baseBefore)) {
+      return park(
+        t,
+        "gates",
+        `bun install failed after the rebase (the lockfile may not match package.json) — run bun install in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
+      );
+    }
+    if (!gatesPass(t.id)) {
+      return park(t, "gates", "the gates are red");
+    }
+    // After the gates, not before: no point paying for a review of something
+    // that doesn't compile, and the reviewer should see the rebased diff that
+    // is actually about to land.
+    //
+    // Once per call, unless what it judged changed. After a race the slice's
+    // diff is the same byte for byte when the new base commits touched none of
+    // its files, and the review is ten minutes; the gates still run, because
+    // what changed around the slice can break it without touching it. A
+    // resolution is new code, and is always reviewed.
+    const onBase = mergeBase(t.id);
+    const reviewed = !opts.force && reviewEnabled;
+    if (
+      reviewed &&
+      reviewedOn &&
+      onBase &&
+      !resolved &&
+      baseTouched(t.id, reviewedOn, onBase).length === 0
+    ) {
+      console.log(
+        `  review skipped — the new commits on ${baseBranch} touch none of ${ref(
+          t.id,
+        )}'s files`,
+      );
+    } else if (!opts.force && !reviewSlice(t)) {
+      return park(t, "review", "the spec review says BLOCK");
+    }
+    reviewedOn = onBase;
+    console.log(`  landing ${ref(t.id)} …`);
+    // Read the file set BEFORE landing, because afterwards there is nothing to
+    // read it from: `slice-land.sh` deletes the branch, and even before that the
+    // fast-forward makes `base...branch` empty by definition. Taken here rather
+    // than at the top of the function so it is the REBASED diff — what actually
+    // reaches the base branch — and so a slice that never got past the gates
+    // contributes nothing.
+    const landing = changedFiles(t.id);
+    // The slice is rebased, so this is where its commits start.
+    const landedFrom = baseHead();
+    // `--end-session` under --auto only: the session in that tab was launched
+    // with --self-land, nobody is reading it, and ending its agent after the
+    // removal is what lets the tab close. A manual land never ends a session.
+    const { ok, status } = run(
+      ["./scripts/slice-land.sh", t.id, ...(autoLand ? ["--end-session"] : [])],
+      {
+        inherit: true,
+        allowFail: true,
+      },
     );
+    // Rebasing again: another land moved the base while this one was gated
+    // and reviewed, or while slice-land.sh waited for the land lock. Parked,
+    // it waited for the base to move AGAIN, which on consumer-a was hours
+    // after the one move that mattered. The land lock is not stretched over
+    // the gates and the review to prevent it: every other dispatcher's land
+    // would wait behind a ten-minute review.
+    if (status === LAND_DIVERGED && races < LAND_RACES) {
+      const now = baseHead();
+      console.log(
+        `  ${ref(t.id)}: ${baseBranch} moved while it was being gated${
+          reviewed ? " and reviewed" : ""
+        }${now ? ` (now ${now.slice(0, 7)})` : ""} — rebasing again`,
+      );
+      continue;
+    }
+    if (status === LAND_DIVERGED) {
+      return park(
+        t,
+        "land",
+        `${baseBranch} moved under it ${
+          races + 1
+        } times between its rebase and its land`,
+      );
+    }
+    if (!ok) {
+      return park(
+        t,
+        "land",
+        "slice-land.sh refused — a hold, a hook, or a push that failed; its output above says which",
+      );
+    }
+    landedFiles.set(t.id, landing);
+    closePending.set(t.id, { said: false });
+    const landedAt = baseHead();
+    if (landedAt) landedHeads.set(t.id, landedAt);
+    if (landedFrom && landedAt) {
+      landedRanges.set(t.id, { from: landedFrom, to: landedAt });
+    }
+    // Every slice that has a branch right now was open when this landed, and
+    // stays so however often it is rebased or retried afterwards.
+    for (const o of tickets) {
+      if (!o.open || o.id === t.id || !branchHead(o.id)) continue;
+      const under = landedWhileOpen.get(o.id);
+      if (under) under.push(t.id);
+      else landedWhileOpen.set(o.id, [t.id]);
+    }
+    noteLanded(t, landing);
+    const flaky = flakyGates.get(t.id);
+    if (flaky) landedOnRetry.set(t.id, flaky);
+    parked.delete(t.id);
+    retriesSpent.delete(t.id);
+    t.open = false;
+    return true;
   }
-  landedFiles.set(t.id, landing);
-  closePending.set(t.id, { said: false });
-  const landedAt = baseHead();
-  if (landedAt) landedHeads.set(t.id, landedAt);
-  if (landedFrom && landedAt) {
-    landedRanges.set(t.id, { from: landedFrom, to: landedAt });
-  }
-  // Every slice that has a branch right now was open when this landed, and
-  // stays so however often it is rebased or retried afterwards.
-  for (const o of tickets) {
-    if (!o.open || o.id === t.id || !branchHead(o.id)) continue;
-    const under = landedWhileOpen.get(o.id);
-    if (under) under.push(t.id);
-    else landedWhileOpen.set(o.id, [t.id]);
-  }
-  noteLanded(t, landing);
-  const flaky = flakyGates.get(t.id);
-  if (flaky) landedOnRetry.set(t.id, flaky);
-  parked.delete(t.id);
-  retriesSpent.delete(t.id);
-  t.open = false;
-  return true;
 }
 
 /**

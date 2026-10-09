@@ -1932,7 +1932,7 @@ describe("a parked slice", () => {
     expect(readFileSync(c.closeFile, "utf8")).toContain("40\n");
   }, 60_000);
 
-  it("retries a land that lost the fast-forward race", () => {
+  it("rebases a land that lost the fast-forward race again, and lands it", () => {
     // The gate stands in for another dispatcher: the first time it runs, it
     // lands a commit on main, after this slice was rebased and before it lands.
     c = makeConsumer({
@@ -1950,12 +1950,10 @@ describe("a parked slice", () => {
     const r = runDispatcher(c, ["-y", "--interval", "1", "40"]);
 
     expect(r.out).toContain("it has diverged");
-    expect(r.out).toContain(
-      "parked (non-interactive) — retried when its branch moves, when main moves, or now with: azelf retry 40",
+    expect(r.out).toMatch(
+      /#40: main moved while it was being gated \(now [0-9a-f]{7}\) — rebasing again\n/,
     );
-    expect(r.out).toContain(
-      "main moved since #40 was parked — retrying (automatic retry 1 of 2).",
-    );
+    expect(r.out).not.toContain("parked");
     expect(r.code).toBe(0);
     expect(git(c.main, "log", "--format=%s", "-3")).toBe(
       "feat: a\nrace: another land\ninit",
@@ -2108,6 +2106,96 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
  * safe, but a session opened only to be refused at `db-lock.sh claim` is
  * wasted; the label keeps the second from starting at all.
  */
+/**
+ * A land refused because the base moved after the slice was rebased: on
+ * consumer-a another run landed during #103's spec review, and the refusal
+ * parked it until the base moved again, hours later. Here the fake reviewer
+ * is that other run: during the spec review it commits to main, in the main
+ * checkout next to the worktree, `moves` times in all.
+ */
+describe("a land overtaken during the review", () => {
+  const racer = (file: string, moves: number) => [
+    "bash",
+    "-c",
+    `case "$1" in *"faithfully implement"*)
+  echo spec >> ../reviews
+  n=$(cat ../moves 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$n" -lt ${moves} ]; then
+    echo move >> ../moves
+    cd ../repo && echo "move $n" >> ${file} && git add ${file} && git commit -qm "race: move $n"
+  fi ;;
+esac
+echo "VERDICT: PASS"`,
+    "reviewer",
+  ];
+  const lines = (fx: Consumer, name: string) =>
+    existsSync(join(fx.root, name))
+      ? readFileSync(join(fx.root, name), "utf8").trim().split("\n").length
+      : 0;
+  /** #40 changes the first line of shared.txt, which main has too. */
+  const overtaken = (file: string, moves: number) => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      gate: ["bash", "-c", "echo gate >> ../gates"],
+      review: racer(file, moves),
+    });
+    c = fx;
+    commitIn(fx.main, "shared.txt", "1\n2\n3\n4\n5\n6\n7\n", "base: shared");
+    git(fx.main, "push", "-q", "origin", "main");
+    git(fx.wt(40), "rebase", "-q", "main");
+    commitIn(fx.wt(40), "shared.txt", "one\n2\n3\n4\n5\n6\n7\n", "feat: one");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--once", "40"]);
+    return { fx, r };
+  };
+  const RACED =
+    /#40: main moved while it was being gated and reviewed \(now [0-9a-f]{7}\) — rebasing again\n/g;
+
+  it("rebases and gates it again, skips the review when the new commits miss its files, and lands it in the same round", () => {
+    const { fx, r } = overtaken("other.txt", 1);
+    expect(r.out).toContain("it has diverged");
+    expect(r.out.match(RACED)).toHaveLength(1);
+    expect(r.out).toContain(
+      "  review skipped — the new commits on main touch none of #40's files\n",
+    );
+    expect(lines(fx, "gates")).toBe(2);
+    expect(lines(fx, "reviews")).toBe(1);
+    expect(r.out).not.toContain("parked");
+    expect(r.code).toBe(0);
+    expect(git(fx.main, "log", "--format=%s", "-3")).toBe(
+      "feat: one\nrace: move 0\nbase: shared",
+    );
+    expect(readFileSync(fx.closeFile, "utf8")).toContain("40\n");
+  });
+
+  it("reviews it again when the new commits touch one of its files", () => {
+    const { fx, r } = overtaken("shared.txt", 1);
+    expect(r.out.match(RACED)).toHaveLength(1);
+    expect(r.out).not.toContain("review skipped");
+    expect(lines(fx, "gates")).toBe(2);
+    expect(lines(fx, "reviews")).toBe(2);
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(fx.main, "shared.txt"), "utf8")).toBe(
+      "one\n2\n3\n4\n5\n6\n7\nmove 0\n",
+    );
+  });
+
+  it("parks it as a land after two races", () => {
+    const { fx, r } = overtaken("shared.txt", 99);
+    expect(r.out.match(RACED)).toHaveLength(2);
+    expect(lines(fx, "reviews")).toBe(3);
+    expect(r.out).toContain(
+      "main moved under it 3 times between its rebase and its land",
+    );
+    expect(r.out).toContain(
+      "parked (non-interactive) — retried when its branch moves, when main moves, or now with: azelf retry 40",
+    );
+    expect(r.code).not.toBe(0);
+    expect(git(fx.main, "log", "--format=%s", "-1")).toBe("race: move 2");
+  });
+});
+
 describe("exclusiveLockLabel", () => {
   const labelled = () => {
     const fx = makeConsumer({

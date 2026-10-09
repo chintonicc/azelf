@@ -1005,7 +1005,9 @@ once, with the reason on screen:
 ```
 
 All four failure paths go through that question: a failed rebase, red gates, a
-blocking review, or `slice-land.sh` refusing a branch that is not fast-forwardable.
+blocking review, or `slice-land.sh` refusing. A land refused because the base moved
+after the rebase is not asked about at first: the dispatcher rebases again, twice at
+most (see [Two dispatchers on one repo](#two-dispatchers-on-one-repo)).
 Non-interactive runs (`-y`, or no TTY) park automatically, which loses nothing and
 lands nothing unreviewed.
 
@@ -1176,8 +1178,9 @@ exactly those:
 A rebase conflict gets only the first and the last: a resolver run can take twenty
 minutes, and a moving base rarely removes a conflict.
 
-The base-branch trigger covers a slice that lost a fast-forward race to another land,
-and a flaky test fixed on master: in both the branch was never the problem. It is
+The base-branch trigger covers a flaky test fixed on master, and a slice that lost the
+fast-forward race to other lands three times in one try (a lost race is otherwise
+rebased again on the spot): in both the branch was never the problem. It is
 capped because every land moves the base, and a slice whose own code is red should
 not re-run the gates after each one; after two it says so once and waits for one of
 the other triggers. The ticket trigger covers a BLOCK against a stale ticket, which is
@@ -1322,9 +1325,29 @@ else's, so locks in the common git dir keep the runs off each other:
 
 The land lock is in the script and not in the dispatcher, because a land by hand
 races a running wave just as much. With it, the second of two lands waits. Then it
-either lands or refuses as "diverged", which a dispatcher parks and retries when the
-base moves. Without it, two `git merge`s fail on git's `index.lock`, and that reads as
-a broken land.
+either lands or refuses as "diverged". Without it, two `git merge`s fail on git's
+`index.lock`, and that reads as a broken land.
+
+**A land the base moved under is rebased again.** The lock covers the land, not the
+gates and the review before it, or every other run's lands would wait behind a
+ten-minute review. So another run can land while a slice is being reviewed, and
+`slice-land.sh` then refuses it as diverged, with exit 75. The dispatcher rebases it
+onto the new base (reinstalling and resolving as on the first rebase), runs the gates
+again, and lands it in the same round:
+
+```
+  #103: master moved while it was being gated and reviewed (now 0e28eaa) — rebasing again
+  #103 is behind master — rebasing before the gates …
+  review skipped — the new commits on master touch none of #103's files
+  landing #103 …
+```
+
+The review runs again only when the new base commits touched one of the slice's files,
+or the rebase needed the resolver. Otherwise the slice's diff is the same byte for
+byte. The gates always run again: a change next to the slice can break it without
+touching it. After two such races in one try it parks as a land, to be retried when
+the base moves again. `slice-land.sh` exits 1 for every other refusal, and those park
+at once.
 
 The gate lock is about load. A single dispatcher already runs one slice's gates at a
 time; without the lock, a second dispatcher's gates run on top of them. It does not
