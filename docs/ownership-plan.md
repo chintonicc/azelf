@@ -1,6 +1,6 @@
 # A land that finishes, one dispatcher per ticket, and a hold on hand work
 
-**Status:** IN PROGRESS — Phases 1–4 landed · **Written:** 2026-10-08
+**Status:** COMPLETE — all five phases landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log: the five entries dated 2026-10-08 that
 `docs/lock-and-review-plan.md` left open, and two more from later the same day (a
 rebase that doesn't reinstall, and a worktree re-added by hand). Every other entry is
@@ -453,12 +453,12 @@ Proof:
   they prep. The fixture is unchanged.
 
 
-## Phase 5 — a land overtaken during the review rebases again
+## Phase 5 — a land overtaken during the review rebases again (384b55b)
 
-- [ ] **5a. Say why `slice-land.sh` refused.** The diverged refusal
+- [x] **5a. Say why `slice-land.sh` refused.** The diverged refusal
   (`slice-land.sh:155-159`) exits 75 (`EX_TEMPFAIL`: try again after a rebase).
   Everything else keeps exiting 1.
-- [ ] **5b. Rebase again in `tryLand`.** On 75, up to `LAND_RACES = 2` times per
+- [x] **5b. Rebase again in `tryLand`.** On 75, up to `LAND_RACES = 2` times per
   `tryLand`:
 
   > #103: master moved while it was being gated and reviewed (now 0e28eaa) — rebasing again
@@ -479,6 +479,36 @@ Proof:
   - a reviewer that moves the base every time parks after two races.
 
   The first test parks on the old code.
+
+As landed:
+- **75 is decided by ancestry**, `git merge-base --is-ancestor HEAD <branch>`,
+  before the merge, not read from a failed `git merge --ff-only`. That merge also
+  fails on a dirty main checkout, which a rebase does not fix; it keeps exit 1, with
+  git's own message above it.
+- **The race loop wraps all of `tryLand`**: the rebase with its resolver passes, the
+  reinstall (from that race's own merge-base), the gates, the review and the land.
+  The review is skipped only when it passed earlier in the same call, the rebase
+  needed no resolver, and `git diff --no-renames` between the merge-base it passed
+  on and the new one shares no file with the slice's diff. Not `sharedFiles`: what
+  the overlap report ignores still changes the diff. `[f] land anyway` stays
+  unreviewed across races.
+- The line says `while it was being gated` without `and reviewed` when the review is
+  off. The park after the third refusal reads `master moved under it 3 times between
+  its rebase and its land`. Any other `slice-land.sh` failure now says `a hold, a
+  hook, or a push that failed; its output above says which`.
+- `run` returns the exit status.
+
+Proof:
+- `sliceRun.test.ts`, "a land overtaken during the review": the fake reviewer commits
+  to main in the main checkout during the spec review. On `other.txt`, the land is
+  refused once, rebased, gated twice, reviewed once, and lands in the `--once` round.
+  On `shared.txt`, which the slice changed too (a different line), it is reviewed
+  twice. Moving it every time parks it after two races, with three reviews.
+- "a parked slice": the gate that lands another commit on main now gets the slice
+  rebased and landed in the same try, not parked and retried.
+- `sliceLand.test.ts`: the second of two lands waiting on the land lock exits 75.
+- The three new tests fail on the old code. The first fails because the land parks.
+- Suite: 472 of 472, with 11 GB free this time, so no fixture change was needed.
 
 ## Order and cost
 
