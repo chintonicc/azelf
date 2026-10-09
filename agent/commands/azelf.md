@@ -145,6 +145,31 @@ report names the launcher, because that is the thing to look at: `warp` starts
 sessions through a shell hook and a marker file, everything else carries the command
 itself.
 
+## Someone else's worktree
+
+Taking over a run, or cleaning up after one, is where work gets lost: a session read
+a hand re-port's rebase as a leftover, aborted it and removed the worktree, and the
+unstaged resolutions were gone.
+
+- Never `git rebase --abort`, `git reset --hard`, or remove a slice worktree you did
+  not start.
+- A rebase in progress with no session running may be someone's unstaged work. Ask
+  before touching it.
+- `git worktree list` shows a held worktree as `locked`; `-v` shows who and why.
+- Before working in a slice worktree by hand, hold it, and release it after:
+
+  ```sh
+  bunx azelf hold 12 --why "re-porting onto #11"
+  bunx azelf release 12
+  ```
+
+  While it is held the dispatcher does not land, relaunch or rebase it (it says so,
+  and the run waits for it), `slice-land.sh` refuses it, no session opens in it, and
+  `git worktree remove` refuses it. Once released, a branch you moved retries the land.
+- A worktree re-added by hand has none of the provisioned files: `bunx azelf
+  provision 12` copies what is missing, installs, and rewrites the ticket brief,
+  without launching anything.
+
 ## Landing by hand
 
 ```sh

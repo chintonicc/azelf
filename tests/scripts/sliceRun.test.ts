@@ -1705,6 +1705,11 @@ ${moveMain(
     expect(r.out).toContain(
       "resolution rejected — the resolver says the two sides cannot coexist: both sides rewrite the same line",
     );
+    expect(r.out).toContain(
+      "to re-port it by hand: azelf hold 40, rebase it onto main in its worktree and commit, then azelf release 40 — the moved branch retries the land",
+    );
+    // Nothing of this run's landed under it.
+    expect(r.out).not.toContain("it collides with");
     expect(r.code).toBe(1);
     expect(git(c.wt(40), "rev-parse", "HEAD")).toBe(head);
     expect(rebaseInProgress(c.wt(40))).toBe(false);
@@ -1724,6 +1729,41 @@ ${moveMain(
     expect(report).toMatch(
       /## Attempt 1 — .*\n\nREJECTED: [\s\S]*### Stop 1: a\.txt[\s\S]*## Attempt 2 — .*\n\nREJECTED: [\s\S]*### Stop 1: a\.txt/,
     );
+  });
+
+  it("names the land it collided with, when this run made it", () => {
+    c = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      resolve: [
+        "bash",
+        "-c",
+        "echo 'IRRECONCILABLE: both rewrite a.txt'",
+        "resolver",
+      ],
+    });
+    commitIn(c.wt(40), "a.txt", "forty\n", "feat: 40");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    commitIn(c.wt(41), "a.txt", "forty-one\n", "feat: 41");
+    sh(c.wt(41), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, [
+      "--auto",
+      "-y",
+      "--no-review",
+      "--interval",
+      "1",
+      "40",
+      "41",
+    ]);
+
+    expect(r.out).toContain(
+      "it collides with #40, which landed a.txt while #41 was open",
+    );
+    expect(r.out).toContain(
+      "to re-port it by hand: azelf hold 41, rebase it onto main in its worktree and commit, then azelf release 41 — the moved branch retries the land",
+    );
+    expect(r.code).toBe(1);
   });
 
   it("rejects a resolution that edits a file it was not given", () => {
@@ -2273,6 +2313,244 @@ describe("one dispatcher per ticket", () => {
       "A dispatch of this plan stops there until that run ends.",
     );
     expect(existsSync(claimOf(c, "40"))).toBe(false);
+  });
+});
+
+/** `azelf <args…>` from the main checkout, as a person types it. */
+const azelfCli = (fx: Consumer, ...args: string[]) => {
+  const r = spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), ...args], {
+    cwd: fx.main,
+    encoding: "utf8",
+    env: { ...process.env, SLICE_REPO_ROOT: fx.main },
+  });
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+};
+
+/**
+ * A worktree in use by hand. On consumer-a a second session aborted a hand
+ * re-port's rebase and removed its worktree, reading it as a leftover; the
+ * hold is git's own worktree lock, which every part of azelf now respects.
+ */
+describe("a held worktree", () => {
+  /** ticket/40 committed and marked done: what a land is waiting for. */
+  const done = () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+
+  const SEEN =
+    /#40 is held by the re-port session since \d\d:\d\d \(re-porting onto #39\) — not landing or relaunching it until azelf release 40/g;
+
+  it("is not landed while held, says so once, and lands the round after its release", async () => {
+    c = done();
+    const held = azelfCli(
+      c,
+      "hold",
+      "40",
+      "--by",
+      "the re-port session",
+      "--why",
+      "re-porting onto #39",
+    );
+    expect(held.code).toBe(0);
+    d = startDispatcher(c, [
+      "--auto",
+      "-y",
+      "--no-review",
+      "--interval",
+      "1",
+      "40",
+    ]);
+    await d.until(SEEN);
+    await d.until(/\[round 3\]/);
+    expect(d.output()).toContain("1 open · 1 held — land one to advance");
+    expect(d.output()).not.toContain("marked done");
+
+    const released = azelfCli(c, "release", "40");
+    expect(released.out).toContain(
+      `the running dispatcher (pid ${d.pid}) takes it back next round`,
+    );
+    await d.until("plan complete");
+
+    const out = d.output();
+    expect(out.match(SEEN)).toHaveLength(1);
+    expect(out).toContain("#40 is no longer held — back in the run.");
+    expect(await d.exited).toBe(0);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("is taken and given back from the command line, and git will not remove it meanwhile", () => {
+    c = makeConsumer({ worktrees: [40] });
+    const wt = c.wt(40);
+
+    const none = azelfCli(c, "hold", "99");
+    expect(none.out).toContain("#99: no worktree at");
+    expect(none.code).toBe(1);
+
+    const held = azelfCli(c, "hold", "40", "--by", "the re-port session");
+    expect(held.code).toBe(0);
+    expect(held.out).toContain(
+      "✓ held #40 for the re-port session — nothing lands, relaunches or removes it until azelf release 40",
+    );
+    expect(readFileSync(join(wt, ".slice-hold"), "utf8")).toContain(
+      "azelf release 40",
+    );
+    // Ignored, so the slice is still clean.
+    expect(git(wt, "status", "--porcelain")).toBe("");
+    expect(git(c.main, "worktree", "list", "--porcelain")).toContain(
+      "locked azelf hold: the re-port session since ",
+    );
+
+    const again = azelfCli(c, "hold", "40");
+    expect(again.code).toBe(1);
+    expect(again.out).toMatch(
+      /#40 is already held by the re-port session since \d\d:\d\d — azelf release 40 first/,
+    );
+    expect(() =>
+      git(c?.main as string, "worktree", "remove", "--force", wt),
+    ).toThrow();
+
+    const released = azelfCli(c, "release", "40");
+    expect(released.code).toBe(0);
+    expect(released.out).toContain("✓ released #40");
+    expect(released.out).toContain(
+      "no running dispatcher has #40 — azelf run --auto 40 picks it up",
+    );
+    expect(existsSync(join(wt, ".slice-hold"))).toBe(false);
+    expect(azelfCli(c, "release", "40").out).toContain(
+      "#40 is not held — nothing to release",
+    );
+  });
+
+  it("says a session running in it carries on", async () => {
+    c = makeConsumer({ worktrees: [40] });
+    const s = fakeSession(c, 40);
+    sessions.push(s);
+    expect(azelfCli(c, "hold", "40").out).toContain(
+      `a session is running in it (pid ${s.pid}): it carries on, and is neither landed nor relaunched while the hold stands`,
+    );
+  });
+
+  it("counts a lock someone put on with git, which release leaves to git, and the run's end lists it", () => {
+    c = done();
+    git(c.main, "worktree", "lock", "--reason", "bisecting", c.wt(40));
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      `#40 is locked in git (bisecting) — not landing or relaunching it until git worktree unlock ${c.wt(
+        40,
+      )}`,
+    );
+    expect(r.out).not.toContain("marked done");
+    expect(r.out).toContain(
+      `── held (1) ───────────────────────────────\n  #40  locked in git (bisecting)\n     release: git worktree unlock ${c.wt(
+        40,
+      )}`,
+    );
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+
+    const released = azelfCli(c, "release", "40");
+    expect(released.code).toBe(1);
+    expect(released.out).toContain(
+      `#40's worktree is locked in git (bisecting), not held by azelf hold — if whoever locked it is done: git worktree unlock ${c.wt(
+        40,
+      )}`,
+    );
+  });
+
+  it("gets no session, though it can be provisioned", () => {
+    c = makeConsumer({ worktrees: [40], agent: ["true"] });
+    azelfCli(c, "hold", "40", "--by", "the re-port session");
+
+    const r = shResult(c.main, "./scripts/slice-session.sh 40");
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(
+      /error: #40 is held by the re-port session since \d\d:\d\d — azelf release 40 first\. A held worktree gets no session; azelf provision 40 provisions it without one\./,
+    );
+    expect(existsSync(join(c.wt(40), ".slice-live"))).toBe(false);
+
+    const p = azelfCli(c, "provision", "40");
+    expect(p.code).toBe(0);
+    expect(p.out).toContain("✓ provisioned — nothing launched");
+  });
+});
+
+/**
+ * A worktree re-added by hand with `git worktree add` has the branch and
+ * nothing else: none of the provisionCopy files, no install, no brief.
+ */
+describe("azelf provision", () => {
+  const readded = () => {
+    const fx = makeConsumer({
+      agent: ["true"],
+      configExtra: 'provisionCopy: [".env", ".env.local"],',
+    });
+    writeFileSync(join(fx.main, ".env"), "MAIN_ENV\n");
+    writeFileSync(join(fx.main, ".env.local"), "MAIN_LOCAL\n");
+    writeFileSync(
+      join(fx.main, ".git", "info", "exclude"),
+      `${readFileSync(
+        join(fx.main, ".git", "info", "exclude"),
+        "utf8",
+      )}\n.env\n.env.local\n`,
+    );
+    fx.setTicket("40", { title: "The re-port", body: "Port it." });
+    git(fx.main, "branch", "ticket/40");
+    git(fx.main, "worktree", "add", "-q", fx.wt(40), "ticket/40");
+    return fx;
+  };
+
+  it("copies what is missing, leaves what is there, writes the brief, and launches nothing", () => {
+    c = readded();
+    writeFileSync(join(c.wt(40), ".env.local"), "EDITED\n");
+
+    const r = azelfCli(c, "provision", "40");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("✓ copied .env");
+    expect(r.out).toContain(".env.local is already there — left as it is");
+    expect(readFileSync(join(c.wt(40), ".env"), "utf8")).toBe("MAIN_ENV\n");
+    expect(readFileSync(join(c.wt(40), ".env.local"), "utf8")).toBe("EDITED\n");
+    expect(readFileSync(join(c.wt(40), ".slice-ticket.md"), "utf8")).toContain(
+      "Port it.",
+    );
+    expect(existsSync(join(c.wt(40), ".slice-flags"))).toBe(false);
+    expect(existsSync(join(c.wt(40), ".slice-live"))).toBe(false);
+    expect(r.out).not.toContain("checking ticket");
+  });
+
+  it("re-adds the worktree from its branch when git no longer lists it", () => {
+    c = readded();
+    git(c.main, "worktree", "remove", "--force", c.wt(40));
+
+    const r = azelfCli(c, "provision", "40");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("on existing local branch ticket/40");
+    expect(readFileSync(join(c.wt(40), ".env"), "utf8")).toBe("MAIN_ENV\n");
+  });
+
+  it("refuses with neither a worktree nor a branch, and while a session runs there", () => {
+    c = readded();
+    const none = azelfCli(c, "provision", "41");
+    expect(none.code).toBe(1);
+    expect(none.out).toContain(
+      "#41 has neither a worktree nor a branch 'ticket/41' — nothing to provision. azelf run 41 starts it.",
+    );
+
+    const s = fakeSession(c, 40);
+    sessions.push(s);
+    const busy = azelfCli(c, "provision", "40");
+    expect(busy.code).toBe(1);
+    expect(busy.out).toContain(
+      `a session is running in ${c.wt(40)} (pid ${
+        s.pid
+      }) — its files would change under it. End it first.`,
+    );
+    expect(existsSync(join(c.wt(40), ".env"))).toBe(false);
   });
 });
 

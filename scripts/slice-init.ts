@@ -75,6 +75,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-flags
 .slice-retry
 .slice-interrupted
+.slice-hold
 .slice-reviews/
 ${EXCLUDE_END}`;
 

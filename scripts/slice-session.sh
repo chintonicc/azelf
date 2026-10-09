@@ -60,10 +60,11 @@ dispatched=false
 autostart=true
 self_land=false
 named=false
+provision=false
 ticket=""
 
 usage() {
-  echo "usage: ${AZELF_INVOKED_AS:-$0} <ticket-id> [--no-start] [--prep-only] [--self-land]" >&2
+  echo "usage: ${AZELF_INVOKED_AS:-$0} <ticket-id> [--no-start] [--prep-only] [--self-land] [--provision]" >&2
   exit 64
 }
 
@@ -100,6 +101,16 @@ while [[ $# -gt 0 ]]; do
     # a ticket carrying humanLabel is refused with it all the same. Not in
     # the usage line, like --dispatched.
     --named) named=true; shift ;;
+    # `azelf provision`: bring an existing worktree back to what a prep leaves,
+    # and stop. For one re-added by hand with `git worktree add`, which has
+    # none of the provisionCopy files, no node_modules and no ticket brief; on
+    # consumer-a one came back that way after a session removed it mid
+    # re-port. Re-adds the worktree from the branch if git no longer lists it,
+    # copies what is missing (never over what is there), installs, rewrites
+    # the briefs. No ticket checks — the ticket was started once already —
+    # no .slice-flags, and no launch. Allowed under a hold; refused while a
+    # session is running in the worktree, whose files would change under it.
+    --provision) provision=true; shift ;;
     -h|--help) usage ;;
     -*) echo "unknown option: $1" >&2; usage ;;
     *)
@@ -169,62 +180,92 @@ if ! slice_is_ticket_id "$ticket"; then
   exit 64
 fi
 ticket_ref="$(slice_ref "$ticket")"
+branch="$(slice_branch_for "$ticket")"
+worktree_path="$(slice_worktree_for "$ticket")"
+
+# ─── A hold ─────────────────────────────────────────────────────────────
+# Someone is working in it by hand (`azelf hold`, or any git lock on it): a
+# session opened there would work on top of them. Provisioning is not a
+# session, and is how a hand re-port gets its files back. See
+# scripts/slice-hold.ts.
+if ! $provision && hold="$(bun "$SLICE_AZELF_DIR/scripts/slice-hold.ts" describe "$worktree_path" "$ticket")"; then
+  echo "error: $ticket_ref is $hold first. A held worktree gets no session; azelf provision $ticket provisions it without one." >&2
+  exit 1
+fi
+
+if $provision; then
+  if ! git worktree list --porcelain | grep -qx "worktree $worktree_path" &&
+    ! git show-ref --verify --quiet "refs/heads/$branch"; then
+    echo "error: $ticket_ref has neither a worktree nor a branch '$branch' — nothing to provision. azelf run $ticket starts it." >&2
+    exit 1
+  fi
+  # The same test the dispatcher makes: the marker's pid must still be a
+  # slice-session.sh, because a crash leaves the marker behind.
+  live_pid="$(head -n 1 "$worktree_path/.slice-live" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$live_pid" =~ ^[0-9]+$ ]] &&
+    ps -ww -o command= -p "$live_pid" 2>/dev/null | grep -q "slice-session"; then
+    echo "error: a session is running in $worktree_path (pid $live_pid) — its files would change under it. End it first." >&2
+    exit 1
+  fi
+fi
 
 # ─── Validate the ticket ────────────────────────────────────────────────
-echo "── checking ticket $ticket_ref ─────────────────────"
+if ! $provision; then
+  echo "── checking ticket $ticket_ref ─────────────────────"
 
-# A marker launcher's session starts with no flags and reads the rest from
-# .slice-flags further down, after this check. --named has to be known here,
-# so it alone is read early. Only ever to turn it on, as below.
-if ! $named && grep -qx -- "--named" "$(slice_worktree_for "$ticket")/.slice-flags" 2>/dev/null; then
-  named=true
-fi
+  # A marker launcher's session starts with no flags and reads the rest from
+  # .slice-flags further down, after this check. --named has to be known here,
+  # so it alone is read early. Only ever to turn it on, as below.
+  if ! $named && grep -qx -- "--named" "$(slice_worktree_for "$ticket")/.slice-flags" 2>/dev/null; then
+    named=true
+  fi
 
-# Through the tracker bridge, not gh: the loader answers `state<TAB>ready<TAB>
-# human<TAB>title`, with `ready` and `human` already decided against
-# readyLabel and humanLabel. (That also retires the jq program the label used
-# to be interpolated into.) On failure the bridge prints why on stderr and
-# nothing on stdout.
-issue_tsv=$(slice_tracker_get "$ticket" 2>&1) || {
-  echo "error: couldn't fetch $ticket_ref from $SLICE_TRACKER_NAME:" >&2
-  echo "$issue_tsv" >&2
-  exit 1
-}
-IFS=$'\t' read -r state has_label is_human title <<<"$issue_tsv"
+  # Through the tracker bridge, not gh: the loader answers `state<TAB>ready<TAB>
+  # human<TAB>title`, with `ready` and `human` already decided against
+  # readyLabel and humanLabel. (That also retires the jq program the label used
+  # to be interpolated into.) On failure the bridge prints why on stderr and
+  # nothing on stdout.
+  issue_tsv=$(slice_tracker_get "$ticket" 2>&1) || {
+    echo "error: couldn't fetch $ticket_ref from $SLICE_TRACKER_NAME:" >&2
+    echo "$issue_tsv" >&2
+    exit 1
+  }
+  IFS=$'\t' read -r state has_label is_human title <<<"$issue_tsv"
 
-if [[ "$state" != "open" ]]; then
-  echo "error: $ticket_ref is $state, not open." >&2
-  exit 1
-fi
-if [[ "$is_human" == "true" ]]; then
-  echo "error: $ticket_ref is labelled $SLICE_HUMAN_LABEL — a person does this one, not a session." >&2
-  exit 1
-fi
-if [[ "$has_label" != "true" ]] && ! $named; then
-  echo "error: $ticket_ref is missing the '$SLICE_READY_LABEL' label." >&2
-  echo "       run /mattpocock-skills:triage or /mattpocock-skills:to-tickets on it first." >&2
-  exit 1
-fi
+  if [[ "$state" != "open" ]]; then
+    echo "error: $ticket_ref is $state, not open." >&2
+    exit 1
+  fi
+  if [[ "$is_human" == "true" ]]; then
+    echo "error: $ticket_ref is labelled $SLICE_HUMAN_LABEL — a person does this one, not a session." >&2
+    exit 1
+  fi
+  if [[ "$has_label" != "true" ]] && ! $named; then
+    echo "error: $ticket_ref is missing the '$SLICE_READY_LABEL' label." >&2
+    echo "       run /mattpocock-skills:triage or /mattpocock-skills:to-tickets on it first." >&2
+    exit 1
+  fi
 
-# A COUNT, so the numeric guard here is right and stays: the bridge filters
-# the blocker list to the still-open ones with the same rule slice-run.ts
-# uses (openBlockers in slice-tracker.ts), and this script only ever needs
-# how many. Anything but digits means the bridge failed and printed why.
-blocked_by=$(slice_tracker_open_blockers "$ticket" 2>&1)
-if [[ ! "$blocked_by" =~ ^[0-9]+$ ]]; then
-  echo "error: couldn't read the blocker count for $ticket_ref from $SLICE_TRACKER_NAME:" >&2
-  echo "$blocked_by" >&2
-  exit 1
-fi
-if [[ "$blocked_by" -gt 0 ]]; then
-  echo "error: $ticket_ref still has $blocked_by open blocker(s) — not ready yet." >&2
-  exit 1
-fi
+  # A COUNT, so the numeric guard here is right and stays: the bridge filters
+  # the blocker list to the still-open ones with the same rule slice-run.ts
+  # uses (openBlockers in slice-tracker.ts), and this script only ever needs
+  # how many. Anything but digits means the bridge failed and printed why.
+  blocked_by=$(slice_tracker_open_blockers "$ticket" 2>&1)
+  if [[ ! "$blocked_by" =~ ^[0-9]+$ ]]; then
+    echo "error: couldn't read the blocker count for $ticket_ref from $SLICE_TRACKER_NAME:" >&2
+    echo "$blocked_by" >&2
+    exit 1
+  fi
+  if [[ "$blocked_by" -gt 0 ]]; then
+    echo "error: $ticket_ref still has $blocked_by open blocker(s) — not ready yet." >&2
+    exit 1
+  fi
 
-if [[ "$has_label" == "true" ]]; then
-  echo "✓ $ticket_ref \"$title\" is $SLICE_READY_LABEL with no open blockers"
-else
-  echo "✓ $ticket_ref \"$title\" has no open blockers — not labelled $SLICE_READY_LABEL, run because it was named"
+  if [[ "$has_label" == "true" ]]; then
+    echo "✓ $ticket_ref \"$title\" is $SLICE_READY_LABEL with no open blockers"
+  else
+    echo "✓ $ticket_ref \"$title\" has no open blockers — not labelled $SLICE_READY_LABEL, run because it was named"
+  fi
 fi
 
 # ─── DB lock ────────────────────────────────────────────────────────────
@@ -237,7 +278,6 @@ fi
 # touches them was being held back for nothing. The dispatcher calls this
 # with --prep-only for every ticket it starts, so a refusal here would still
 # stall the whole wave on one holder, which is the failure this replaced.
-branch="$(slice_branch_for "$ticket")"
 holder=$(db_lock_holder "$branch") || true
 if [[ -n "$holder" ]]; then
   # Verbatim: with more than one holder the text carries the way out.
@@ -248,8 +288,6 @@ if [[ -n "$holder" ]]; then
 fi
 
 # ─── Create the worktree ────────────────────────────────────────────────
-worktree_path="$(slice_worktree_for "$ticket")"
-
 if git worktree list --porcelain | grep -qx "worktree $worktree_path"; then
   echo "✓ worktree already exists at $worktree_path — reusing it"
 elif git show-ref --verify --quiet "refs/heads/$branch"; then
@@ -317,6 +355,8 @@ if [[ ${#SLICE_PROVISION_COPY[@]} -gt 0 ]]; then
       mkdir -p "$(dirname "$worktree_path/$provision_file")"
       cp "$repo_root/$provision_file" "$worktree_path/$provision_file"
       echo "✓ copied $provision_file"
+    elif $provision && [[ -e "$worktree_path/$provision_file" ]]; then
+      echo "  $provision_file is already there — left as it is"
     fi
   done
 fi
@@ -363,6 +403,11 @@ elif parent_brief=$(slice_tracker_parent "$ticket" 2>/dev/null) && [[ -n "$paren
   echo "✓ wrote .slice-parent.md — the spec this ticket hangs under"
 else
   rm -f "$parent_file"
+fi
+
+if $provision; then
+  echo "✓ provisioned — nothing launched. The dispatcher relaunches it when it has to; by hand: ${AZELF_INVOKED_AS:-$0} $ticket"
+  exit 0
 fi
 
 # ─── Launch ──────────────────────────────────────────────────────────────

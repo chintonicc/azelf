@@ -77,6 +77,18 @@ fi
 branch="$(slice_branch_for "$ticket")"
 worktree_path="$(slice_worktree_for "$ticket")"
 
+# ─── A hold ────────────────────────────────────────────────────────────────
+#
+# Someone is working in the worktree by hand (`azelf hold`, or any git lock on
+# it). First, before the record and the land lock: git refuses to remove a
+# locked worktree, so a land that went ahead would push, close the ticket and
+# then fail its cleanup with a message about a dirty tree. See
+# scripts/slice-hold.ts.
+if hold="$(bun "$SLICE_AZELF_DIR/scripts/slice-hold.ts" describe "$worktree_path" "$ticket")"; then
+  echo "error: $ticket_ref is $hold first." >&2
+  exit 1
+fi
+
 # ─── A land that already pushed ────────────────────────────────────────────
 #
 # Written right after the push, deleted as the last step once the ticket is

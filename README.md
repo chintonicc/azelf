@@ -133,7 +133,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes eleven marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes twelve marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -162,7 +162,7 @@ saying so.
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | eleven marker patterns, in a delimited block |
+| `.git/info/exclude` | twelve marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -305,6 +305,37 @@ Retries a parked slice's land in the running dispatcher's next round, whatever i
 parked on. It names the dispatcher that has the ticket (`the running dispatcher (pid
 45696) retries #103 next round`), or says that none does; then `azelf run --auto
 <ticket>` starts one. See [What retries a parked slice](#what-retries-a-parked-slice).
+
+### `azelf hold <ticket> [--by <who>] [--why <text>]` and `azelf release <ticket>`
+
+Hold a slice's worktree while you work in it by hand, and give it back after:
+
+```
+bunx azelf hold 102 --why "re-porting onto #101"
+  ✓ held #102 for alex — nothing lands, relaunches or removes it until azelf release 102
+bunx azelf release 102
+  ✓ released #102 — held by alex since 14:55 (re-porting onto #101)
+  the running dispatcher (pid 45696) takes it back next round
+```
+
+`--by` defaults to `$USER`. A hold is git's own worktree lock
+(`git worktree lock --reason "azelf hold: …"`), plus a `.slice-hold` note in the
+worktree for whoever looks with `ls`. See
+[Fixing a slice by hand while the dispatcher runs](#fixing-a-slice-by-hand-while-the-dispatcher-runs).
+`hold` refuses a ticket with no worktree, and one that is already held, naming the
+holder. `release` gives back only an azelf hold; for a lock someone put on with git
+it names `git worktree unlock`.
+
+### `azelf provision <ticket>`
+
+Brings a worktree back to what a prep leaves, and launches nothing: for one
+re-added by hand with `git worktree add`, which has the branch and nothing else. It
+re-adds the worktree from the branch if git no longer lists it, copies the
+`provisionCopy` files that are missing (and names the ones already there, which it
+never overwrites), runs `bun install`, and rewrites `.slice-ticket.md` and
+`.slice-parent.md`. It skips the ticket checks and writes no `.slice-flags`. It works
+under a hold, and refuses while a session is running in the worktree, or when there
+is neither a worktree nor a branch (`azelf run <ticket>` starts it).
 
 ### `azelf hook`
 
@@ -1062,7 +1093,13 @@ left in those files, and nothing changed outside them. Only then does it
 deletion) and continue the rebase, and if the next commit stops too, the resolver is
 called again. A resolver that decides the two sides cannot coexist leaves the files
 alone and prints one line starting `IRRECONCILABLE:`, which becomes the reason the
-resolution is rejected. This split exists because a resolver told to finish the
+resolution is rejected. The park then says what the conflict collided with, when this
+run landed it, and how to re-port the slice by hand:
+
+```
+     it collides with #101, which landed components/capture/VideoEditor.tsx while #102 was open
+     to re-port it by hand: azelf hold 102, rebase it onto main in its worktree and commit, then azelf release 102 — the moved branch retries the land
+``` This split exists because a resolver told to finish the
 rebase itself needed permission for `git add`, which `acceptEdits` does not grant,
 and correct resolutions were thrown away with the rebase still in progress.
 
@@ -1190,6 +1227,30 @@ says so instead:
 ```
   #54: a rebase is in progress in its worktree, left by the conflict resolver of a dispatcher that is no longer running (pid 30498). Nothing will finish it: finish it by hand, or git -C ../repo-ticket-54 rebase --abort — either way it is back in the run once the rebase is over.
 ```
+
+**Hold the worktree for anything longer**, or anything another session might
+mistake for a leftover. On consumer-a a hand re-port of a parked slice was
+mid-rebase, its resolutions unstaged, when another session taking over the run read it
+as stale, ran `git rebase --abort` and removed the worktree. `azelf hold <ticket>`
+puts git's worktree lock on it, and then:
+
+- the dispatcher does not land, relaunch, rebase or finish it, and the run waits for
+  it as it waits for a rebase. It says so once, and once when it is released:
+
+  ```
+    #102 is held by alex since 14:55 (re-porting onto #101) — not landing or relaunching it until azelf release 102
+  ```
+
+  The round line counts `N held`, and a run that ends with holds lists them with the
+  command that releases each. A hold has no process behind it and never expires.
+- `slice-land.sh` refuses it before taking the land lock, and `slice-session.sh` opens
+  no session in it (`azelf provision` still works).
+- `git worktree remove` refuses it, even with one `--force`, whoever runs it.
+
+Any lock git has on a slice worktree counts the same way, with its own reason and
+`git worktree unlock` as the release. Git has no lock against `git rebase --abort`;
+the `/azelf` command tells an agent never to abort, reset or remove a worktree it did
+not start, and to ask about a rebase with no session behind it.
 
 One gap is left: the seconds between a commit and the rebase you run after it. The
 commit moves the branch, which retries a parked land, and a land that starts in that
@@ -1384,8 +1445,9 @@ and run it. A prep that fails partway, usually for lack of space, removes the wo
 it created and keeps the branch.
 
 **You want to fix a slice yourself while the dispatcher runs.**
-Do it inside a rebase or merge: the dispatcher leaves a worktree alone while one is in
-progress, and picks it up again once it is finished or aborted. See
+Hold it first (`azelf hold <ticket>`), and release it when you are done. Inside a
+rebase or merge the dispatcher leaves a worktree alone anyway, and picks it up again
+once it is finished or aborted. See
 [Fixing a slice by hand while the dispatcher runs](#fixing-a-slice-by-hand-while-the-dispatcher-runs).
 
 **The dispatcher says "azelf changed under this run".**
@@ -1401,13 +1463,14 @@ by a fresh clone. Re-run `azelf init` there.
 ## Repository layout
 
 ```
-bin/azelf.ts            the CLI: init, run, retry, hook
+bin/azelf.ts            the CLI: init, run, retry, hold, release, provision, hook
 index.ts                the public surface a slice.config.ts imports
 scripts/
   slice-run.ts          the dispatcher — waves, launching, landing, escalation
   slice-config.ts       the loader: finds and validates slice.config.ts
   slice-gates.ts        the gate contract and its three shapes
   slice-lock.ts         the land and gate locks: taken whole, taken over from the dead
+  slice-hold.ts         holds: git's worktree lock on a worktree in use by hand
   slice-tracker.ts      the tracker contract and github()
   slice-overlap.ts      which live slices are editing the same files
   slice-launcher.ts     the launcher contract, manual/warp/tmux, autostart probe

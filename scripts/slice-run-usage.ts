@@ -25,6 +25,10 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --no-auto-resolve    never let an agent resolve a rebase conflict
   azelf run --gates 12       run the landing gates on slice 12, land nothing
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
+  azelf run --hold 12 [--by <who>] [--why <text>]
+                             hold slice 12's worktree for work by hand: nothing
+                             lands, relaunches or removes it (azelf hold)
+  azelf run --release 12     give a hold back (azelf release)
   azelf run --sync-edges [-y]    write the edges the bodies claim, then stop
   azelf run --ignore-body-blockers   dispatch although a body names a blocker
                              the tracker has no edge for
@@ -35,7 +39,15 @@ inside it to release it: the dispatcher then re-runs the gates, lands it, pushes
 the base branch, closes the ticket, and starts whatever that unblocked. ./scripts/slice-run.ts takes the same flags.`;
 
 /** The flags that take the argument after them. */
-export const VALUE_FLAGS = new Set(["--max", "--interval", "--retry"]);
+export const VALUE_FLAGS = new Set([
+  "--max",
+  "--interval",
+  "--retry",
+  "--hold",
+  "--release",
+  "--by",
+  "--why",
+]);
 
 const FLAGS = new Set([
   ...VALUE_FLAGS,

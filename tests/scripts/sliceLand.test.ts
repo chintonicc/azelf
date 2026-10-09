@@ -253,6 +253,35 @@ describe("slice-land.sh and the land lock", () => {
     expect(r.out).not.toContain("waiting for");
     expect(readFileSync(join(lock, "owner"), "utf8")).toContain("ticket/39");
   });
+
+  it("is not waited on by a land of a held ticket, which git will not remove either", () => {
+    mkdirSync(lock);
+    writeFileSync(
+      join(lock, "owner"),
+      `pid=${process.pid}\nstarted=\nlabel=ticket/39\nsince=2026-09-23T10:00:00.000Z\n`,
+    );
+    git(
+      c.main,
+      "worktree",
+      "lock",
+      "--reason",
+      `azelf hold: the re-port session since ${new Date().toISOString()} — re-porting onto #39`,
+      c.wt(40),
+    );
+
+    const r = shResult(c.main, "./scripts/slice-land.sh 40");
+
+    expect(r.code).toBe(1);
+    expect(r.out).toMatch(
+      /error: #40 is held by the re-port session since \d\d:\d\d \(re-porting onto #39\) — azelf release 40 first\./,
+    );
+    expect(r.out).not.toContain("waiting for");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+    expect(() =>
+      git(c.main, "worktree", "remove", "--force", c.wt(40)),
+    ).toThrow();
+    expect(existsSync(c.wt(40))).toBe(true);
+  });
 });
 
 /**

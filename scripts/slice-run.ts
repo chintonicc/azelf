@@ -91,6 +91,18 @@ import {
 // slice-gates.ts; this file only runs them. See that file for the read-only
 // contract every gate is held to.
 import { type Flaky, runGates } from "./slice-gates";
+// Worktrees held for work by hand, which nothing here lands, relaunches or
+// rebases; see noteHolds.
+import {
+  HOLD_NOTE,
+  type Hold,
+  canonicalPath,
+  describeHold,
+  holdOf,
+  holdReason,
+  locks,
+  releaseCommand,
+} from "./slice-hold";
 // The launcher is picked below, in the launching section; `manual` is
 // imported here because it is the fallback as well as the default.
 import { type Launcher, type Session, manual } from "./slice-launcher";
@@ -116,6 +128,7 @@ import {
   droppedFiles,
   hasConflictMarkers,
   heldIndexLock,
+  irreconcilable,
   resolutionProblem,
   stopProblem,
 } from "./slice-resolve";
@@ -961,6 +974,24 @@ function hasSession(n: TicketId): boolean {
 }
 
 /**
+ * The pid of the session open in this slice's worktree, or null. `hasSession`
+ * without its cleanup, for `azelf hold`, which only says what it found.
+ */
+function liveSession(n: TicketId): number | null {
+  let first: string;
+  try {
+    first =
+      readFileSync(join(worktreeFor(n), LIVE_MARKER), "utf8")
+        .split("\n")[0]
+        ?.trim() ?? "";
+  } catch {
+    return null;
+  }
+  const pid = Number(first);
+  return /^[0-9]+$/.test(first) && isSessionOf(n, pid) ? pid : null;
+}
+
+/**
  * The marker is read again and deleted only if it has not changed, so a
  * session that started since it was first read keeps the one it wrote.
  * `.slice-interrupted` goes in its place, and the line is printed once,
@@ -1259,7 +1290,7 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       !occupied(t.id) &&
       !isReadyToLand(t.id) &&
       !parked.has(t.id) &&
-      !inProgress.has(t.id) &&
+      !handsOff(t.id) &&
       !hasLandRecord(t.id) &&
       !(lockHeld && isWaitingOnLock(t.id)) &&
       !t.human &&
@@ -2404,7 +2435,7 @@ const isClean = (n: TicketId) =>
  * Nor with a git operation in progress in its worktree: see `inProgress`.
  */
 const autoFinished = (n: TicketId) =>
-  !inProgress.has(n) &&
+  !handsOff(n) &&
   !occupied(n) &&
   !isWaitingOnLock(n) &&
   !wasInterrupted(n) &&
@@ -2750,6 +2781,58 @@ function deadResolver(wt: string): Owner | null {
 /** The ones announced, so each is printed once when seen and once when it ends. */
 const announced = new Set<TicketId>();
 
+/**
+ * Holds on this run's worktrees, by ticket: `azelf hold`, or any lock git has
+ * on one (see slice-hold.ts). Read at the top of every round by `noteHolds`.
+ * A held slice is what a worktree with a rebase in progress is (`inProgress`):
+ * not landed, relaunched, rebased or finished under --auto, not parked, and it
+ * keeps the run from stopping. Its release is the person's signal, and a
+ * branch they moved under the hold retries a parked land the round after.
+ */
+const holds = new Map<TicketId, Hold>();
+/** The reason each hold was announced with, so a changed one is said again. */
+const holdsSaid = new Map<TicketId, string>();
+
+/** Someone is working in it by hand: a git operation in progress, or a hold. */
+const handsOff = (n: TicketId) => inProgress.has(n) || holds.has(n);
+
+/**
+ * One `git worktree list` a round. A hold is said once when seen, with the
+ * git operation in progress under it if there is one, and once when it goes.
+ */
+function noteHolds(tickets: Ticket[]): void {
+  const locked = locks(repoRoot);
+  holds.clear();
+  for (const t of tickets) {
+    if (!t.open) continue;
+    const h = locked.get(canonicalPath(worktreeFor(t.id)));
+    if (h) holds.set(t.id, h);
+  }
+  for (const [id, h] of holds) {
+    if (holdsSaid.get(id) === h.reason) continue;
+    holdsSaid.set(id, h.reason);
+    const wt = worktreeFor(id);
+    const what = handWork(wt);
+    console.log(
+      `  ${ref(id)} is ${describeHold(h)}${
+        what ? `, with a ${what} in progress in its worktree` : ""
+      } — not landing or relaunching it until ${releaseCommand(id, wt, h)}`,
+    );
+  }
+  for (const id of [...holdsSaid.keys()]) {
+    if (holds.has(id)) continue;
+    holdsSaid.delete(id);
+    const t = tickets.find((o) => o.id === id);
+    if (!t?.open) continue;
+    // A rebase still in progress is noteHandWork's to say, this same round.
+    console.log(
+      hasWorktree(id) && handWork(worktreeFor(id))
+        ? `  ${ref(id)} is no longer held.`
+        : `  ${ref(id)} is no longer held — back in the run.`,
+    );
+  }
+}
+
 function noteHandWork(tickets: Ticket[]): void {
   for (const t of tickets) {
     if (!t.open) {
@@ -2760,6 +2843,13 @@ function noteHandWork(tickets: Ticket[]): void {
     const what = hasWorktree(t.id) ? handWork(worktreeFor(t.id)) : null;
     if (what) inProgress.set(t.id, what);
     else inProgress.delete(t.id);
+    // Under a hold the hold's line says it, and names who: the work in
+    // progress is theirs. Forgotten as announced, so a rebase still going
+    // when the hold is released is said then.
+    if (holds.has(t.id)) {
+      announced.delete(t.id);
+      continue;
+    }
     // Recorded but not announced while a session runs there: that is the
     // agent's own rebase, and a running session is neither landed nor
     // relaunched anyway. Recording it still covers the session ending
@@ -2903,6 +2993,13 @@ function gitWrite(
 }
 
 /**
+ * The slices whose resolver refused (`IRRECONCILABLE:`) on this attempt, with
+ * every file the rebase stopped on up to the refusal. `askAboutBlocked` reads
+ * it once, for the collision and the way to re-port by hand.
+ */
+const refusals = new Map<TicketId, string[]>();
+
+/**
  * Let the agent resolve a rebase conflict, then check its work.
  *
  * The resolver edits and azelf runs the git. For every commit the rebase stops
@@ -2923,6 +3020,7 @@ function gitWrite(
  * worktree.
  */
 function resolveConflict(t: Ticket, conflicted: string[]): boolean {
+  refusals.delete(t.id);
   try {
     return resolveStops(t, conflicted);
   } finally {
@@ -3134,7 +3232,12 @@ function resolveStops(t: Ticket, conflicted: string[]): boolean {
         ]),
       ].filter((p) => !given.has(p)),
     });
-    if (problem) return give(problem);
+    if (problem) {
+      if (irreconcilable(out) !== null) {
+        refusals.set(t.id, [...new Set(stops.flatMap((s) => s.files))]);
+      }
+      return give(problem);
+    }
 
     const add = gitWrite(["add", "-A", "--", ...files], wt);
     if (add.lock) return give(stillLocked(add.lock));
@@ -3408,6 +3511,31 @@ export type Escalation = "resolve" | "retry" | "force" | "park" | "quit";
  * slices, and the summary at the end names every parked ticket. Nothing is
  * lost and nothing is landed unreviewed.
  */
+/**
+ * After a resolver's refusal, what it collided with and what to do next. The
+ * collision is a slice this run landed while this one was open, on a file the
+ * rebase stopped on; a run that did not see that land says nothing about it.
+ * The recipe is the hold: on consumer-a a hand re-port was aborted by another
+ * session that read its rebase as a leftover.
+ */
+function reportRefusal(t: Ticket): string[] {
+  const files = refusals.get(t.id);
+  if (!files) return [];
+  refusals.delete(t.id);
+  const hits = (landedWhileOpen.get(t.id) ?? []).flatMap((other) => {
+    const shared = sharedFiles(landedFiles.get(other) ?? [], files);
+    return shared.length
+      ? [`${ref(other)}, which landed ${shared.join(", ")}`]
+      : [];
+  });
+  return [
+    ...(hits.length
+      ? [`it collides with ${hits.join("; and ")} while ${ref(t.id)} was open`]
+      : []),
+    `to re-port it by hand: azelf hold ${t.id}, rebase it onto ${baseBranch} in its worktree and commit, then azelf release ${t.id} — the moved branch retries the land`,
+  ];
+}
+
 function askAboutBlocked(
   t: Ticket,
   reason: string,
@@ -3417,6 +3545,7 @@ function askAboutBlocked(
   console.log(`
   ✗ ${ref(t.id)} did not land — ${reason}`);
   console.log(`     worktree: ${worktreeFor(t.id)}`);
+  for (const line of reportRefusal(t)) console.log(`     ${line}`);
   // Only a rebase conflict passes a file list, and only a rebase conflict is
   // something an agent can be asked to resolve — so this one value answers both
   // "what conflicted" and "is [a] on the menu".
@@ -3641,8 +3770,9 @@ function awaitingLand(
     hasWorktree(t.id) &&
     // Before the parked test, which would consume a retry that is due: a base
     // that moved during someone's rebase is exactly when a land destroys
-    // it. The retry waits for the rebase to end instead.
-    !inProgress.has(t.id) &&
+    // it. The retry waits for the rebase to end instead, and for a hold to
+    // be released.
+    !handsOff(t.id) &&
     // Pushed already: the land is finished from its record, not repeated.
     !hasLandRecord(t.id) &&
     // Parked slices are skipped until what they failed on changes. Without
@@ -4168,6 +4298,117 @@ if (flag("--retry")) {
   process.exit(0);
 }
 
+// `--hold <n>` and `--release <n>`: what `azelf hold` and `azelf release` run.
+// A hold is git's worktree lock with azelf's reason on it (see slice-hold.ts):
+// the dispatcher reads it every round, slice-land.sh and slice-session.sh
+// refuse a held worktree, and git itself refuses to remove one. Before any
+// plan is loaded, like --retry: neither needs the tracker.
+if (flag("--hold") || flag("--release")) {
+  const holding = flag("--hold");
+  const id = value(holding ? "--hold" : "--release") ?? "";
+  if (!isTicketId(id)) {
+    console.error(`${holding ? "--hold" : "--release"} needs one ticket id`);
+    process.exit(64);
+  }
+  const wt = worktreeFor(id);
+  const held = holdOf(repoRoot, wt);
+  const dispatcher = liveClaim(id);
+  if (holding) {
+    if (!hasWorktree(id)) {
+      console.error(`  ✗ ${ref(id)}: no worktree at ${wt} — nothing to hold`);
+      process.exit(1);
+    }
+    if (held) {
+      console.error(
+        `  ✗ ${ref(id)} is already ${describeHold(held)} — ${releaseCommand(
+          id,
+          wt,
+          held,
+        )} first`,
+      );
+      process.exit(1);
+    }
+    const by = value("--by") || process.env.USER || "someone";
+    const why = value("--why") ?? "";
+    const since = new Date().toISOString();
+    const lock = run(
+      ["git", "worktree", "lock", "--reason", holdReason(by, since, why), wt],
+      { allowFail: true },
+    );
+    if (!lock.ok) {
+      console.error(`  ✗ git worktree lock failed: ${lock.out}`);
+      process.exit(1);
+    }
+    // Only where git ignores it, as `noteLanded`'s note: anywhere else it is
+    // an untracked file, and a slice with one is not clean.
+    if (
+      run(["git", "check-ignore", "-q", HOLD_NOTE], {
+        cwd: wt,
+        allowFail: true,
+      }).ok
+    ) {
+      writeFileSync(
+        join(wt, HOLD_NOTE),
+        `${describeHold({
+          azelf: true,
+          by,
+          since,
+          why,
+          reason: "",
+        })}\n\nThis worktree is in use by hand. The dispatcher does not land, relaunch or\nrebase it, slice-land.sh refuses it, and git worktree remove refuses it.\nDo not abort a rebase or reset anything in here. When the work is done:\n\n    azelf release ${id}\n`,
+      );
+    } else {
+      console.log(
+        `  (no ${HOLD_NOTE} note: git does not ignore it here yet — run \`azelf init\` once; the hold itself is in place)`,
+      );
+    }
+    console.log(
+      `  ✓ held ${ref(
+        id,
+      )} for ${by} — nothing lands, relaunches or removes it until azelf release ${id}`,
+    );
+    const session = liveSession(id);
+    if (session !== null) {
+      console.log(
+        `  a session is running in it (pid ${session}): it carries on, and is neither landed nor relaunched while the hold stands`,
+      );
+    }
+    if (dispatcher) {
+      console.log(
+        `  the running dispatcher (pid ${dispatcher.pid}) leaves it alone from its next round`,
+      );
+    }
+    process.exit(0);
+  }
+  if (!held) {
+    console.log(`  ${ref(id)} is not held — nothing to release`);
+    process.exit(0);
+  }
+  if (!held.azelf) {
+    console.error(
+      `  ✗ ${ref(id)}'s worktree is ${describeHold(
+        held,
+      )}, not held by azelf hold — if whoever locked it is done: git worktree unlock ${wt}`,
+    );
+    process.exit(1);
+  }
+  const unlock = run(["git", "worktree", "unlock", wt], { allowFail: true });
+  if (!unlock.ok) {
+    console.error(`  ✗ git worktree unlock failed: ${unlock.out}`);
+    process.exit(1);
+  }
+  rmSync(join(wt, HOLD_NOTE), { force: true });
+  console.log(`  ✓ released ${ref(id)} — ${describeHold(held)}`);
+  console.log(
+    dispatcher
+      ? `  the running dispatcher (pid ${dispatcher.pid}) takes it back next round`
+      : `  no running dispatcher has ${ref(
+          id,
+        )} — azelf run --auto ${id} picks it up`,
+  );
+  process.exit(0);
+}
+
 // `--gates <n…>`: the landing gates, and nothing else — no GitHub, no rebase,
 // no land. The worktree is judged exactly as it sits. This is how to check a
 // slice by hand, and how the gate shapes were proven against real worktrees.
@@ -4496,6 +4737,7 @@ try {
     }
 
     reportOverlaps(tickets);
+    noteHolds(tickets);
     noteHandWork(tickets);
 
     // Land before launching, so a slot freed this round is refilled this round.
@@ -4679,8 +4921,17 @@ try {
     const stillOpen = new Set(openNow.map((t) => t.id));
     const waiting = waitingOnHuman(tickets);
     const onHuman = openNow.filter(
-      (t) => !occupied(t.id) && !parked.has(t.id) && waiting.has(t.id),
+      (t) =>
+        !occupied(t.id) &&
+        !parked.has(t.id) &&
+        !holds.has(t.id) &&
+        waiting.has(t.id),
     );
+    // Counted once, as held, unless a session or a park already counts it.
+    const heldIdle = openNow.filter(
+      (t) => holds.has(t.id) && !occupied(t.id) && !parked.has(t.id),
+    );
+    const held = openNow.filter((t) => holds.has(t.id)).length;
     const running = openNow.filter((t) => occupied(t.id));
     const toLand = openNow.filter(
       (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
@@ -4689,6 +4940,7 @@ try {
       (t) =>
         !occupied(t.id) &&
         !parked.has(t.id) &&
+        !holds.has(t.id) &&
         !waiting.has(t.id) &&
         (t.foreignBlockers.length > 0 ||
           t.blockedBy.some((b) => stillOpen.has(b))),
@@ -4699,13 +4951,14 @@ try {
       toLand.length -
       blocked.length -
       onHuman.length -
+      heldIdle.length -
       openNow.filter((t) => parked.has(t.id) && !occupied(t.id)).length;
     const roundLine = `${running.length} running · ${
       toLand.length ? `${toLand.length} to land · ` : ""
     }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
       onHuman.length ? `${onHuman.length} waiting on a human · ` : ""
-    }${openNow.length} open${
-      parked.size ? ` · ${parked.size} parked` : ""
+    }${openNow.length} open${parked.size ? ` · ${parked.size} parked` : ""}${
+      held ? ` · ${held} held` : ""
     } — land one to advance`;
     if (
       roundLine !== lastRoundLine ||
@@ -4739,9 +4992,7 @@ try {
       remaining.length > 0 &&
       remaining.every((t) => {
         const p = parked.get(t.id);
-        return (
-          p !== undefined && !inProgress.has(t.id) && retryDue(t.id, p) === null
-        );
+        return p !== undefined && !handsOff(t.id) && retryDue(t.id, p) === null;
       })
     ) {
       console.log("\n  nothing can advance — every open slice is parked.");
@@ -4762,9 +5013,7 @@ try {
       remaining.every((t) => {
         if (waiting.has(t.id)) return true;
         const p = parked.get(t.id);
-        return (
-          p !== undefined && !inProgress.has(t.id) && retryDue(t.id, p) === null
-        );
+        return p !== undefined && !handsOff(t.id) && retryDue(t.id, p) === null;
       })
     ) {
       const gates = new Map<
@@ -4812,7 +5061,7 @@ try {
       up.length === 0 &&
       prepped.length === 0 &&
       remaining.every((t) => {
-        if (inProgress.has(t.id)) return false;
+        if (handsOff(t.id)) return false;
         const p = parked.get(t.id);
         if (p) return retryDue(t.id, p) === null;
         return !(
@@ -4929,6 +5178,25 @@ if (parked.size > 0) {
   process.exitCode = 1;
 } else if (stoppedOnError) {
   console.log(`\n  To pick the run up again:\n\n    ${resumeCommand()}`);
+}
+
+// After the parked list, because a hold is not something to fix: it is
+// someone's, and the line is who and how to give it back. A hold has no
+// process behind it and never expires, so a forgotten one is found here.
+const heldAtEnd = tickets.filter((t) => t.open && holds.has(t.id));
+if (heldAtEnd.length > 0) {
+  console.log(
+    `\n── held (${heldAtEnd.length}) ───────────────────────────────`,
+  );
+  for (const t of heldAtEnd) {
+    const h = holds.get(t.id) as Hold;
+    const wt = worktreeFor(t.id);
+    console.log(`  ${ref(t.id)}  ${describeHold(h)}`);
+    console.log(`     release: ${releaseCommand(t.id, wt, h)}`);
+  }
+  console.log(
+    "\n  Nothing lands, relaunches or removes them until they are released.",
+  );
 }
 
 // The very last line, because it is the one an unwatched run is read by. Exit
