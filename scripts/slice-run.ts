@@ -65,6 +65,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statfsSync,
   symlinkSync,
@@ -1249,6 +1250,7 @@ function runnable(tickets: Ticket[], lockHeld: boolean): Ticket[] {
       !isReadyToLand(t.id) &&
       !parked.has(t.id) &&
       !inProgress.has(t.id) &&
+      !hasLandRecord(t.id) &&
       !(lockHeld && isWaitingOnLock(t.id)) &&
       !t.human &&
       t.foreignBlockers.length === 0 &&
@@ -3571,6 +3573,8 @@ function awaitingLand(
     // that moved during someone's rebase is exactly when a land destroys
     // it. The retry waits for the rebase to end instead.
     !inProgress.has(t.id) &&
+    // Pushed already: the land is finished from its record, not repeated.
+    !hasLandRecord(t.id) &&
     // Parked slices are skipped until what they failed on changes. Without
     // this the same failing land is re-attempted every round for the life
     // of the run.
@@ -3698,6 +3702,36 @@ const landedHeads = new Map<TicketId, string>();
 const landedRanges = new Map<TicketId, { from: string; to: string }>();
 
 /**
+ * Where `slice-land.sh` keeps the record of a land that pushed and has not
+ * finished — see "A land that already pushed" there. A ticket with one is
+ * neither started nor landed: what is left of it is the record's to finish.
+ */
+let commonDirPath: string | undefined;
+const commonDir = () => {
+  commonDirPath ??= run([
+    "git",
+    "rev-parse",
+    "--path-format=absolute",
+    "--git-common-dir",
+  ]).out;
+  return commonDirPath;
+};
+const landRecord = (id: TicketId) =>
+  join(commonDir(), `azelf-landed-${id}.txt`);
+const hasLandRecord = (id: TicketId) => existsSync(landRecord(id));
+
+/**
+ * Once its ticket is closed, a record with no worktree and no branch behind it
+ * has nothing left to finish. Deleted then, so the next run does not name it
+ * as an interrupted land.
+ */
+function dropFinishedRecord(id: TicketId): void {
+  if (!hasWorktree(id) && !branchHead(id)) {
+    rmSync(landRecord(id), { force: true });
+  }
+}
+
+/**
  * Landed tickets the tracker has not yet been read as closed, and whether a
  * retry of the close has failed and said so. Kept from the land on.
  */
@@ -3722,6 +3756,7 @@ function retryCloses(): void {
     }
     if (!open) {
       closePending.delete(id);
+      dropFinishedRecord(id);
       continue;
     }
     const saved = join(
@@ -3757,6 +3792,7 @@ function retryCloses(): void {
     );
     rmSync(saved, { force: true });
     closePending.delete(id);
+    dropFinishedRecord(id);
   }
 }
 
@@ -4140,6 +4176,41 @@ for (const t of tickets) {
   rmSync(join(worktreeFor(t.id), RETRY_MARKER), { force: true });
   // A `testOnBase` worktree a crashed run left behind.
   removeBaseTest(t.id);
+}
+
+// Lands an earlier process pushed and never finished: a dispatcher killed with
+// its terminal mid-cleanup left its ticket open, and the next run prepped it
+// again (consumer-a, 2026-10-08). This run's tickets are finished here, by the
+// same script, before anything starts; another run's are only named.
+for (const file of readdirSync(commonDir())) {
+  const id = /^azelf-landed-(.+)\.txt$/.exec(file)?.[1];
+  if (!id || !isTicketId(id)) continue;
+  const t = tickets.find((o) => o.id === id);
+  if (!t) {
+    console.log(
+      `  ${ref(
+        id,
+      )}: its land was interrupted after the push — ./scripts/slice-land.sh ${id} finishes it`,
+    );
+    continue;
+  }
+  console.log(
+    `\n  ${ref(id)}: its land was interrupted after the push — finishing it …`,
+  );
+  const { ok } = run(
+    ["./scripts/slice-land.sh", id, ...(autoLand ? ["--end-session"] : [])],
+    { inherit: true, allowFail: true },
+  );
+  // No record left means the ticket closed. A record and a zero exit means the
+  // close failed, and the dispatcher's own retry takes it from there. A
+  // non-zero exit is a refusal (origin lacks what the record says landed): the
+  // ticket stays open, and the record keeps it from starting.
+  if (!hasLandRecord(id)) {
+    t.open = false;
+  } else if (ok) {
+    t.open = false;
+    closePending.set(id, { said: false });
+  }
 }
 
 /**

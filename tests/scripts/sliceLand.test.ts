@@ -60,6 +60,11 @@ describe("slice-done.sh → slice-land.sh", () => {
     )}, landed on main as ${short(landed)} (1 commit(s))`;
     expect(land).toContain(`✓ ${line}`);
     expect(land).toContain("✓ closed #40");
+    // Closed before the cleanup: an interrupted removal must not leave the
+    // ticket open and its dependents blocked.
+    expect(land.indexOf("✓ closed #40")).toBeLessThan(
+      land.indexOf("── cleaning up"),
+    );
     expect(readFileSync(c.closeFile, "utf8")).toContain(`40\n`);
     expect(readFileSync(c.closeFile, "utf8")).toContain(line);
 
@@ -71,6 +76,8 @@ describe("slice-done.sh → slice-land.sh", () => {
     expect(() =>
       git(c.main, "merge-base", "--is-ancestor", declared, "main"),
     ).toThrow();
+    // A land that finished leaves nothing to finish.
+    expect(existsSync(join(c.main, ".git", "azelf-landed-40.txt"))).toBe(false);
   });
 
   it("still lands, and says so, when nobody declared done", () => {
@@ -245,5 +252,143 @@ describe("slice-land.sh and the land lock", () => {
     expect(r.out).toContain("no local branch 'ticket/77'");
     expect(r.out).not.toContain("waiting for");
     expect(readFileSync(join(lock, "owner"), "utf8")).toContain("ticket/39");
+  });
+});
+
+/**
+ * A land interrupted after its push: the work is public, the ticket open, and
+ * the worktree or the branch may be half gone. The record slice-land.sh writes
+ * after the push is what a second run finishes from. A close that fails stands
+ * in for the interruption here — the record stays for the same reason.
+ */
+describe("finishing a land that was interrupted after the push", () => {
+  let c: Consumer;
+  const record = () => join(c.main, ".git", "azelf-landed-40.txt");
+  const closes = () =>
+    existsSync(c.closeFile) ? readFileSync(c.closeFile, "utf8") : "";
+  /** Lands 40 with its close failing; returns the landed head. */
+  const interrupted = (leave?: string) => {
+    const wt = c.wt(40);
+    writeFileSync(join(wt, "a.txt"), "a\n");
+    writeFileSync(join(wt, "b.txt"), "b\n");
+    git(wt, "add", "a.txt", "b.txt");
+    git(wt, "commit", "-qm", "feat: a and b");
+    // Something untracked makes the plain removal refuse, so the worktree
+    // stays for the test to cut into.
+    if (leave) writeFileSync(join(wt, leave), "x\n");
+    c.closeFails(true);
+    const land = shResult(c.main, "./scripts/slice-land.sh 40");
+    expect(land.out).toContain("couldn't close #40");
+    expect(existsSync(record())).toBe(true);
+    c.closeFails(false);
+    return git(c.main, "rev-parse", "HEAD");
+  };
+  beforeEach(() => {
+    c = makeConsumer({ worktrees: [40], remote: true });
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("closes the ticket with the saved comment and removes a half-deleted worktree", () => {
+    const head = interrupted("scratch.log");
+    const wt = c.wt(40);
+    expect(existsSync(wt)).toBe(true);
+    // The removal got as far as two files.
+    rmSync(join(wt, "scratch.log"));
+    rmSync(join(wt, "a.txt"));
+
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+
+    expect(land).toContain(
+      `── finishing the land of #40 — it pushed as ${head.slice(0, 7)} at `,
+    );
+    expect(land).toContain("✓ closed #40");
+    expect(land).toContain(
+      "its interrupted removal had already deleted part of it",
+    );
+    expect(land).toContain(`✓ removed worktree ${wt}`);
+    expect(land).toContain("✓ deleted local branch ticket/40");
+    expect(land).toContain("✓ finished the land of #40");
+    expect(land).not.toContain("fast-forwarding");
+    expect(closes()).toContain(
+      `40\nLanded on main via slice-land.sh.\n\nlanded on main as ${head.slice(
+        0,
+        7,
+      )} (1 commit(s))`,
+    );
+    expect(existsSync(wt)).toBe(false);
+    expect(git(c.main, "branch", "--list", "ticket/40")).toBe("");
+    expect(existsSync(record())).toBe(false);
+  });
+
+  it("finishes one whose branch is already gone", () => {
+    interrupted();
+    expect(git(c.main, "branch", "--list", "ticket/40")).toBe("");
+
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+
+    expect(land).toContain("── finishing the land of #40");
+    expect(land).not.toContain("no local branch");
+    expect(land).toContain("✓ closed #40");
+    expect(existsSync(record())).toBe(false);
+  });
+
+  it("closes the ticket but leaves a worktree with a modified file", () => {
+    interrupted("scratch.log");
+    const wt = c.wt(40);
+    rmSync(join(wt, "scratch.log"));
+    writeFileSync(join(wt, "a.txt"), "changed after the land\n");
+
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+
+    expect(land).toContain("✓ closed #40");
+    expect(land).toContain(
+      `left ${wt} in place — it has modified or untracked files`,
+    );
+    expect(readFileSync(join(wt, "a.txt"), "utf8")).toBe(
+      "changed after the land\n",
+    );
+    expect(existsSync(record())).toBe(false);
+  });
+
+  it("leaves a worktree git can no longer read, and says how to remove it", () => {
+    const head = interrupted("scratch.log");
+    const wt = c.wt(40);
+    rmSync(join(wt, ".git"));
+
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+
+    expect(land).toContain("✓ closed #40");
+    expect(land).toContain(
+      `left ${wt} — git can no longer read it (its removal was interrupted).`,
+    );
+    expect(land).toContain(
+      `Everything in it landed as ${head.slice(
+        0,
+        7,
+      )}; delete the directory and run git worktree prune.`,
+    );
+    expect(existsSync(join(wt, "a.txt"))).toBe(true);
+  });
+
+  it("refuses, and changes nothing, when origin does not have what the record says landed", () => {
+    interrupted();
+    const stray = git(
+      c.main,
+      "commit-tree",
+      "HEAD^{tree}",
+      "-m",
+      "never pushed",
+    );
+    writeFileSync(
+      record(),
+      readFileSync(record(), "utf8").replace(/^landed \w+/m, `landed ${stray}`),
+    );
+
+    const land = shResult(c.main, "./scripts/slice-land.sh 40");
+
+    expect(land.ok).toBe(false);
+    expect(land.out).toContain("but origin/main does not contain it");
+    expect(closes()).toBe("");
+    expect(existsSync(record())).toBe(true);
   });
 });

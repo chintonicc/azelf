@@ -77,7 +77,34 @@ fi
 branch="$(slice_branch_for "$ticket")"
 worktree_path="$(slice_worktree_for "$ticket")"
 
-if ! git show-ref --verify --quiet "refs/heads/$branch"; then
+# ─── A land that already pushed ────────────────────────────────────────────
+#
+# Written right after the push, deleted as the last step once the ticket is
+# closed. Found here, a land was interrupted between the two — a dispatcher
+# killed with its terminal, a crash mid-cleanup — and the work is public but
+# the ticket is open and the worktree half there. Running the land again from
+# the start can't work: the branch may be gone, and a fast-forward of what
+# already landed is no answer. So it is FINISHED instead, from what the record
+# says. Checked before the branch, because the branch may be the first thing
+# the interrupted cleanup deleted.
+#
+# Line 1 the landed head, 2 the declared head (or -), 3 the commit count, 4
+# when it pushed; the close comment from line 6.
+landed_record="$_slice_common/azelf-landed-$ticket.txt"
+finishing=false
+if [[ -f "$landed_record" ]]; then
+  finishing=true
+  landed_head="$(sed -n 's/^landed //p' "$landed_record" | head -n 1)"
+  declared_head="$(sed -n 's/^declared //p' "$landed_record" | head -n 1)"
+  [[ "$declared_head" == "-" ]] && declared_head=""
+  landed_count="$(sed -n 's/^count //p' "$landed_record" | head -n 1)"
+  pushed_at="$(sed -n 's/^pushed //p' "$landed_record" | head -n 1)"
+  close_comment="$(tail -n +6 "$landed_record")"
+  if ! [[ "$landed_head" =~ ^[0-9a-f]{7,}$ && "$landed_count" =~ ^[0-9]+$ ]]; then
+    echo "error: $landed_record is not a land record azelf can read — check it, then delete it and land again." >&2
+    exit 1
+  fi
+elif ! git show-ref --verify --quiet "refs/heads/$branch"; then
   echo "error: no local branch '$branch' — nothing to land. Was it ever created by slice-session.sh?" >&2
   exit 1
 fi
@@ -103,15 +130,19 @@ fi
 #
 # Grep can find nothing without that being an error, hence `|| true`: a slice
 # whose diff has no checkboxes is the ordinary case, not a failure.
+#
+# A land being finished has its comment in the record already.
 LAND_NOTES_MAX=20
-land_notes="$(
-  git diff "$SLICE_BASE_BRANCH...$branch" 2>/dev/null \
-    | grep -E '^\+[[:space:]]*[-*] \[ \] ' \
-    | sed 's/^+//' \
-    || true
-)"
-
-close_comment="Landed on $SLICE_BASE_BRANCH via slice-land.sh."
+land_notes=""
+if ! $finishing; then
+  land_notes="$(
+    git diff "$SLICE_BASE_BRANCH...$branch" 2>/dev/null \
+      | grep -E '^\+[[:space:]]*[-*] \[ \] ' \
+      | sed 's/^+//' \
+      || true
+  )"
+  close_comment="Landed on $SLICE_BASE_BRANCH via slice-land.sh."
+fi
 if [[ -n "$land_notes" ]]; then
   land_notes_total="$(printf '%s\n' "$land_notes" | wc -l | tr -d ' ')"
   close_comment="$close_comment
@@ -147,30 +178,95 @@ bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" acquire "$land_lock" \
   --pid $$ --label "$branch" --what land --wait "$LAND_LOCK_WAIT" || exit 1
 trap 'bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" release "$land_lock" --pid $$ || true' EXIT
 
-# Taken before the fast-forward, for the "landed as" line below: afterwards
-# `base..HEAD` is empty by definition.
-base_before="$(git rev-parse HEAD)"
-
-echo "── fast-forwarding $SLICE_BASE_BRANCH onto $branch ──────────────"
-if ! git merge --ff-only "$branch"; then
-  echo "error: $SLICE_BASE_BRANCH can't fast-forward onto $branch — it has diverged." >&2
-  echo "       rebase $branch onto $SLICE_BASE_BRANCH from its worktree first, then retry." >&2
-  exit 1
+# The markers live inside the worktree, which the cleanup removes, so they are
+# read first. What they say is used at the cleanup; see "The session that may
+# still be sitting in there" there.
+session_pid=""
+session_declared_done=true
+marker_declared=""
+if [[ -f "$worktree_path/.slice-ready-to-land" ]]; then
+  session_pid="$(head -n 1 "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
+  # Line 2, when slice-done.sh wrote one: the head the agent declared done at,
+  # BEFORE any rebase moved it. See the note there for why that matters.
+  marker_declared="$(sed -n 2p "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
+elif [[ -f "$worktree_path/.slice-live" ]]; then
+  session_pid="$(head -n 1 "$worktree_path/.slice-live" | tr -d '[:space:]')"
+  session_declared_done=false
 fi
-echo "✓ $SLICE_BASE_BRANCH now includes $branch"
 
-echo "── pushing $SLICE_BASE_BRANCH ────────────────────────"
-fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
-  echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH:" >&2
-  echo "$fetch_err" >&2
-  exit 1
-}
-if git rev-parse --verify -q "origin/$SLICE_BASE_BRANCH" >/dev/null && ! git merge-base --is-ancestor "origin/$SLICE_BASE_BRANCH" HEAD; then
-  echo "error: origin/$SLICE_BASE_BRANCH has commits this fast-forward doesn't have — pull/rebase before landing." >&2
-  exit 1
+if $finishing; then
+  landed_short="$(git rev-parse --short "$landed_head" 2>/dev/null || echo "$landed_head")"
+  echo "── finishing the land of $ticket_ref — it pushed as $landed_short at $pushed_at, and the process running it stopped before it was done ──"
+  fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
+    echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH to check the land:" >&2
+    echo "$fetch_err" >&2
+    exit 1
+  }
+  # The record is this script's own word that the push happened. Checked
+  # anyway, because closing a ticket whose work is not on the base is the one
+  # mistake here that someone downstream pays for.
+  if ! git merge-base --is-ancestor "$landed_head" "origin/$SLICE_BASE_BRANCH" 2>/dev/null; then
+    echo "error: $landed_record says $ticket_ref pushed as $landed_short, but origin/$SLICE_BASE_BRANCH does not contain it." >&2
+    echo "       Nothing was changed. Check what reached origin, then delete that file and land $ticket_ref again." >&2
+    exit 1
+  fi
+  echo "✓ origin/$SLICE_BASE_BRANCH contains $landed_short"
+  # A fast-forward is linear, so the commits it brought are the last N.
+  base_before="$(git rev-parse "$landed_head~$landed_count" 2>/dev/null || true)"
+else
+  declared_head="$marker_declared"
+  # Taken before the fast-forward, for the "landed as" line below: afterwards
+  # `base..HEAD` is empty by definition.
+  base_before="$(git rev-parse HEAD)"
+
+  echo "── fast-forwarding $SLICE_BASE_BRANCH onto $branch ──────────────"
+  if ! git merge --ff-only "$branch"; then
+    echo "error: $SLICE_BASE_BRANCH can't fast-forward onto $branch — it has diverged." >&2
+    echo "       rebase $branch onto $SLICE_BASE_BRANCH from its worktree first, then retry." >&2
+    exit 1
+  fi
+  echo "✓ $SLICE_BASE_BRANCH now includes $branch"
+
+  echo "── pushing $SLICE_BASE_BRANCH ────────────────────────"
+  fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
+    echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH:" >&2
+    echo "$fetch_err" >&2
+    exit 1
+  }
+  if git rev-parse --verify -q "origin/$SLICE_BASE_BRANCH" >/dev/null && ! git merge-base --is-ancestor "origin/$SLICE_BASE_BRANCH" HEAD; then
+    echo "error: origin/$SLICE_BASE_BRANCH has commits this fast-forward doesn't have — pull/rebase before landing." >&2
+    exit 1
+  fi
+  git push origin "$SLICE_BASE_BRANCH"
+  echo "✓ pushed"
+
+  # The close comment also records WHAT landed, as SHAs. The landed head is the
+  # only one a later `merge-base --is-ancestor` will ever say yes to; the
+  # declared head is the one the agent has in its scrollback, and the two differ
+  # whenever the dispatcher rebased before landing. Putting both on the ticket
+  # is what lets "did #42 land?" be answered by looking, instead of by a SHA
+  # check that is a false negative most of the time.
+  landed_head="$(git rev-parse HEAD)"
+  landed_short="$(git rev-parse --short "$landed_head")"
+  landed_count="$(git rev-list --count "$base_before..$landed_head")"
+  landed_line="landed on $SLICE_BASE_BRANCH as $landed_short ($landed_count commit(s))"
+  if [[ -n "$declared_head" ]]; then
+    landed_line="declared done at $(git rev-parse --short "$declared_head" 2>/dev/null || echo "$declared_head"), $landed_line"
+  fi
+  close_comment="$close_comment
+
+$landed_line"
+  echo "✓ $landed_line"
+
+  # The record, now that the work is public. See "A land that already pushed"
+  # above. A record that can't be written costs only the finishing, so it
+  # warns and goes on.
+  if ! printf 'landed %s\ndeclared %s\ncount %s\npushed %s\n\n%s\n' \
+      "$landed_head" "${declared_head:--}" "$landed_count" "$(date '+%Y-%m-%d %H:%M')" \
+      "$close_comment" >"$landed_record" 2>/dev/null; then
+    echo "warning: couldn't write $landed_record — if this land is interrupted now, finish it by hand." >&2
+  fi
 fi
-git push origin "$SLICE_BASE_BRANCH"
-echo "✓ pushed"
 
 # ─── The DB lock ────────────────────────────────────────────────────────────
 #
@@ -196,7 +292,7 @@ if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
   db_lock_read_owner || lock_rc=$?
   if [[ $lock_rc -eq 0 ]]; then lock_owner="$DB_LOCK_OWNER_BRANCH"; fi
   touched_lock=false
-  if git diff --name-only "$base_before" HEAD | grep -qE "$(db_lock_re)"; then touched_lock=true; fi
+  if [[ -n "$base_before" ]] && git diff --name-only "$base_before" "$landed_head" | grep -qE "$(db_lock_re)"; then touched_lock=true; fi
 
   if [[ "$lock_owner" == "$branch" ]]; then
     echo "── releasing the DB lock ──────────────────────────"
@@ -224,11 +320,48 @@ if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
   fi
 fi
 
+# Closing the ticket is part of landing, not an afterthought to remember.
+# A blocking edge clears only when the blocker is CLOSED — on GitHub that is
+# how native issue dependencies work, and it is the contract every tracker
+# adapter is held to (scripts/slice-tracker.ts, "closing is load-bearing").
+# So a landed-but-open ticket leaves everything downstream of it refusing to
+# launch — slice-session.sh counts open blockers and exits. Leaving this to
+# the human means discovering it later as "why won't the next slice start?".
+#
+# Before the cleanup, not after it. Removing a worktree full of node_modules
+# takes long enough to be interrupted, and on consumer-a it was: a terminal
+# crash killed a dispatcher mid-removal (2026-10-08), and the ticket it had
+# just pushed stayed open, its dependents blocked, with nothing saying why.
+# The close is what the next wave waits on; the cleanup can wait for anyone.
+#
+# Never fatal: the code is on master and pushed by this point, which is the
+# part that can't be redone by hand.
+echo "── closing $ticket_ref ───────────────────────────────────"
+closed=false
+if $finishing && [[ "$(slice_tracker_get "$ticket" 2>/dev/null | cut -f1)" == "closed" ]]; then
+  echo "✓ $ticket_ref is already closed"
+  closed=true
+elif close_err=$(slice_tracker_close "$ticket" "$close_comment" 2>&1); then
+  echo "✓ closed $ticket_ref"
+  closed=true
+  if [[ -n "$land_notes" ]]; then
+    echo "  ↳ carried $land_notes_total unticked check(s) into the ticket"
+  fi
+else
+  echo "warning: couldn't close $ticket_ref — close it by hand or its dependents stay blocked:" >&2
+  echo "$close_err" >&2
+  # Kept for whoever closes it later: a dispatcher retries the close with this
+  # comment, so the unticked checks above still reach the ticket.
+  close_saved="$_slice_common/azelf-close-$ticket.txt"
+  if printf '%s\n' "$close_comment" >"$close_saved" 2>/dev/null; then
+    echo "  the comment it would have left is in $close_saved" >&2
+  fi
+fi
+
 # CLEANUP MUST NOT BE ABLE TO FAIL THE LAND, and must say what it skipped.
 #
 # By this line the base branch has already been fast-forwarded AND pushed — the
-# work is public — so what remains is housekeeping, and the ticket close below
-# is what unblocks the next wave.
+# work is public — and the ticket is closed, so what remains is housekeeping.
 #
 # `git worktree remove` refuses a worktree containing modified or untracked
 # files, and a session that left something RUNNING — a dev server writing a log,
@@ -247,7 +380,7 @@ fi
 #
 # ─── The session that may still be sitting in there ────────────────────────
 #
-# Read BEFORE the removal, because both markers live inside the worktree.
+# Read before the land, because both markers live inside the worktree.
 #
 # slice-session.sh writes its own PID into .slice-live; slice-done.sh carries
 # that PID into .slice-ready-to-land and clears .slice-live, so whichever of
@@ -305,21 +438,41 @@ end_agent_under() {
   fi
 }
 
+# ─── A worktree whose removal was interrupted ──────────────────────────────
+#
+# Only when finishing. `git worktree remove` deletes the files and then the
+# directory, so one cut short leaves a worktree that is missing tracked files
+# — which plain `remove` refuses as "modified". When every change is such a
+# deletion and its HEAD is the head that landed, there is nothing in it that
+# is not on the base, and --force removes what is left. Anything else — a
+# modified file, an untracked one, another HEAD — is someone's, and stays.
+# A worktree git can no longer read at all (its `.git` file went first) is
+# not inspected, so it is not removed either: the person is told to.
+worktree_unreadable=false
+half_removed() {
+  local top status
+  if [[ ! -e "$worktree_path/.git" ]] ||
+     ! top="$(git -C "$worktree_path" rev-parse --show-toplevel 2>/dev/null)" ||
+     [[ "$(cd "$top" && pwd -P)" != "$worktree_path" ]]; then
+    worktree_unreadable=true
+    return 1
+  fi
+  [[ "$(git -C "$worktree_path" rev-parse HEAD 2>/dev/null)" == "$(git rev-parse "$landed_head" 2>/dev/null)" ]] || return 1
+  status="$(git -C "$worktree_path" status --porcelain 2>/dev/null)" || return 1
+  [[ -n "$status" ]] && ! printf '%s\n' "$status" | grep -qv '^ D '
+}
+
 echo "── cleaning up ────────────────────────────────────────"
-session_pid=""
-session_declared_done=true
-declared_head=""
-if [[ -f "$worktree_path/.slice-ready-to-land" ]]; then
-  session_pid="$(head -n 1 "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
-  # Line 2, when slice-done.sh wrote one: the head the agent declared done at,
-  # BEFORE any rebase moved it. See the note there for why that matters.
-  declared_head="$(sed -n 2p "$worktree_path/.slice-ready-to-land" | tr -d '[:space:]')"
-elif [[ -f "$worktree_path/.slice-live" ]]; then
-  session_pid="$(head -n 1 "$worktree_path/.slice-live" | tr -d '[:space:]')"
-  session_declared_done=false
-fi
 if [[ -d "$worktree_path" ]]; then
+  removed=false
   if git worktree remove "$worktree_path" 2>/dev/null; then
+    removed=true
+  elif $finishing && half_removed &&
+       git worktree remove --force "$worktree_path" 2>/dev/null; then
+    removed=true
+    echo "  (its interrupted removal had already deleted part of it; nothing in it was unlanded)"
+  fi
+  if $removed; then
     echo "✓ removed worktree $worktree_path"
     # Digits only, and the command line has to still look like a slice session:
     # PIDs are reused, and "process 53049 exists" a day later says nothing.
@@ -340,58 +493,26 @@ if [[ -d "$worktree_path" ]]; then
         echo "    Check that tab before closing it: kill $session_pid"
       fi
     fi
+  elif $worktree_unreadable; then
+    echo "⚠️  left $worktree_path — git can no longer read it (its removal was interrupted)."
+    echo "    Everything in it landed as $landed_short; delete the directory and run git worktree prune."
   else
     echo "⚠️  left $worktree_path in place — it has modified or untracked files,"
     echo "    most likely from something still running in that session."
     echo "    Check it, then: git worktree remove --force $worktree_path"
   fi
 fi
+# A worktree whose directory is already gone is still registered until this.
+if $finishing; then git worktree prune 2>/dev/null || true; fi
 git branch -d "$branch" >/dev/null 2>&1 && echo "✓ deleted local branch $branch" || true
 if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
   git push origin --delete "$branch" >/dev/null 2>&1 && echo "✓ deleted origin/$branch" || true
 fi
 
-# Closing the ticket is part of landing, not an afterthought to remember.
-# A blocking edge clears only when the blocker is CLOSED — on GitHub that is
-# how native issue dependencies work, and it is the contract every tracker
-# adapter is held to (scripts/slice-tracker.ts, "closing is load-bearing").
-# So a landed-but-open ticket leaves everything downstream of it refusing to
-# launch — slice-session.sh counts open blockers and exits. Leaving this to
-# the human means discovering it later as "why won't the next slice start?".
-#
-# Never fatal: the code is on master and pushed by this point, which is the
-# part that can't be redone by hand.
-#
-# The close comment also records WHAT landed, as SHAs. The landed head is the
-# only one a later `merge-base --is-ancestor` will ever say yes to; the
-# declared head is the one the agent has in its scrollback, and the two differ
-# whenever the dispatcher rebased before landing. Putting both on the ticket
-# is what lets "did #42 land?" be answered by looking, instead of by a SHA
-# check that is a false negative most of the time.
-landed_head="$(git rev-parse HEAD)"
-landed_count="$(git rev-list --count "$base_before..$landed_head")"
-landed_line="landed on $SLICE_BASE_BRANCH as $(git rev-parse --short "$landed_head") ($landed_count commit(s))"
-if [[ -n "$declared_head" ]]; then
-  landed_line="declared done at $(git rev-parse --short "$declared_head" 2>/dev/null || echo "$declared_head"), $landed_line"
-fi
-close_comment="$close_comment
-
-$landed_line"
-echo "✓ $landed_line"
-
-echo "── closing $ticket_ref ───────────────────────────────────"
-if close_err=$(slice_tracker_close "$ticket" "$close_comment" 2>&1); then
-  echo "✓ closed $ticket_ref"
-  if [[ -n "$land_notes" ]]; then
-    echo "  ↳ carried $land_notes_total unticked check(s) into the ticket"
-  fi
-else
-  echo "warning: couldn't close $ticket_ref — close it by hand or its dependents stay blocked:" >&2
-  echo "$close_err" >&2
-  # Kept for whoever closes it later: a dispatcher retries the close with this
-  # comment, so the unticked checks above still reach the ticket.
-  close_saved="$_slice_common/azelf-close-$ticket.txt"
-  if printf '%s\n' "$close_comment" >"$close_saved" 2>/dev/null; then
-    echo "  the comment it would have left is in $close_saved" >&2
-  fi
+# Last, and only once the ticket is closed: until then a run of this script
+# has something left to finish. The cleanup is not waited for — what it left
+# was said above, and is a person's to look at.
+if $closed; then
+  rm -f "$landed_record"
+  if $finishing; then echo "✓ finished the land of $ticket_ref"; fi
 fi

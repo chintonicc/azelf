@@ -1188,6 +1188,34 @@ gap rebases first. Your `git rebase` then fails with git's "already a rebase-mer
 directory" message; nothing is lost. So start the rebase before you commit, or leave
 the rebase to the dispatcher: commit your fix, and the land it triggers rebases it.
 
+### A land that stopped after its push
+
+Once `slice-land.sh` has pushed, it writes `.git/azelf-landed-<ticket>.txt`. The
+record holds what landed and the close comment, and the script deletes it as its last
+step, once the ticket is closed. The ticket is closed before the worktree is removed,
+because removing a worktree full of `node_modules` takes long enough to be cut off.
+
+If the land is cut off anyway (a terminal crash, a killed dispatcher), run it again:
+
+```
+./scripts/slice-land.sh 101
+── finishing the land of #101 — it pushed as 46802d7 at 2026-10-08 14:31, and the process running it stopped before it was done ──
+```
+
+It finishes from the record, even if the branch is already gone:
+
+1. It checks that `origin` has the landed commit, and refuses if not.
+2. It releases the DB lock if the branch held it.
+3. It closes the ticket with the saved comment.
+4. It removes what is left of the worktree. A worktree that is only missing tracked
+   files, at the landed head, is force-removed. Anything with a modified or untracked
+   file is left in place. So is a worktree git can no longer read, with the command to
+   remove it.
+
+A dispatcher does the same, before its first round, for every ticket in its run that
+has a record, and never preps that ticket again. A record for a ticket outside its run
+gets one line, naming the command.
+
 ## Two dispatchers on one repo
 
 A second dispatcher can run a different set of tickets while the first is still

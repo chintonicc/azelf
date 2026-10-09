@@ -266,6 +266,8 @@ describe("a tracker that stops answering", () => {
     expect(closes).toContain("40\nLanded on main via slice-land.sh.");
     expect(closes).toContain("Closed by the dispatcher on a later round");
     expect(existsSync(join(c.main, ".git", "azelf-close-40.txt"))).toBe(false);
+    // Its worktree and branch went with the land: nothing is left to finish.
+    expect(existsSync(join(c.main, ".git", "azelf-landed-40.txt"))).toBe(false);
     expect(d.output()).not.toContain("prepping #40");
   }, 60_000);
 });
@@ -375,6 +377,57 @@ describe("a rebase that brings new dependencies", () => {
     expect(git(c!.main, "log", "-1", "--format=%s")).toBe(
       "chore: a dependency",
     );
+  });
+});
+
+/**
+ * A land that pushed and was cut off before it finished leaves a record (see
+ * slice-land.sh). A failing close stands in for the cut here: it leaves the
+ * record, the ticket open, and the worktree and branch gone.
+ */
+describe("a land interrupted after its push", () => {
+  const interrupt = (n: number) => {
+    commitIn(c!.wt(n), `${n}.txt`, `${n}\n`, `feat: ${n}`);
+    c!.closeFails(true);
+    shResult(c!.main, `./scripts/slice-land.sh ${n}`);
+    c!.closeFails(false);
+    expect(existsSync(join(c!.main, ".git", `azelf-landed-${n}.txt`))).toBe(
+      true,
+    );
+  };
+
+  it("is finished by the run, never prepped again", () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    interrupt(40);
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      "#40: its land was interrupted after the push — finishing it …",
+    );
+    expect(r.out).toContain("✓ finished the land of #40");
+    expect(r.out).not.toContain("✓ prepped");
+    expect(existsSync(c.wt(40))).toBe(false);
+    expect(readFileSync(c.closeFile, "utf8")).toContain("40\nLanded on main");
+    expect(existsSync(join(c.main, ".git", "azelf-landed-40.txt"))).toBe(false);
+    expect(r.code).toBe(0);
+  });
+
+  it("is named, and left alone, when its ticket is not in the run", () => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true, agent: ["true"] });
+    interrupt(41);
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      "#41: its land was interrupted after the push — ./scripts/slice-land.sh 41 finishes it",
+    );
+    expect(r.out).not.toContain("finishing the land of #41");
+    expect(existsSync(join(c.main, ".git", "azelf-landed-41.txt"))).toBe(true);
+    expect(readFileSync(c.closeFile, "utf8")).not.toContain("41\n");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
   });
 });
 
