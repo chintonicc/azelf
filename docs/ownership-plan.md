@@ -1,6 +1,6 @@
 # A land that finishes, one dispatcher per ticket, and a hold on hand work
 
-**Status:** IN PROGRESS — Phase 1 landed · **Written:** 2026-10-08
+**Status:** IN PROGRESS — Phases 1–2 landed · **Written:** 2026-10-08
 **Companion:** consumer-a's friction log: the five entries dated 2026-10-08 that
 `docs/lock-and-review-plan.md` left open, and two more from later the same day (a
 rebase that doesn't reinstall, and a worktree re-added by hand). Every other entry is
@@ -158,19 +158,19 @@ Proof: three tests in `sliceRun.test.ts` under "a rebase that brings new
 dependencies". The install-then-gate order and the failed-install park fail on the old
 code; the no-manifest case is a guard and passes on both. Suite 444/444.
 
-## Phase 2 — an interrupted land is finished, not restarted
+## Phase 2 — an interrupted land is finished, not restarted (a4af114)
 
-- [ ] **2a. The record.** Right after `git push` succeeds (`slice-land.sh:172`), write
+- [x] **2a. The record.** Right after `git push` succeeds (`slice-land.sh:172`), write
   `<common>/azelf-landed-<ticket>.txt`. It holds the landed head, the declared head
   from the done marker, the commit count, and the full close comment (land notes and
   the `landed on … as …` line). To get this, move the marker reads
   (`slice-land.sh:309-320`) and the `landed_line` computation (`slice-land.sh:371-380`)
   up, before the push. The record is deleted as the script's last step, once the close
   succeeded. On a failed close it stays, beside the existing `azelf-close-<ticket>.txt`.
-- [ ] **2b. Close, then clean up.** Move "closing" (`slice-land.sh:382-397`) up, before
+- [x] **2b. Close, then clean up.** Move "closing" (`slice-land.sh:382-397`) up, before
   "cleaning up" (`slice-land.sh:308`). The `--end-session` handling stays after the
   removal, for the reasons given at `slice-land.sh:274-283`.
-- [ ] **2c. Finishing.** `slice-land.sh <ticket>` looks for a record **before** the
+- [x] **2c. Finishing.** `slice-land.sh <ticket>` looks for a record **before** the
   branch check at `slice-land.sh:80`, because the branch may already be gone. With one,
   it takes the land lock and says:
 
@@ -180,7 +180,7 @@ code; the no-manifest case is a guard and passes on both. Suite 444/444.
   refuses loudly if not. It releases the DB lock if this branch holds it, closes the
   ticket with the saved comment if it is still open, cleans up as in 2d, and deletes
   the record.
-- [ ] **2d. A half-removed worktree.** In finish mode only: if `git -C <wt> status
+- [x] **2d. A half-removed worktree.** In finish mode only: if `git -C <wt> status
   --porcelain` shows nothing but deletions and HEAD is the recorded head, use
   `git worktree remove --force`. Anything else is left in place with today's message.
   If git can't read the worktree at all (its `.git` file is gone), leave it and say:
@@ -188,7 +188,7 @@ code; the no-manifest case is a guard and passes on both. Suite 444/444.
   > left ../repo-ticket-101 — git can no longer read it (its removal was interrupted). Everything in it landed as 46802d7; delete the directory and run git worktree prune.
 
   azelf never `rm -rf`s a directory it can't inspect.
-- [ ] **2e. The dispatcher finishes its own.** After "proceed?" (`slice-run.ts:4060`),
+- [x] **2e. The dispatcher finishes its own.** After "proceed?" (`slice-run.ts:4060`),
   next to the retry-marker sweep (`slice-run.ts:4075`): for each ticket in the run that
   has a record, run `slice-land.sh <id>`. If it is closed afterwards, it counts as
   landed (`t.open = false`). If it is still open, it goes into `closePending`, and
@@ -208,6 +208,50 @@ code; the no-manifest case is a guard and passes on both. Suite 444/444.
   **`sliceRun.test.ts`**: a run whose ticket has a record finishes it and never preps
   or launches it. A record for a ticket outside the run prints the line and touches
   nothing. On the old code, the first dispatcher test opens a session.
+
+**As landed.**
+- **The record** is `<common>/azelf-landed-<ticket>.txt`. Four lines, `landed <sha>`,
+  `declared <sha|->`, `count <n>` and `pushed <YYYY-MM-DD HH:MM>`, then a blank line,
+  then the close comment. A record that doesn't parse is refused, not guessed at. It is
+  written right after `✓ pushed`, so a kill between the push and the write still leaves
+  nothing to finish from. That window is one `printf`, and the plan accepts it.
+- **The order** is now push, record, DB lock, close, cleanup, delete the record. The
+  marker reads moved up before the fast-forward, for both modes. The record is deleted
+  only once the ticket is closed (or found already closed). A cleanup that left
+  something behind doesn't hold it, because what was left was already reported.
+- **Finishing** checks `origin/<base>` after a fetch. `base_before` for the DB-lock
+  block is `<landed>~<count>`, since a fast-forward is linear. The touched-paths diff
+  now runs to the landed head rather than `HEAD`, which in finish mode may have moved
+  on. A ticket read as already closed is not closed again. `git worktree prune` runs
+  in finish mode, for a worktree whose directory is already gone.
+- **The half-removed worktree** is force-removed only when three things hold: its
+  `.git` resolves to itself, its HEAD is the landed head, and every status line is
+  ` D `. A `.git` that is missing, or that resolves to a parent repo, counts as
+  unreadable and gets the "delete the directory and run git worktree prune" line.
+- **The dispatcher** reads `<common>` once (`commonDir()`). The sweep runs after the
+  retry-marker sweep and passes `--end-session` under `--auto`, as a land does. When
+  the finish succeeds, the ticket is marked landed. When the close failed (record
+  still there, exit 0), the ticket goes to `closePending`. When the finish refused
+  (non-zero exit), the ticket stays open, and `hasLandRecord` keeps it out of both
+  `runnable` and `awaitingLand`.
+- **Added beyond the plan:** `retryCloses` deletes a record once it reads the ticket
+  closed and the worktree and branch are both gone (`dropFinishedRecord`). Without
+  this, a land whose only failure was the close would leave a record that the next run
+  names as an interrupted land.
+
+Proof:
+- `sliceLand.test.ts`, "finishing a land that was interrupted after the push": five
+  tests. They cover the half-deleted worktree, the branch already gone, a modified
+  file left in place, a worktree git can't read, and a record naming a head that origin
+  doesn't have. A failing close stands in for the interruption, since it leaves the
+  record for the same reason.
+- The normal-land test also checks that the close comes before the cleanup and that
+  no record is left.
+- `sliceRun.test.ts`, "a land interrupted after its push": a run finishes its own and
+  never preps it, and a record outside the run is named and left alone.
+- All of these new tests fail on the old code.
+- Suite: 451 of 451. An earlier run under a machine load average near 300 timed out
+  two unrelated tests at 30 s; they passed alone and in the clean run.
 
 ## Phase 3 — one dispatcher per ticket
 
