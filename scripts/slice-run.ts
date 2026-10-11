@@ -224,27 +224,57 @@ function run(
   } = {},
 ): { ok: boolean; out: string; status: number | null } {
   const [bin, ...args] = cmd;
-  const proc = spawnSync(bin as string, args, {
-    cwd: opts.cwd ?? repoRoot,
-    stdio: opts.inherit ? "inherit" : "pipe",
-    encoding: "utf8",
-    timeout: opts.timeoutMs,
-    env: opts.env ? { ...process.env, ...opts.env } : undefined,
-    // Default is 1MB, which a full-branch `git diff` or a long tsc run can
-    // exceed — and spawnSync signals that by TRUNCATING and setting an error,
-    // so the failure would look like a gate result rather than a buffer limit.
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  let proc: ReturnType<typeof spawnSync>;
+  try {
+    proc = spawnSync(bin as string, args, {
+      cwd: opts.cwd ?? repoRoot,
+      stdio: opts.inherit ? "inherit" : "pipe",
+      encoding: "utf8",
+      timeout: opts.timeoutMs,
+      env: opts.env ? { ...process.env, ...opts.env } : undefined,
+      // Default is 1MB, which a full-branch `git diff` or a long tsc run can
+      // exceed — and spawnSync signals that by TRUNCATING and setting an error,
+      // so the failure would look like a gate result rather than a buffer limit.
+      maxBuffer: 64 * 1024 * 1024,
+    });
+  } catch (e) {
+    // An argument spawnSync cannot pass at all — a NUL is the one seen — is
+    // THROWN, not returned. On consumer-a that took the whole run down from
+    // inside a spec review. Under allowFail it fails this one call instead.
+    if (!opts.allowFail) throw e;
+    return { ok: false, out: spawnFailure(e), status: null };
+  }
   // tsc's output goes to stdout, biome's to stderr, git splits across both —
-  // so callers that grep the result need them joined, not just stdout.
-  const out = opts.inherit
-    ? ""
-    : `${proc.stdout ?? ""}${proc.stderr ?? ""}`.trim();
+  // so callers that grep the result need them joined, not just stdout. And
+  // the reason spawnSync gave, when it gave one: a missing binary, an argument
+  // list over the limit, a timeout. Without it `out` is empty and says nothing.
+  const out = [
+    opts.inherit ? "" : `${proc.stdout ?? ""}${proc.stderr ?? ""}`.trim(),
+    proc.error ? spawnFailure(proc.error) : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
   const ok = proc.status === 0;
   if (!ok && !opts.allowFail) {
     throw new Error(`${cmd.join(" ")} failed:\n${out}`);
   }
-  return { ok, out, status: proc.status };
+  return { ok, out, status: proc.status ?? null };
+}
+
+/**
+ * What spawnSync threw or returned as its error, on one line, with the code
+ * in it: Bun's message for a missing binary says "Executable not found" and
+ * not ENOENT. Cut short, because the message for a bad argument quotes the
+ * argument, and that argument is a whole prompt.
+ */
+function spawnFailure(e: unknown): string {
+  const err = e as NodeJS.ErrnoException;
+  const message = (err?.message ?? String(e)).split("\n")[0] ?? "";
+  const line =
+    err?.code && !message.includes(err.code)
+      ? `${err.code}: ${message}`
+      : message;
+  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
 // ─── the graph ────────────────────────────────────────────────────────────
@@ -1651,23 +1681,46 @@ function diffFor(range: string, cwd: string): string {
 }
 
 /**
+ * A prompt with every NUL written as the two characters `\0`, which is what a
+ * person reading the source sees. A prompt goes to the agent as an argument,
+ * and an argument cannot hold a NUL; on consumer-a a source file that used one
+ * as a map-key separator put four into a diff, and the review's spawn threw.
+ * Done once per agent call, because the diff, the ticket, the parent spec and
+ * the landed diffs all feed the same prompt.
+ */
+const argSafe = (prompt: string): string => prompt.replaceAll("\0", "\\0");
+
+/**
+ * What one headless prompt gave back: its text, or null and why not.
+ */
+type AgentAnswer = { text: string | null; why?: string };
+
+/**
  * One headless prompt to the configured agent.
  *
- * Returns null when the agent HAS no headless mode as well as when the call
- * fails, and the caller treats both the same way: skip the review, say so, land
- * on the gates alone. That is deliberate — the reviews are an enhancement to
- * landing, not a precondition for it, and an agent without `-p` is a reason to
- * review less, never a reason to refuse to land.
+ * `text` is null when the agent HAS no headless mode as well as when the call
+ * fails, and the callers that can treat both the same way do: skip the review,
+ * say so, land on the gates alone. That is deliberate — the reviews are an
+ * enhancement to landing, not a precondition for it, and an agent without `-p`
+ * is a reason to review less, never a reason to refuse to land. `why` is for
+ * saying which it was.
  */
-function askAgent(prompt: string, cwd: string): string | null {
-  const argv = agent.review(prompt);
-  if (!argv) return null;
-  const { ok, out } = run(argv, {
+function askAgent(prompt: string, cwd: string): AgentAnswer {
+  const argv = agent.review(argSafe(prompt));
+  if (!argv) return { text: null, why: "the agent has no headless mode" };
+  const { ok, out, status } = run(argv, {
     cwd,
     allowFail: true,
     timeoutMs: REVIEW_TIMEOUT_MS,
   });
-  return ok && out.trim() ? out.trim() : null;
+  if (ok && out.trim()) return { text: out.trim() };
+  const said = out.trim().split("\n").pop() ?? "";
+  return {
+    text: null,
+    why: ok
+      ? "it exited 0 and printed nothing"
+      : said || `it exited ${status ?? "on a signal"} and printed nothing`,
+  };
 }
 
 /**
@@ -1734,7 +1787,7 @@ ${commits}
 DIFF:
 ${diff}`,
       cwd,
-    ) ?? "(standards review did not return — skipped)"
+    ).text ?? "(standards review did not return — skipped)"
   );
 }
 
@@ -1761,6 +1814,8 @@ type SpecReview = {
   block: boolean;
   verdict: "PASS" | "BLOCK" | null;
   unverified: string[];
+  /** Why the review gave no answer at all, when it gave none. */
+  failed?: string;
 };
 
 /**
@@ -1790,7 +1845,7 @@ function reviewSpec(
   cwd: string,
   context: SpecContext = {},
 ): SpecReview {
-  const out = askAgent(
+  const answer = askAgent(
     `You are reviewing a diff on ONE axis only: does it faithfully implement the spec below?
 
 Report only:
@@ -1859,13 +1914,15 @@ ${context.landed}`
     cwd,
   );
 
+  const out = answer.text;
   if (!out) {
+    const failed = answer.why ?? "it gave no answer";
     return {
-      report:
-        "(spec review did not return — treating as BLOCK; see the fail-closed note above)",
+      report: `(spec review did not return — ${failed} — treating as BLOCK; see the fail-closed note above)`,
       block: true,
       verdict: null,
       unverified: [],
+      failed,
     };
   }
   const unverified = unverifiedLines(out);
@@ -2199,11 +2256,11 @@ function noteLanded(landed: Ticket, files: string[]): void {
 }
 
 /**
- * Review one finished slice, just before it lands. Returns false only when the
- * land should be refused.
+ * Review one finished slice, just before it lands. Returns why the land is
+ * refused, as the park reason, or null when it may land.
  */
-function reviewSlice(t: Ticket): boolean {
-  if (!reviewEnabled) return true;
+function reviewSlice(t: Ticket): string | null {
+  if (!reviewEnabled) return null;
 
   const wt = worktreeFor(t.id);
   const range = `${baseBranch}...${branchFor(t.id)}`;
@@ -2255,7 +2312,11 @@ function reviewSlice(t: Ticket): boolean {
     ...spec.unverified,
   ];
   console.log(
-    `  spec review: ${spec.verdict ?? "no verdict — read as BLOCK"}${
+    `  spec review: ${
+      spec.failed
+        ? `did not run — ${spec.failed}`
+        : spec.verdict ?? "no verdict — read as BLOCK"
+    }${
       unchecked.length
         ? ` — ${unchecked.length} thing${
             unchecked.length === 1 ? "" : "s"
@@ -2265,27 +2326,34 @@ function reviewSlice(t: Ticket): boolean {
   );
   for (const u of unchecked) console.log(`    - ${u}`);
 
+  // A review that never ran is not a BLOCK, and saying it was sends someone
+  // to read a verdict that does not exist.
+  const refusal = spec.failed
+    ? `the spec review could not run — ${spec.failed}`
+    : "the spec review says BLOCK";
   if (spec.block && (reviewBlocks || resolvedByAgent.has(t.id))) {
     console.log(
-      `  ✗ ${ref(
-        t.id,
-      )} not landed — spec review says BLOCK. Fix it in the worktree, correct the ticket if the spec is wrong, or land it without the review: ./scripts/slice-land.sh ${
-        t.id
-      }.`,
+      `  ✗ ${ref(t.id)} not landed — ${
+        spec.failed
+          ? `${refusal}. Retry it once the reviewer can run (azelf retry ${t.id})`
+          : "spec review says BLOCK. Fix it in the worktree, correct the ticket if the spec is wrong"
+      }, or land it without the review: ./scripts/slice-land.sh ${t.id}.`,
     );
     // The path is printed above too, as `report saved:`, but the review's text
     // comes between, and a log cut short at the ✗ line lost it.
     console.log(`     review: ${path}`);
-    return false;
+    return refusal;
   }
   if (spec.block) {
     console.log(
-      `  ! ${ref(
-        t.id,
-      )} spec review says BLOCK, but review is advisory here (a human ran slice-done.sh) — landing anyway.`,
+      `  ! ${ref(t.id)} ${
+        spec.failed
+          ? `spec review did not run (${spec.failed})`
+          : "spec review says BLOCK"
+      }, but review is advisory here (a human ran slice-done.sh) — landing anyway.`,
     );
   }
-  return true;
+  return null;
 }
 
 /**
@@ -2340,7 +2408,7 @@ function reviewPlan(tickets: Ticket[], base: string): PlanReview | null {
     .join("\n\n---\n\n");
 
   console.log("\n── plan-level review (the seam between slices) ────────");
-  const answer = askAgent(
+  const { text: answer } = askAgent(
     `Several tickets were implemented independently, each in its own worktree, each reviewed and gate-checked ALONE. They have all landed on ${baseBranch}. Your job is the one thing none of those per-slice reviews could see: how the slices fit together.
 
 Report ONLY cross-cutting findings — things invisible when reading any single slice's diff on its own:
@@ -3205,12 +3273,16 @@ function resolveStops(t: Ticket, conflicted: string[]): boolean {
       ["git", "log", "-1", "--format=%h %s", "REBASE_HEAD"],
       { cwd: wt, allowFail: true },
     );
+    // The resolver edits the files with its own tools, so the prompt's `\0`
+    // never becomes a file's byte.
     const argv = argvFor(
-      resolvePrompt(
-        t,
-        files,
-        landedCommits,
-        replaying.ok ? replaying.out.trim() : "",
+      argSafe(
+        resolvePrompt(
+          t,
+          files,
+          landedCommits,
+          replaying.ok ? replaying.out.trim() : "",
+        ),
       ),
     );
     if (!argv) return give("the agent declined the headless run");
@@ -3749,8 +3821,9 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
           t.id,
         )}'s files`,
       );
-    } else if (!opts.force && !reviewSlice(t)) {
-      return park(t, "review", "the spec review says BLOCK");
+    } else if (!opts.force) {
+      const refused = reviewSlice(t);
+      if (refused) return park(t, "review", refused);
     }
     reviewedOn = onBase;
     console.log(`  landing ${ref(t.id)} …`);

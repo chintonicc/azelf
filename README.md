@@ -1032,6 +1032,21 @@ different from a PASS. Both reviews are told which gates already passed on the d
 and to run nothing: on consumer-a a review tried to run the tests, was refused, and
 called them unconfirmed.
 
+**A review that could not run says so.** The spec review fails closed: no answer
+reads as a BLOCK. But the line, and the park, say why there was no answer, not that
+the reviewer said BLOCK:
+
+```
+  spec review: did not run — ENOENT: Executable not found in $PATH: "claude"
+  ✗ #14 did not land — the spec review could not run — ENOENT: …
+```
+
+Fix what it names, then `azelf retry 14`. A diff with a NUL byte in it is no longer
+one of those reasons. A prompt goes to the agent as an argument, and an argument
+cannot hold a NUL, so every NUL in a prompt is written as the two characters `\0`.
+On consumer-a a source file that used a NUL as a map-key separator took the whole
+run down inside the review.
+
 **The plan-level review is the run's last word.** When review is on, every ticket
 has closed, and two or more slices landed in the run, the agent reads the whole plan
 as one diff, for what no per-slice review can see: the seam between slices. Everything has landed by then, so it cannot block.

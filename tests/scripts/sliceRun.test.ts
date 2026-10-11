@@ -621,6 +621,66 @@ describe("the spec review and the parent spec", () => {
  * Both reviews run after the gates, and on consumer-a the spec review still
  * tried to run the tests, was refused, and called them unconfirmed in a PASS.
  */
+/**
+ * A prompt goes to the agent as an argument, and an argument cannot hold a
+ * NUL: spawnSync throws on one. On consumer-a a diff carried four, and the
+ * throw took the whole run down from inside the spec review.
+ */
+describe("a review that cannot run", () => {
+  const RECORD = [
+    "bash",
+    "-c",
+    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    "reviewer",
+  ];
+
+  it("writes a NUL in the diff as \\0, and lands", () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, review: RECORD });
+    c = fx;
+    // The attribute makes git diff the file as text, raw NUL and all.
+    commitIn(fx.wt(40), ".gitattributes", "keys.txt diff\n", "chore: attrs");
+    commitIn(fx.wt(40), "keys.txt", "id\0name\n", "feat: keys");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--once", "40"]);
+    expect(r.out).toContain("landing #40");
+    expect(r.code).toBe(0);
+    const prompts = readFileSync(join(fx.root, "prompts"), "utf8");
+    expect(prompts).toContain("+id\\0name");
+    expect(prompts).not.toContain("\0");
+  });
+
+  const parked = (review: string[]) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, review });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return runDispatcher(fx, ["--auto", "--once", "-y", "40"]);
+  };
+
+  it("parks a slice whose reviewer cannot be spawned, and the run ends normally", () => {
+    // The prompt is made safe; an argument of the reviewer's own is not.
+    const r = parked(["bash", "-c", "echo 'VERDICT: PASS'", "rev\0iewer"]);
+    expect(r.out).toContain(
+      "  spec review: did not run — ERR_INVALID_ARG_VALUE: The argument",
+    );
+    expect(r.out).toMatch(
+      /#40 not landed — the spec review could not run — ERR_INVALID_ARG_VALUE: .*\. Retry it once the reviewer can run \(azelf retry 40\), or land it without the review: \.\/scripts\/slice-land\.sh 40\./,
+    );
+    expect(r.out).toContain(
+      "the spec review could not run — ERR_INVALID_ARG_VALUE",
+    );
+    expect(r.out).not.toContain("says BLOCK");
+    expect(r.out).not.toContain("TypeError");
+    expect(r.code).toBe(1);
+  });
+
+  it("names a reviewer binary that does not exist", () => {
+    const r = parked(["azelf-no-such-reviewer"]);
+    expect(r.out).toContain("the spec review could not run — ENOENT");
+    expect(r.code).toBe(1);
+  });
+});
+
 describe("what the spec review is told, and what it says it could not check", () => {
   const land = (opts: Parameters<typeof makeConsumer>[0]) => {
     const fx = makeConsumer({ worktrees: [40], remote: true, ...opts });
