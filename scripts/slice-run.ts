@@ -144,6 +144,7 @@ import {
   type Epic,
   type TicketId,
   type TicketInfo,
+  blockerLine,
   bodyOnlyBlockers,
   compareIds,
   findEpics,
@@ -312,6 +313,8 @@ type MissingEdge = {
   blockers: TicketId[];
   /** The subset of `blockers` the tracker could not read: a typo, usually. */
   unreadable: TicketId[];
+  /** The body line each blocker was read from, for the refusal to quote. */
+  readFrom: Map<TicketId, string>;
 };
 
 /**
@@ -427,7 +430,12 @@ function loadTickets(explicit: TicketId[]): {
       },
     );
     if (claimed.length > 0) {
-      missingEdges.push({ id, blockers: claimed, unreadable });
+      const readFrom = new Map<TicketId, string>();
+      for (const b of claimed) {
+        const line = blockerLine(body(id), b, tracker.idPattern);
+        if (line !== null) readFrom.set(b, line);
+      }
+      missingEdges.push({ id, blockers: claimed, unreadable, readFrom });
     }
     const foreignBlockers = stillBlocking
       .filter((b) => !inSet.has(b.id))
@@ -573,6 +581,10 @@ function printNamed(
  * waved through with `--ignore-body-blockers`. Refusing costs one command,
  * once, and after `--sync-edges` the tracker is right for every later run.
  *
+ * Under each line is the body line the id was read from: "#99" alone does not
+ * say whether the body meant it, and the quote lets the reader decide without
+ * opening the ticket.
+ *
  * `ignored` is that flag: the lines are then a note, as they always were.
  */
 function printMissingEdges(
@@ -599,6 +611,9 @@ function printMissingEdges(
           tracker.name
         } has no edge.`,
       );
+      const line = m.readFrom.get(b);
+      if (line !== undefined)
+        console.log(`      read from: ${quoteLine(line)}`);
     }
   }
   if (ignored) {
@@ -606,6 +621,11 @@ function printMissingEdges(
       "     Running as planned (--ignore-body-blockers): edges are scheduled on, prose is not.",
     );
   }
+}
+
+/** A body line in quotes, cut at 120 characters: a paragraph is one line. */
+function quoteLine(line: string): string {
+  return JSON.stringify(line.length > 120 ? `${line.slice(0, 119)}…` : line);
 }
 
 /**

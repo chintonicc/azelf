@@ -267,9 +267,13 @@ export function parentFromBody(
  *
  * Two places are read, and neither is "every id in the body":
  *
- *  1. Everything under a `## Blocked by` heading — unless the section opens
- *     with "None". Then it is empty, whatever it goes on to mention: "None.
- *     #62 and #63 have landed." names two tickets and no blocker.
+ *  1. The `## Blocked by` section — unless it opens with "None". Then it is
+ *     empty, whatever it goes on to mention: "None. #62 and #63 have landed."
+ *     names two tickets and no blocker. A section with list items is read
+ *     through its items alone: "- #99 — the storage policy" is a claim, and
+ *     the prose under the list ("#97 and #98 landed already") is not. A section
+ *     without one is read whole. The marker must be followed by a space, so an
+ *     italic note (`*#99 is close, ask first*`) is prose, not an item.
  *  2. The rest of any sentence that says "blocked on" or "blocked by", up to
  *     the next `.`, `;` or line end. Ticket writers put the strongest form of
  *     the claim outside the section: "**Blocked on #2 (the egress trigger) and
@@ -287,24 +291,49 @@ export function parentFromBody(
  * unless asked in so many words.
  */
 export function blockersFromBody(body: string, idPattern: string): TicketId[] {
-  const sec = section(body, "blocked by");
-  const first =
-    sec
-      .split("\n")
-      .map((l) => l.trim())
-      .find((l) => l !== "") ?? "";
-  // Leading list and emphasis markers are decoration: "- None", "**None.**".
-  const fromSection = /^[-*_>\s]*none\b/i.test(first)
-    ? []
-    : idsIn(sec, idPattern);
+  return [...new Set(blockerClaims(body, idPattern).map((c) => c.id))];
+}
 
-  const fromPhrases: TicketId[] = [];
+/**
+ * The line of `body` that `blockersFromBody` took `id` from, trimmed, or
+ * `null` when it does not take it. A refusal quotes it, so whoever reads the
+ * refusal can see whether the body meant it — "#99" alone does not say.
+ */
+export function blockerLine(
+  body: string,
+  id: TicketId,
+  idPattern: string,
+): string | null {
+  return blockerClaims(body, idPattern).find((c) => c.id === id)?.line ?? null;
+}
+
+/** Each id `blockersFromBody` reads, with the line it is read from, in order. */
+function blockerClaims(
+  body: string,
+  idPattern: string,
+): { id: TicketId; line: string }[] {
+  const claims: { id: TicketId; line: string }[] = [];
+  const lines = section(body, "blocked by")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+  // Leading list and emphasis markers are decoration: "- None", "**None.**".
+  if (!/^[-*_>\s]*none\b/i.test(lines[0] ?? "")) {
+    const items = lines.filter((l) => /^(?:[-*+]|\d+[.)])\s/.test(l));
+    for (const line of items.length > 0 ? items : lines) {
+      for (const id of idsIn(line, idPattern)) claims.push({ id, line });
+    }
+  }
+
   for (const m of body.matchAll(/\bblocked\s+(?:on|by)\b([^.;\n]*)/gi)) {
     const before = body.slice(Math.max(0, m.index - 12), m.index);
     if (/(?:\bnot|n't|\bno longer)\s+$/i.test(before)) continue;
-    fromPhrases.push(...idsIn(m[1] ?? "", idPattern));
+    const start = body.lastIndexOf("\n", m.index) + 1;
+    const end = body.indexOf("\n", m.index);
+    const line = body.slice(start, end < 0 ? undefined : end).trim();
+    for (const id of idsIn(m[1] ?? "", idPattern)) claims.push({ id, line });
   }
-  return [...new Set([...fromSection, ...fromPhrases])];
+  return claims;
 }
 
 /**

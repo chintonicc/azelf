@@ -589,17 +589,22 @@ starts the round after a person, or another dispatcher, closes it.
 #### A claimed blocker stops the dispatch, and is never assumed
 
 A body can name a blocker the tracker has no edge for. Two places are read: the ids
-under a `## Blocked by` heading (a section that opens with "None" is empty, whatever
-it goes on to mention), and the rest of any sentence that says "blocked on" or
-"blocked by" — "**Blocked on #2 and #3.** Do not start early". A negated phrase and
-a plain mention ("reads best after #19") are not claims. A blocker that is already
-closed is dropped.
+under a `## Blocked by` heading, and the rest of any sentence that says "blocked on"
+or "blocked by" — "**Blocked on #2 and #3.** Do not start early". A negated phrase
+and a plain mention ("reads best after #19") are not claims. A blocker that is
+already closed is dropped.
+
+A section that opens with "None" is empty, whatever it goes on to mention. A section
+with list items (`- `, `* `, `+ `, `1. `, `1) `) is read through its items alone, so
+a note under the list ("#97 and #98 landed already") is not a claim. An italic line
+(`*#99 is close*`) is not an item. A section without one is read whole.
 
 What is left is an open ticket the body says to wait for and the plan does not
 wait for. The plan is still built from the tracker's edges, and says so:
 
 ```
   ✗ #82's body says it is blocked by #81 (in this run, wave 1). GitHub has no edge.
+      read from: "- #81 — the storage policy"
 
 not dispatching: the plan above would start a ticket beside its claimed blocker.
   record the edges:  azelf run --sync-edges -y

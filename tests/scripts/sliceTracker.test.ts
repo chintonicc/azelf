@@ -1,5 +1,6 @@
 import {
   type GhRunner,
+  blockerLine,
   blockersFromBody,
   bodyOnlyBlockers,
   compareIds,
@@ -491,9 +492,63 @@ describe("blockersFromBody — the `## Blocked by` convention", () => {
     expect(blockersFromBody("Reads best after #19.", N)).toEqual([]);
   });
 
+  it("reads only the list items when the section has any", () => {
+    const body =
+      "## Blocked by\n\n- #99 — the storage policy\n* #100\n+ #101\n  1. #102\n2) #103\n\n#97 and #98 landed already.\n";
+    expect(blockersFromBody(body, N)).toEqual([
+      "99",
+      "100",
+      "101",
+      "102",
+      "103",
+    ]);
+  });
+
+  it("reads every line when the section has no list item", () => {
+    const body = "## Blocked by\n\n#19, then\n#20 once it lands\n";
+    expect(blockersFromBody(body, N)).toEqual(["19", "20"]);
+  });
+
+  it("an italic note is prose, not a list item", () => {
+    const body = "## Blocked by\n\n- #19\n\n*#99 is close, ask first*\n";
+    expect(blockersFromBody(body, N)).toEqual(["19"]);
+    expect(
+      blockersFromBody("## Blocked by\n\n*#99 is close, ask first*\n", N),
+    ).toEqual(["99"]);
+  });
+
+  it("a list keeps the None rule and the phrase rule", () => {
+    expect(
+      blockersFromBody("## Blocked by\n\n- None\n- #4 landed\n", N),
+    ).toEqual([]);
+    const body = "Blocked on #2.\n\n## Blocked by\n\n- #5\n\nSee #6.\n";
+    expect(blockersFromBody(body, N)).toEqual(["5", "2"]);
+  });
+
   it("does not pick up the parent from its own section", () => {
     const body = "## Parent\n\n#17\n\n## Blocked by\n\nNone.\n";
     expect(blockersFromBody(body, N)).toEqual([]);
+  });
+});
+
+describe("blockerLine — the line a blocker is read from", () => {
+  it("quotes the list item, trimmed", () => {
+    const body = "## Blocked by\n\n  - #99 — the storage policy\n\n#97 too\n";
+    expect(blockerLine(body, "99", N)).toBe("- #99 — the storage policy");
+    expect(blockerLine(body, "97", N)).toBeNull();
+  });
+
+  it("quotes the line a phrase stands on", () => {
+    const body =
+      "## What\n\n**Blocked on #2 (the trigger).** Do not start early.\n";
+    expect(blockerLine(body, "2", N)).toBe(
+      "**Blocked on #2 (the trigger).** Do not start early.",
+    );
+  });
+
+  it("prefers the section, where the id is read first", () => {
+    const body = "Blocked by #5.\n\n## Blocked by\n\n- #5, the schema\n";
+    expect(blockerLine(body, "5", N)).toBe("- #5, the schema");
   });
 });
 

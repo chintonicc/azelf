@@ -3246,6 +3246,20 @@ describe("a blocker only the body names stops the dispatch", () => {
     expect(existsSync(c.wt(82))).toBe(false);
   });
 
+  it("quotes the list item it read, and not the prose under the list", () => {
+    c = claimed();
+    c.setTicket("83", {});
+    c.setTicket("82", {
+      body: "## Blocked by\n\n- #81 — the storage policy\n\n#83 landed its half already.\n",
+    });
+    const r = runDispatcher(c, ["--plan"]);
+
+    expect(r.out).toContain(
+      `${LINE}\n      read from: "- #81 — the storage policy"`,
+    );
+    expect(r.out).not.toContain("blocked by #83");
+  });
+
   it("names a blocker outside the run as open, not in this run", () => {
     c = claimed();
     const r = runDispatcher(c, ["--plan", "82"]);
