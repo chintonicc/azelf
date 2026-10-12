@@ -1264,6 +1264,132 @@ describe("a session that crashed", () => {
 });
 
 /**
+ * A slice refused the DB lock ends its turn, and an agent in a REPL can do no
+ * more: its process stays, so the session stays live and the dispatcher never
+ * relaunched it. On consumer-a one waited twelve hours on a free lock. #44
+ * holds the lock from its worktree; #40's real session claims, is refused,
+ * and its agent then idles as a REPL would, until something ends it.
+ */
+describe("a session waiting on a lock that frees", () => {
+  const waitFor = async (what: string, ok: () => boolean, ms = 30_000) => {
+    const end = Date.now() + ms;
+    while (!ok()) {
+      if (Date.now() > end) throw new Error(`timed out waiting for ${what}`);
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  let tag = "";
+  afterEach(() => {
+    if (tag) spawnSync("pkill", ["-f", `azelf-idle-${tag}`]);
+    tag = "";
+  });
+
+  /**
+   * The first session commits the part that needs no lock, claims, is
+   * refused and idles; `idle` is what it idles as. A later session records
+   * its prompt, commits the rest and exits 0, as a finished slice does.
+   */
+  const waiting = (idle: string) => {
+    tag = String(3000 + Math.floor(Math.random() * 5000));
+    const agent = `if [ -e ../first ]; then printf "%s\\n" "$1" > ../relaunched; echo b > b.txt; git add b.txt; git commit -qm "feat: b"; else touch ../first; echo a > a.txt; git add a.txt; git commit -qm "feat: a"; ./scripts/db-lock.sh claim; exec bash -c '${idle}' azelf-idle-${tag}; fi`;
+    const fx = makeConsumer({
+      lockPaths: ["db"],
+      worktrees: [40, 44],
+      remote: true,
+      agent: ["bash", "-c", agent, "agent"],
+      launch: true,
+    });
+    c = fx;
+    sh(fx.wt(44), "./scripts/db-lock.sh claim");
+    return fx;
+  };
+  const idling = () =>
+    spawnSync("pgrep", ["-f", `azelf-idle-${tag}`]).status === 0;
+  const WAITING = "waiting for it: #40 — relaunched when it frees";
+  const ENDING =
+    /#40: the DB lock is free — ending its session, which has waited on it since \d\d:\d\d, to start it again\n {4}ended the agent in that tab — the session exits and the tab closes\./;
+
+  it("ends the session once the lock is free and it is quiet, and starts it again", async () => {
+    const fx = waiting("while :; do sleep 1; done");
+    d = startDispatcher(fx, [
+      "--auto",
+      "--no-review",
+      "-y",
+      "--interval",
+      "1",
+      "40",
+    ]);
+    await d.until(WAITING);
+    expect(idling()).toBe(true);
+
+    sh(fx.wt(44), "./scripts/db-lock.sh release");
+    await d.until(ENDING);
+    expect(idling()).toBe(false);
+    // Not on the round the lock freed: two quiet rounds after it, each of
+    // which ends on its round line.
+    const out = d.output();
+    const between = out.slice(out.indexOf("DB lock free"), out.search(ENDING));
+    expect(between.match(/\[round \d+\] \d+ running/g)?.length).toBe(2);
+
+    await waitFor("the relaunched session", () =>
+      existsSync(join(fx.root, "relaunched")),
+    );
+    // Not landed as half a ticket when its first session ended: the commit
+    // the lock wait left is under the one the new session made.
+    await waitFor(
+      "the land",
+      () => git(fx.main, "log", "-1", "--format=%s") === "feat: b",
+    );
+    expect(git(fx.main, "log", "-2", "--format=%s")).toBe("feat: b\nfeat: a");
+    expect(readFileSync(join(fx.root, "relaunched"), "utf8")).toContain(
+      "already has work from an earlier session of this ticket",
+    );
+  }, 60_000);
+
+  it("does not end a session whose worktree changes every round", async () => {
+    const fx = waiting(
+      "while :; do date +%s%N >> busy.txt; git add busy.txt; git commit -qm busy; sleep 0.4; done",
+    );
+    d = startDispatcher(fx, [
+      "--auto",
+      "--no-review",
+      "-y",
+      "--interval",
+      "1",
+      "40",
+    ]);
+    await d.until(WAITING);
+    sh(fx.wt(44), "./scripts/db-lock.sh release");
+    await d.until("DB lock free");
+    const rounds = () => d?.output().match(/\[round \d+\]/g)?.length ?? 0;
+    const seen = rounds();
+    await waitFor("four more rounds", () => rounds() >= seen + 4);
+
+    expect(d.output()).not.toContain("ending its session");
+    expect(idling()).toBe(true);
+  }, 60_000);
+
+  it("without --auto, says once that the lock is free and leaves the session alone", async () => {
+    const fx = waiting("while :; do sleep 1; done");
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40"]);
+    await waitFor("the refused claim", () =>
+      existsSync(join(fx.wt(40), ".slice-lock-wait")),
+    );
+    sh(fx.wt(44), "./scripts/db-lock.sh release");
+    const TOLD =
+      "#40 waits on the DB lock, which is free now — tell its session to go on, or end it and it is started again";
+    await d.until(TOLD);
+    const rounds = () => d?.output().match(/\[round \d+\]/g)?.length ?? 0;
+    const seen = rounds();
+    await waitFor("four more rounds", () => rounds() >= seen + 4);
+
+    expect(d.output().split(TOLD).length - 1).toBe(1);
+    expect(d.output()).not.toContain("ending its session");
+    expect(idling()).toBe(true);
+  }, 60_000);
+});
+
+/**
  * Someone fixing a slice by hand while the dispatcher runs. Its land used to
  * start a rebase of its own when the base had moved, fail on theirs, and
  * `git rebase --abort` it, resolution and all.

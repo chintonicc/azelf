@@ -883,11 +883,26 @@ Only one worktree may hold changes to these at a time, and the lock is a claim,
 not an inference: a slice runs `db-lock.sh claim` before it touches them, an atomic
 `mkdir` in the shared git dir that exactly one claimer wins. `session-commit.sh`
 refuses a commit under those paths without the claim, `slice-land.sh` releases it
-once the change is on the base branch, and a slice refused at `claim` exits and is
-parked by the dispatcher until the lock frees. The only override is the operator's,
+once the change is on the base branch, and a slice refused at `claim` ends its turn and
+is parked by the dispatcher until the lock frees. The only override is the operator's,
 `db-lock.sh transfer <ticket> --reason "…"` from the main checkout, and it is logged
 in `.git/azelf-db.log`. A worktree found dirty under those paths with no claim is
 named as having skipped the protocol.
+
+**A slice refused at `claim` is started again when the lock frees.** It commits what
+needs no lock and ends its turn. An agent in a REPL cannot end its own process, so its
+session stays open, and on consumer-a one waited twelve hours on a lock that had been
+free since the evening. Under `--auto` the dispatcher now ends that session itself,
+once the lock is free and the worktree has not changed for two rounds:
+
+```
+  #129: the DB lock is free — ending its session, which has waited on it since 15:09, to start it again
+    ended the agent in that tab — the session exits and the tab closes.
+```
+
+The tab closes, and the next round starts the slice again in the same worktree, told
+to continue from its commits. Without `--auto` a person reads that tab, so the
+dispatcher only says, once, that the lock it waits on is free.
 
 The claim makes the collision safe; a label keeps it from being scheduled at all.
 

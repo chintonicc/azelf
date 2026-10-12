@@ -44,9 +44,9 @@ function setup(): Consumer {
   return fx;
 }
 
-function startSession(c: Consumer): Session {
+function startSession(c: Consumer, flags = ["--self-land"]): Session {
   let out = "";
-  const child = spawn("./scripts/slice-session.sh", ["40", "--self-land"], {
+  const child = spawn("./scripts/slice-session.sh", ["40", ...flags], {
     cwd: c.main,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -134,6 +134,38 @@ describe("a landed --auto slice's session ends, so its tab closes", () => {
     expect(code).toBe(128 + 15);
     expect(s.output()).not.toContain("closing this tab");
     expect(existsSync(c.wt(40))).toBe(true);
+  }, 60_000);
+
+  it("an agent ended while it waits on the DB lock closes the tab — the dispatcher starts it again", async () => {
+    const c = setup();
+    const s = startSession(c);
+    await until(
+      "the agent",
+      () => existsSync(join(c.wt(40), ".slice-live")) && agentRunning(),
+    );
+    // What a refused `db-lock.sh claim` leaves.
+    writeFileSync(join(c.wt(40), ".slice-lock-wait"), "ticket/44\n");
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    expect(await s.exited).toBe(86);
+    expect(s.output()).toContain(
+      "── waiting on the DB lock — closing this tab; the dispatcher starts it again when the lock is free ─",
+    );
+    expect(existsSync(join(c.wt(40), ".slice-live"))).toBe(false);
+  }, 60_000);
+
+  it("without --self-land a lock wait keeps the tab, and the agent's status", async () => {
+    const c = setup();
+    const s = startSession(c, []);
+    await until(
+      "the agent",
+      () => existsSync(join(c.wt(40), ".slice-live")) && agentRunning(),
+    );
+    writeFileSync(join(c.wt(40), ".slice-lock-wait"), "ticket/44\n");
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    expect(await s.exited).toBe(128 + 15);
+    expect(s.output()).not.toContain("closing this tab");
   }, 60_000);
 
   it("a session that never declared done is not ended, even with the flag", async () => {

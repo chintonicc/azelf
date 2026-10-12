@@ -659,4 +659,12 @@ if $self_land && [[ ! -d "$worktree_path" ]]; then
   echo "── worktree was landed and removed — closing this tab ─"
   exit 86
 fi
+# The third way a self-landing session is over: it was refused the DB lock and
+# the dispatcher, once the lock freed, ended its agent to start it again. That
+# agent exits on a signal too, and kept as a crash, every lock wait would leave
+# a dead tab behind the session that replaced it.
+if $self_land && [[ -f "$worktree_path/.slice-lock-wait" ]]; then
+  echo "── waiting on the DB lock — closing this tab; the dispatcher starts it again when the lock is free ─"
+  exit 86
+fi
 exit $agent_status

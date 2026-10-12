@@ -67,6 +67,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   statfsSync,
   symlinkSync,
   writeFileSync,
@@ -1066,6 +1067,110 @@ const LOCK_WAIT_MARKER = ".slice-lock-wait";
 const isWaitingOnLock = (n: TicketId) =>
   existsSync(join(worktreeFor(n), LOCK_WAIT_MARKER));
 const lockEnabled = config.exclusiveLockPaths.length > 0;
+
+/**
+ * A slice refused the lock is told to end its turn, and an agent in a REPL
+ * cannot do more than that: its process stays, so `.slice-live` names a live
+ * session, `occupied` is true, and `runnable` never relaunches it. On
+ * consumer-a one waited twelve hours on a lock that had been free since the
+ * evening. So, with the lock free, a session that waits on it and whose
+ * worktree has not changed for `LOCK_WAIT_QUIET` rounds is ended under
+ * --auto, and started again by the ordinary relaunch; without --auto a
+ * person reads that tab, and is told once.
+ *
+ * Per ticket: what its HEAD and `git status` were, and for how many rounds in
+ * a row. Quiet, because an agent still committing its part that needed no
+ * lock must not be cut off.
+ */
+const LOCK_WAIT_QUIET = 2;
+const lockWaitSeen = new Map<TicketId, { state: string; rounds: number }>();
+/** Told once per ticket that the lock it waits on is free (without --auto). */
+const lockWaitTold = new Set<TicketId>();
+
+/**
+ * The agent under a session, ended the way `slice-land.sh`'s
+ * `end_agent_under` ends it: TERM to the session shell's children, KILL after
+ * five seconds, never the shell itself, whose trap clears `.slice-live` and
+ * which closes its tab with exit 86 under --self-land.
+ */
+function endAgentUnder(pid: number): boolean {
+  const kids = () => run(["pgrep", "-P", String(pid)], { allowFail: true }).ok;
+  const wait = (ms: number) =>
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  run(["pkill", "-TERM", "-P", String(pid)], { allowFail: true });
+  for (let waited = 0; kids() && waited < 10; waited += 1) wait(500);
+  if (kids()) {
+    run(["pkill", "-KILL", "-P", String(pid)], { allowFail: true });
+    wait(500);
+  }
+  return !kids();
+}
+
+/**
+ * Sessions waiting on a lock that is free now: ended once quiet under
+ * --auto, named once otherwise. Called each round with that round's reading
+ * of the holder.
+ */
+function wakeLockWaiters(tickets: Ticket[], holder: string): void {
+  if (!lockEnabled) return;
+  const waiting =
+    holder === ""
+      ? tickets.filter(
+          (t) => t.open && isWaitingOnLock(t.id) && hasSession(t.id),
+        )
+      : [];
+  const ids = new Set(waiting.map((t) => t.id));
+  for (const id of lockWaitSeen.keys()) {
+    if (!ids.has(id)) lockWaitSeen.delete(id);
+  }
+  for (const id of lockWaitTold) {
+    if (!ids.has(id)) lockWaitTold.delete(id);
+  }
+  for (const t of waiting) {
+    if (!autoLand) {
+      if (lockWaitTold.has(t.id)) continue;
+      lockWaitTold.add(t.id);
+      console.log(
+        `  ${ref(
+          t.id,
+        )} waits on the DB lock, which is free now — tell its session to go on, or end it and it is started again`,
+      );
+      continue;
+    }
+    const wt = worktreeFor(t.id);
+    const state = [
+      run(["git", "rev-parse", "HEAD"], { cwd: wt, allowFail: true }).out,
+      run(["git", "status", "--porcelain"], { cwd: wt, allowFail: true }).out,
+    ].join("\n");
+    const before = lockWaitSeen.get(t.id);
+    const rounds = before?.state === state ? before.rounds + 1 : 0;
+    lockWaitSeen.set(t.id, { state, rounds });
+    if (rounds < LOCK_WAIT_QUIET) continue;
+    const pid = liveSession(t.id);
+    if (pid === null) continue;
+    lockWaitSeen.delete(t.id);
+    let since = "";
+    try {
+      const at = statSync(join(wt, LOCK_WAIT_MARKER)).mtime;
+      since = `, which has waited on it since ${String(at.getHours()).padStart(
+        2,
+        "0",
+      )}:${String(at.getMinutes()).padStart(2, "0")}`;
+    } catch {
+      // Gone since it was read: the session claimed the lock after all.
+    }
+    console.log(
+      `  ${ref(
+        t.id,
+      )}: the DB lock is free — ending its session${since}, to start it again`,
+    );
+    console.log(
+      endAgentUnder(pid)
+        ? "    ended the agent in that tab — the session exits and the tab closes."
+        : `    could not end the agent under pid ${pid} — close that tab yourself.`,
+    );
+  }
+}
 
 /** When we launched a ticket, so a slow start isn't launched twice. */
 const launchedAt = new Map<TicketId, number>();
@@ -4945,6 +5050,7 @@ try {
       console.log(`\n[round ${round}] DB lock free`);
       lastLockBlock = "";
     }
+    wakeLockWaiters(tickets, holder);
 
     const up = tickets.filter((t) => t.open && occupied(t.id));
     const free = maxParallel - up.length;

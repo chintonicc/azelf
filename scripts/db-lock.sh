@@ -133,8 +133,9 @@ refuse_claim() {
   echo "error: DB lock refused for $this_branch — held by:" >&2
   printf '%s\n' "$_holder" | indent >&2
   echo "       Do not touch $lock_paths, and do not poll for this to clear. Commit what" >&2
-  echo "       you have outside those paths, say who holds the lock, and exit; the" >&2
-  echo "       dispatcher starts you again when it is free." >&2
+  echo "       you have outside those paths, say who holds the lock, and end your turn." >&2
+  echo "       Do not wait for it in the session: the dispatcher ends this session once" >&2
+  echo "       the lock is free and starts you again." >&2
   if [[ "$this_ticket" != "-" ]]; then
     echo "       If you and the holder are both mid-migration, the operator can order" >&2
     echo "       you from the main checkout: $me transfer $this_ticket --reason \"…\"" >&2

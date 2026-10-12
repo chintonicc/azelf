@@ -33,10 +33,11 @@ as every other slice running right now.
 ```
 
 If it is refused, do not touch the database and do not poll. Commit what you have
-outside those paths, say in your final message who holds the lock, and exit. The
-dispatcher starts you again when it is free. If it is granted, hold it: landing
-releases it. Applying a migration you have not claimed the lock for is the one thing
-in this worktree that cannot be undone.
+outside those paths, say in your final message who holds the lock, and end your turn.
+Do not wait for the lock in the session. Under `--auto` the dispatcher ends this
+session once the lock is free and starts a new one, which continues from your
+commits. If it is granted, hold it: landing releases it. Applying a migration you have
+not claimed the lock for is the one thing in this worktree that cannot be undone.
 
 `session-commit.sh` checks the claim on every commit that touches those paths, and
 has no override. If you and the holder are both mid-migration, that is the operator's
@@ -102,7 +103,8 @@ failing, and exit.
 
 The same if you are blocked on the DB lock: leave the worktree clean of changes
 under `exclusiveLockPaths` if you can (`git stash push -- <those paths>` is fine),
-otherwise leave it and say so. Do not wait in the session for the lock to clear.
+otherwise leave it and say so, and end your turn. Do not wait in the session for the
+lock to clear.
 
 A stranded worktree costs a directory and five seconds to clean up. A bad land costs
 the base branch everyone else is cutting from. That trade is the reason declaring
