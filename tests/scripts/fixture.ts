@@ -136,6 +136,8 @@ export function makeConsumer(opts: {
   gate?: string[];
   /** The gate's `retries`. */
   gateRetries?: number;
+  /** The gate's `when`, written as given: a bad value is for the config check. */
+  gateWhen?: unknown;
   /** What the fake tracker answers for every ticket, or by id. */
   title?: string;
   titles?: Record<string, string>;
@@ -302,11 +304,10 @@ export default {
   provisionCopy: [],
   gates: ${
     opts.gate
-      ? `[exitCode(${JSON.stringify(opts.gate)}${
-          opts.gateRetries === undefined
-            ? ""
-            : `, { retries: ${opts.gateRetries} }`
-        })]`
+      ? `[exitCode(${JSON.stringify(opts.gate)}, ${JSON.stringify({
+          retries: opts.gateRetries,
+          when: opts.gateWhen,
+        })})]`
       : "[]"
   },
   startPrompt: "x",${agent}${launcher}${

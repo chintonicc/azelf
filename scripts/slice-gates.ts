@@ -44,6 +44,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { ignores } from "./slice-overlap";
 
 // ─── the seam ─────────────────────────────────────────────────────────────
 
@@ -89,6 +90,8 @@ export type Gate = {
    * failure counts. 0 when absent. See `runGates` for why it is per gate.
    */
   retries?: number;
+  /** The paths it judges; it runs only when the diff touches one. See `gateApplies`. */
+  when?: string[];
 };
 
 /** What every gate shape takes besides its command. */
@@ -97,6 +100,14 @@ export type GateOptions = {
   hint?: string;
   /** Re-runs after a failure, for a gate that is flaky under load. Default 0. */
   retries?: number;
+  /**
+   * Path patterns, as `ignores()` in slice-overlap.ts reads them: `*` within a
+   * directory, `**` across them, a trailing `/` for a directory's contents.
+   * The gate runs only for a slice that changes a file matching one of them,
+   * and runs always without it. For a check that is expensive and judges one
+   * part of the tree: a native build, `["ios/**", "android/**"]`.
+   */
+  when?: string[];
 };
 
 // ─── the three shapes ─────────────────────────────────────────────────────
@@ -122,6 +133,7 @@ export function exitCode(cmd: string[], opts: GateOptions = {}): Gate {
   return {
     name,
     retries: opts.retries,
+    when: opts.when,
     run(ctx) {
       const { ok, out } = ctx.exec(cmd, ctx.worktree);
       if (ok) return { ok: true };
@@ -148,6 +160,7 @@ export function exitCodeOverFiles(cmd: string[], opts: GateOptions = {}): Gate {
   return {
     name,
     retries: opts.retries,
+    when: opts.when,
     run(ctx) {
       const files = ctx.changedFiles.filter((f) =>
         existsSync(join(ctx.worktree, f)),
@@ -243,6 +256,7 @@ export function baselineDiff(opts: BaselineDiffOptions): Gate {
   return {
     name,
     retries: opts.retries,
+    when: opts.when,
     run(ctx) {
       const baseline = errorsIn(ctx, ctx.baselineDir);
       const candidate = errorsIn(ctx, ctx.worktree);
@@ -291,8 +305,21 @@ const unreadable = (worktree: string): GateResult => ({
 /** A gate that failed and then passed: `retry` is the run that passed, 1-based. */
 export type Flaky = { gate: string; retry: number };
 
-/** What `runGates` answers: the verdict, and which gates passed only on a retry. */
-export type GatesResult = GateResult & { flaky: Flaky[] };
+/**
+ * What `runGates` answers: the verdict, which gates passed only on a retry,
+ * and which were skipped because the diff touches none of their paths.
+ */
+export type GatesResult = GateResult & { flaky: Flaky[]; skipped: string[] };
+
+/**
+ * Whether `gate` judges a diff that changed `changedFiles`: always without
+ * `when`, and otherwise when one file matches one of its patterns. A deleted
+ * file counts — removing a native source is a change to the native build.
+ */
+export function gateApplies(gate: Gate, changedFiles: string[]): boolean {
+  if (!gate.when) return true;
+  return changedFiles.some(ignores(gate.when));
+}
 
 /**
  * Run the gates in order and stop at the first failure.
@@ -310,31 +337,43 @@ export type GatesResult = GateResult & { flaky: Flaky[] };
  * 5-second test timeout parked three green slices that never touched the code
  * under test. A pass on a retry is still a pass, and is reported in `flaky`
  * so that it is seen, not buried.
+ *
+ * A gate whose `when` matches none of `ctx.changedFiles` is not run, and is
+ * named in `skipped`. Skipped is not passed: the caller says which is which.
  */
 export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
   const flaky: Flaky[] = [];
+  const skipped: string[] = [];
   const before = dirtyPaths(ctx);
-  if (before === null) return { ...unreadable(ctx.worktree), flaky };
+  if (before === null) return { ...unreadable(ctx.worktree), flaky, skipped };
   if (before.length) {
     return {
       ok: false,
       why: "worktree is dirty before any gate ran — commit or revert first",
       detail: before,
       flaky,
+      skipped,
     };
   }
   for (const gate of gates) {
+    if (!gateApplies(gate, ctx.changedFiles)) {
+      skipped.push(gate.name);
+      continue;
+    }
     const retries = Math.max(0, Math.floor(gate.retries ?? 0));
     for (let attempt = 0; ; attempt++) {
       const result = gate.run(ctx);
       const after = dirtyPaths(ctx);
-      if (after === null) return { ...unreadable(ctx.worktree), flaky };
+      if (after === null) {
+        return { ...unreadable(ctx.worktree), flaky, skipped };
+      }
       if (after.length) {
         return {
           ok: false,
           why: `gate \`${gate.name}\` modified the worktree — gates must be read-only (scripts/slice-gates.ts). Revert it, then fix the gate.`,
           detail: after,
           flaky,
+          skipped,
         };
       }
       if (result.ok) {
@@ -350,9 +389,10 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
               }`
             : result.why,
           flaky,
+          skipped,
         };
       }
     }
   }
-  return { ok: true, flaky };
+  return { ok: true, flaky, skipped };
 }

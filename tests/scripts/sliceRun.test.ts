@@ -3194,6 +3194,93 @@ describe("the base branch ahead of origin", () => {
   });
 });
 
+/**
+ * A gate with `when` runs only for a slice that touches one of its paths. The
+ * gate here always fails, so a land proves it was skipped and a park that it
+ * ran.
+ */
+describe("a gate scoped by path", () => {
+  const scoped = (file: string, review?: string[]): Consumer => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: ["false"],
+      gateWhen: ["ios/**"],
+      review,
+    });
+    mkdirSync(join(fx.wt(40), "ios", "App"), { recursive: true });
+    commitIn(fx.wt(40), file, "x\n", "feat: x");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+
+  it("runs for a slice that touches its paths, and a red one parks it", () => {
+    c = scoped("ios/App/x.swift");
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain("running 1 gate(s) for #40");
+    expect(r.out).not.toContain("skipped `false`");
+    expect(r.out).toContain("the gates are red");
+    expect(r.out).not.toContain("landing #40");
+  });
+
+  it("is skipped, and said to be, for a slice that touches none of them", () => {
+    c = scoped("a.txt");
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      "  skipped `false` — #40 touches none of ios/**\n  running 0 gate(s) for #40",
+    );
+    expect(r.out).toContain("landing #40");
+    expect(git(c.main, "log", "--format=%s", "-1")).toBe("feat: x");
+  });
+
+  it("azelf run --gates prints the same line", () => {
+    c = scoped("a.txt");
+    const r = runDispatcher(c, ["--gates", "40"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("skipped `false` — #40 touches none of ios/**");
+    expect(r.out).toContain("✓ #40 passes every gate");
+  });
+
+  it("tells the reviews it was skipped, not that it passed", () => {
+    c = scoped("a.txt", [
+      "bash",
+      "-c",
+      'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+      "reviewer",
+    ]);
+    const r = runDispatcher(c, ["--review", "-y", "--interval", "1", "40"]);
+    expect(r.out).toContain("landing #40");
+
+    const prompts = readFileSync(join(c.root, "prompts"), "utf8").split(
+      "\n=====\n",
+    );
+    const said =
+      "No gate ran on this diff. Not run, because the diff touches none of the paths they judge: `false` (ios/**). Do not run tests";
+    expect(prompts.find((p) => p.includes("faithfully implement"))).toContain(
+      said,
+    );
+    expect(prompts.find((p) => p.includes("coding standards"))).toContain(said);
+    expect(prompts.join("")).not.toContain("The gates (`false`) ran");
+  });
+
+  it("the config refuses an empty when, and a bare string", () => {
+    for (const gateWhen of [[], "ios/**"]) {
+      c = makeConsumer({ gate: ["true"], gateWhen });
+      const r = runDispatcher(c, ["--plan"]);
+
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain(
+        'gates[0] (`true`): when must be a non-empty array of path patterns, like ["ios/**"]',
+      );
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("a named ticket without the ready label", () => {
   it("is prepped, not refused for the label", () => {
     c = makeConsumer({ remote: true, agent: ["true"] });

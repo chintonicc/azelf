@@ -423,6 +423,21 @@ function validate(c: SliceConfig): SliceConfig {
         `gates[${i}] is not a gate — build it with exitCode, exitCodeOverFiles or baselineDiff from scripts/slice-gates.ts`,
       );
     }
+    // An empty list would skip the gate for every slice, and a bare string
+    // would be read character by character: both say "never run" by accident.
+    const when: unknown = g.when;
+    if (
+      when !== undefined &&
+      !(
+        Array.isArray(when) &&
+        when.length > 0 &&
+        when.every((p) => typeof p === "string" && p !== "")
+      )
+    ) {
+      bad(
+        `gates[${i}] (\`${g.name}\`): when must be a non-empty array of path patterns, like ["ios/**"]`,
+      );
+    }
   }
   // Deliberately NOT rejected: `gates: []`. It means "land whatever is
   // committed", which is a legitimate choice for a repo with no toolchain, and

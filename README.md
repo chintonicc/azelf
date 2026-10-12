@@ -501,6 +501,32 @@ that passes on a retry still lands, but it is not hidden: the dispatcher prints
 ``⚠ `bun run test` failed, then passed on retry 1 — flaky under load`` on the spot,
 and the end of the run lists every slice that landed that way.
 
+Every shape also takes `when`, a list of path patterns. The gate runs only for a
+slice whose diff changes a file that matches one of them, and always without it.
+That is for a check that is expensive and judges one part of the tree, like a
+native module's build:
+
+```ts
+exitCode(["bun", "run", "test:native"], {
+  when: ["ios/**", "scripts/encode-verify.swift"],
+})
+```
+
+The patterns read as they do for the overlap report: `*` within a directory, `**`
+across them, and a trailing `/` for everything under a directory. A deleted file
+counts as changed. A slice that touches none of them skips the gate, and says so:
+
+```
+  skipped `bun run test:native` — #142 touches none of ios/**, scripts/encode-verify.swift
+  running 2 gate(s) for #142 (3 files) …
+```
+
+`azelf run --gates` prints the same line. The reviews are told which gates ran and
+passed and, separately, which were skipped, so a skipped build is never read as a
+passed one. A scoped gate that does run holds the
+[gate lock](#two-dispatchers-on-one-repo) while it runs, like any gate. The config
+refuses `when: []` and a bare string: both would skip the gate for every slice.
+
 ### Tracker
 
 ```ts

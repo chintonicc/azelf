@@ -91,7 +91,7 @@ import {
 // The gates themselves are in slice.config.ts too, as three shapes from
 // slice-gates.ts; this file only runs them. See that file for the read-only
 // contract every gate is held to.
-import { type Flaky, runGates } from "./slice-gates";
+import { type Flaky, type Gate, gateApplies, runGates } from "./slice-gates";
 // Worktrees held for work by hand, which nothing here lands, relaunches or
 // rebases; see noteHolds.
 import {
@@ -1782,14 +1782,28 @@ function parentSpec(id: TicketId): { text: string | null; note?: string } {
  * suite, was refused, and reported "the test results are unconfirmed" on a
  * slice whose gates had passed minutes before. The review always comes after
  * the gates (`tryLand`), so this is true whenever it is said.
+ *
+ * `gates` is what `gatesPass` recorded for the slice. A gate scoped by `when`
+ * to paths the diff does not touch did not run, and is named as skipped: a
+ * review told it passed would take a native build as checked when nothing
+ * built it. Without a record every configured gate is named, as before.
  */
-function alreadyRan(): string {
-  const names = config.gates.map((g) => `\`${g.name}\``).join(", ");
+function alreadyRan(gates?: GateRun): string {
+  const ran = gates?.ran ?? config.gates.map((g) => g.name);
+  const skipped = gates?.skipped ?? [];
+  const names = ran.map((g) => `\`${g}\``).join(", ");
+  const notRun = skipped.length
+    ? ` Not run, because the diff touches none of the paths they judge: ${skipped
+        .map((g) => `\`${g.name}\` (${(g.when ?? []).join(", ")})`)
+        .join(", ")}.`
+    : "";
   return `${
     names
       ? `The gates (${names}) ran on this exact diff, rebased onto ${baseBranch}, and passed.`
-      : "This repository configures no gates, so nothing ran on this diff before you."
-  } Do not run tests, builds, git or gh: you will not be allowed to, and you don't need to. You can read the files in your working directory, which is the slice's worktree.`;
+      : skipped.length
+        ? "No gate ran on this diff."
+        : "This repository configures no gates, so nothing ran on this diff before you."
+  }${notRun} Do not run tests, builds, git or gh: you will not be allowed to, and you don't need to. You can read the files in your working directory, which is the slice's worktree.`;
 }
 
 /** `git diff` for a range, capped so an enormous branch can't blow the prompt. */
@@ -1890,6 +1904,7 @@ function reviewStandards(
   commits: string,
   diff: string,
   cwd: string,
+  gates?: GateRun,
 ): string {
   return (
     askAgent(
@@ -1900,7 +1915,7 @@ Read CLAUDE.md and any standards docs in the repo for the documented rules — a
 Generic smell baseline (Fowler ch.3), each a labelled judgement call, never a hard violation:
 ${SMELLS}
 
-Skip anything tooling already enforces. ${alreadyRan()}
+Skip anything tooling already enforces. ${alreadyRan(gates)}
 
 Report per file/hunk: documented-standard breaches (cite the rule) and baseline smells (name it, quote the hunk). Distinguish the two. Be concrete; no praise, no summary of what the code does. Under 400 words. If nothing is worth raising, say exactly: "No standards findings."
 
@@ -1928,6 +1943,8 @@ type SpecContext = {
   landed?: string | null;
   /** The slice's new tests, run against the base: see `testsOnBase`. */
   testsOnBase?: string | null;
+  /** Which gates ran on the slice and which were skipped: see `alreadyRan`. */
+  gates?: GateRun;
 };
 
 /**
@@ -2006,7 +2023,7 @@ The SPEC is what this slice must do. The PARENT SPEC is the larger spec it is on
         : ""
     }
 
-${alreadyRan()}
+${alreadyRan(context.gates)}
 
 SPEC:
 ${spec}
@@ -2414,13 +2431,20 @@ function reviewSlice(t: Ticket): string | null {
       parent: parent.text,
       landed: landedUnder(t.id),
       testsOnBase: onBase?.section,
+      gates: gateRuns.get(t.id),
     },
   );
   if (parent.note) spec.report = `${parent.note}\n\n${spec.report}`;
   if (onBase && !onBase.section) {
     spec.report = `(new tests on base: ${onBase.line})\n\n${spec.report}`;
   }
-  const standards = reviewStandards(scope, commits, diff, wt);
+  const standards = reviewStandards(
+    scope,
+    commits,
+    diff,
+    wt,
+    gateRuns.get(t.id),
+  );
 
   const heading = `# Review — ${ref(t.id)} ${t.title}`;
   const body = `### Spec\n\n${spec.report}\n\n### Standards\n\n${standards}\n`;
@@ -2656,6 +2680,11 @@ const gatesLock = () => {
 const flakyGates = new Map<TicketId, Flaky[]>();
 const landedOnRetry = new Map<TicketId, Flaky[]>();
 
+/** The gates that ran on a slice and passed, and those its diff did not reach. */
+type GateRun = { ran: string[]; skipped: Gate[] };
+/** Set by `gatesPass` when it passes; read by the reviews through `alreadyRan`. */
+const gateRuns = new Map<TicketId, GateRun>();
+
 /**
  * Re-run the quality gates against a finished slice, in its own worktree,
  * before landing it.
@@ -2675,6 +2704,7 @@ const landedOnRetry = new Map<TicketId, Flaky[]>();
  */
 function gatesPass(n: TicketId): boolean {
   flakyGates.delete(n);
+  gateRuns.delete(n);
   const wt = worktreeFor(n);
   const fail = (why: string) => {
     console.log(`  ✗ ${ref(n)} not landed — ${why}`);
@@ -2701,8 +2731,20 @@ function gatesPass(n: TicketId): boolean {
     .filter(Boolean);
   if (changed.length === 0) return fail("nothing to land");
 
+  // A gate scoped by `when` to paths this slice does not touch is skipped,
+  // and said to be, so a green land is never read as "the native build ran".
+  // runGates makes the same decision; it is printed here, before the wait for
+  // the gate lock, so the count below is the gates that will run.
+  const skipped = config.gates.filter((g) => !gateApplies(g, changed));
+  for (const g of skipped) {
+    console.log(
+      `  skipped \`${g.name}\` — ${ref(n)} touches none of ${(
+        g.when ?? []
+      ).join(", ")}`,
+    );
+  }
   console.log(
-    `  running ${config.gates.length} gate(s) for ${ref(n)} (${
+    `  running ${config.gates.length - skipped.length} gate(s) for ${ref(n)} (${
       changed.length
     } files) …`,
   );
@@ -2750,6 +2792,10 @@ function gatesPass(n: TicketId): boolean {
   }
   if (result.ok) {
     if (result.flaky.length) flakyGates.set(n, result.flaky);
+    gateRuns.set(n, {
+      ran: config.gates.filter((g) => !skipped.includes(g)).map((g) => g.name),
+      skipped,
+    });
     return true;
   }
 

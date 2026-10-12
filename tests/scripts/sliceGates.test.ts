@@ -7,6 +7,7 @@ import {
   baselineDiff,
   exitCode,
   exitCodeOverFiles,
+  gateApplies,
   multisetDifference,
   runGates,
 } from "@/scripts/slice-gates";
@@ -260,7 +261,7 @@ describe("runGates", () => {
   it("runs every gate in order and passes when all do", () => {
     const { exec, calls } = fakeExec({ git: clean });
     const r = runGates([exitCode(["one"]), exitCode(["two"])], ctxWith(exec));
-    expect(r).toEqual({ ok: true, flaky: [] });
+    expect(r).toEqual({ ok: true, flaky: [], skipped: [] });
     expect(calls.map((c) => c.cmd[0])).toEqual([
       "git",
       "one",
@@ -321,6 +322,72 @@ describe("runGates", () => {
 });
 
 /**
+ * `when`: a gate that judges one part of the tree runs only for a diff that
+ * touches it. A native build is minutes; a slice that changed a locale file
+ * should not wait for it, and should not be told it passed.
+ */
+describe("runGates with when", () => {
+  const clean = { ok: true, out: "" };
+  const native = exitCode(["native"], { when: ["ios/**", "scripts/*.swift"] });
+
+  it("skips a gate whose paths the diff does not touch, and names it", () => {
+    const { exec, calls } = fakeExec({ git: clean });
+    const r = runGates(
+      [exitCode(["test"]), native],
+      ctxWith(exec, ["lib/a.ts", "ios.md"]),
+    );
+    expect(r).toEqual({ ok: true, flaky: [], skipped: ["native"] });
+    expect(calls.some((c) => c.cmd[0] === "native")).toBe(false);
+  });
+
+  it("runs it when one changed file matches", () => {
+    const { exec, calls } = fakeExec({
+      git: clean,
+      native: { ok: false, out: "build failed" },
+    });
+    const r = runGates(
+      [native],
+      ctxWith(exec, ["lib/a.ts", "ios/App/x.swift"]),
+    );
+    expect(r.ok).toBe(false);
+    expect(r.skipped).toEqual([]);
+    expect(calls.some((c) => c.cmd[0] === "native")).toBe(true);
+  });
+
+  it("`**` crosses directories and `*` stays in one", () => {
+    expect(gateApplies(native, ["ios/a/b/c/x.swift"])).toBe(true);
+    expect(gateApplies(native, ["scripts/encode.swift"])).toBe(true);
+    expect(gateApplies(native, ["scripts/tools/encode.swift"])).toBe(false);
+    expect(gateApplies(native, ["src/ios/x.swift"])).toBe(false);
+  });
+
+  it("a gate without when always runs, on every shape", () => {
+    expect(gateApplies(exitCode(["test"]), [])).toBe(true);
+    expect(gateApplies(exitCode(["test"]), ["anything"])).toBe(true);
+    const shapes = [
+      exitCodeOverFiles(["lint"], { when: ["ios/"] }),
+      baselineDiff({
+        cmd: ["tsc"],
+        errorMatch: /error/,
+        normalize: (l) => l,
+        when: ["ios/"],
+      }),
+    ];
+    for (const g of shapes) {
+      expect(g.when).toEqual(["ios/"]);
+      expect(gateApplies(g, ["ios/x.swift"])).toBe(true);
+      expect(gateApplies(g, ["lib/x.ts"])).toBe(false);
+    }
+  });
+
+  it("still checks the worktree is clean when every gate is skipped", () => {
+    const { exec } = fakeExec({ git: { ok: true, out: " M lib/a.ts" } });
+    const r = runGates([native], ctxWith(exec));
+    expect(r.ok).toBe(false);
+  });
+});
+
+/**
  * `retries`: a gate that is flaky under a wave's load may be re-run, and a
  * pass on a retry is reported rather than buried. Off by default, because
  * re-running a deterministic gate only doubles what a real failure costs.
@@ -344,7 +411,11 @@ describe("runGates with retries", () => {
   it("passes a gate that failed once and passed on its retry, and names it flaky", () => {
     const { exec, calls } = flakyTest(1);
     const r = runGates([exitCode(["test"], { retries: 1 })], ctxWith(exec));
-    expect(r).toEqual({ ok: true, flaky: [{ gate: "test", retry: 1 }] });
+    expect(r).toEqual({
+      ok: true,
+      flaky: [{ gate: "test", retry: 1 }],
+      skipped: [],
+    });
     expect(calls()).toBe(2);
   });
 
@@ -374,7 +445,11 @@ describe("runGates with retries", () => {
       [exitCode(["test"], { retries: 3 }), exitCodeOverFiles(["lint"])],
       ctxWith(exec, []),
     );
-    expect(r).toEqual({ ok: true, flaky: [{ gate: "test", retry: 2 }] });
+    expect(r).toEqual({
+      ok: true,
+      flaky: [{ gate: "test", retry: 2 }],
+      skipped: [],
+    });
     expect(calls()).toBe(3);
   });
 
