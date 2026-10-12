@@ -1,6 +1,6 @@
 # A review that cannot kill the run, a lock wait that ends, blockers read from the list, and gates scoped by path
 
-**Status:** IN PROGRESS (Phases 1–2 landed) · **Written:** 2026-10-10
+**Status:** IN PROGRESS (Phases 1–3 landed) · **Written:** 2026-10-10
 **Companion:** consumer-a's friction log: the four entries still open after
 `docs/ownership-plan.md`, two dated 2026-10-08 and two dated 2026-10-09. Every other
 entry is covered by a complete plan.
@@ -188,15 +188,15 @@ Proof: "a session waiting on a lock that frees" (three tests) in `sliceRun.test.
 and two lock-wait tests in `sliceSessionClose.test.ts`. On the old code the relaunch
 test and the exit-86 test fail. Full suite 480/480.
 
-## Phase 3 — a `## Blocked by` list is read as a list
+## Phase 3 — a `## Blocked by` list is read as a list (57db23e)
 
-- [ ] **3a. List items only, when there are any.** In `blockersFromBody`
+- [x] **3a. List items only, when there are any.** In `blockersFromBody`
   (`slice-tracker.ts:288`), a section with at least one list item (`- `, `* `, `+ `,
   `1. ` or `1) `, after optional indentation) contributes only the ids in its items.
   A section without one is read whole, as today. An italic line (`*#99 …*`) is not a
   list item: the marker must be followed by a space. The "None" rule and the phrase
   rule are unchanged.
-- [ ] **3b. Quote the line.** The refusal (`slice-run.ts:567`) prints the line the id
+- [x] **3b. Quote the line.** The refusal (`slice-run.ts:567`) prints the line the id
   was read from, under it:
 
   > ✗ #105's body says it is blocked by #99 (open, not in this run). GitHub has no edge.
@@ -213,6 +213,14 @@ test and the exit-86 test fail. Full suite 480/480.
 
   **`sliceRun.test.ts`**: the refusal quotes the list item. The first case reads #99
   on the old code.
+
+**As landed.** `blockerClaims` in `slice-tracker.ts` returns each id with the line it
+was read from; `blockersFromBody` and the new `blockerLine` are both read off it, so
+the quoted line is always the one the id came from. `MissingEdge` carries `readFrom`,
+and the refusal prints `read from: "…"` under each line, cut at 120 characters: a
+phrase can stand in a paragraph that is one long line. The dispatcher test names #83
+in prose under the list; on the old code the plan refused over #83 as well, and no
+line was quoted.
 
 ## Phase 4 — gates scoped by path
 
