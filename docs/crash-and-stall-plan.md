@@ -1,6 +1,6 @@
 # A review that cannot kill the run, a lock wait that ends, blockers read from the list, and gates scoped by path
 
-**Status:** IN PROGRESS (Phases 1–3 landed) · **Written:** 2026-10-10
+**Status:** COMPLETE — all four phases landed · **Written:** 2026-10-10
 **Companion:** consumer-a's friction log: the four entries still open after
 `docs/ownership-plan.md`, two dated 2026-10-08 and two dated 2026-10-09. Every other
 entry is covered by a complete plan.
@@ -222,26 +222,26 @@ phrase can stand in a paragraph that is one long line. The dispatcher test names
 in prose under the list; on the old code the plan refused over #83 as well, and no
 line was quoted.
 
-## Phase 4 — gates scoped by path
+## Phase 4 — gates scoped by path (dba80aa)
 
-- [ ] **4a. `when` on every gate shape.** `GateOptions` (`slice-gates.ts:95`) gains
+- [x] **4a. `when` on every gate shape.** `GateOptions` (`slice-gates.ts:95`) gains
   `when?: string[]`, and `Gate` carries it. `runGates` (`slice-gates.ts:314`) skips a
   gate whose `when` matches none of `ctx.changedFiles`, and `GatesResult` gains
   `skipped: string[]`. The matcher is `ignores()` from `slice-overlap.ts`: `*` within
   a directory, `**` across them, and a trailing `/` for a directory's contents.
   `slice-config.ts` refuses a `when` that is not a non-empty array of strings.
-- [ ] **4b. Say it.** `gatesPass` (`slice-run.ts:2483`) prints one line per skipped
+- [x] **4b. Say it.** `gatesPass` (`slice-run.ts:2483`) prints one line per skipped
   gate:
 
   > skipped `bun run test:native` — #142 touches none of ios/**, scripts/encode-verify.swift
 
   The `running N gate(s)` line counts the gates that will run. `azelf run --gates`
   prints the same lines.
-- [ ] **4c. Tell the reviews.** `alreadyRan` (`slice-run.ts:1631`) takes the slice's
+- [x] **4c. Tell the reviews.** `alreadyRan` (`slice-run.ts:1631`) takes the slice's
   gate result. It names the gates that ran and passed, and separately the gates that
   were skipped because the diff touched none of their paths. Today it names
   `config.gates`, all of them, as having run.
-- [ ] **4d. README.** The gates section documents `when`, with the native-module case
+- [x] **4d. README.** The gates section documents `when`, with the native-module case
   as its example, and says that a scoped gate holds the gate lock while it runs, like
   any gate.
 
@@ -254,6 +254,18 @@ line was quoted.
     - a slice touching only `a.txt` skips it with the line and lands;
     - the review prompt names the skipped gate as skipped, not as passed.
   - The config test refuses `when: []` and `when: "ios/**"`.
+
+**As landed.** `gateApplies(gate, changedFiles)` in `slice-gates.ts` is the one
+decision; `runGates` skips by it and `gatesPass` prints by it, before it waits for the
+gate lock, so the count is the gates that will run. `gatesPass` records what ran and
+what was skipped in `gateRuns`, and `reviewSlice` hands that to both reviews:
+`alreadyRan(gates)` names the passed gates, then "Not run, because the diff touches
+none of the paths they judge: `…` (…)". When every gate is skipped it says "No gate
+ran on this diff." Without a record it names every configured gate, as before. There
+are no config-validation tests in the suite, so the refusal is proven through the
+dispatcher: `--plan` exits non-zero with the message. On the old code every new test
+fails except the one where the scoped gate runs and parks, because there every gate
+always ran.
 
 ## Order and cost
 
