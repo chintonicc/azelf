@@ -1,6 +1,6 @@
 # A review that cannot kill the run, a lock wait that ends, blockers read from the list, and gates scoped by path
 
-**Status:** IN PROGRESS (Phase 1 landed) · **Written:** 2026-10-10
+**Status:** IN PROGRESS (Phases 1–2 landed) · **Written:** 2026-10-10
 **Companion:** consumer-a's friction log: the four entries still open after
 `docs/ownership-plan.md`, two dated 2026-10-08 and two dated 2026-10-09. Every other
 entry is covered by a complete plan.
@@ -129,9 +129,9 @@ Proof: three tests in `sliceRun.test.ts`, "a review that cannot run". All three 
 on `7eef84b`, and the first stops the dispatcher with the `TypeError` from consumer-a.
 README: "A review that could not run says so."
 
-## Phase 2 — a slice waiting on a free lock is ended and started again
+## Phase 2 — a slice waiting on a free lock is ended and started again (0166ccc)
 
-- [ ] **2a. End it under `--auto`.** Each round, when `dbLockHolder()` is empty, check
+- [x] **2a. End it under `--auto`.** Each round, when `dbLockHolder()` is empty, check
   every open ticket that has a live session (`hasSession`) and `.slice-lock-wait`.
   For each one, compare its worktree's HEAD and `git status --porcelain` with what the
   last round saw. When they have stayed the same for two rounds, end the agent under
@@ -143,7 +143,7 @@ README: "A review that could not run says so."
   The session shell exits, its trap clears `.slice-live`, and the next round's
   `runnable` relaunches the ticket like any idle worktree. The launch clears
   `.slice-lock-wait` (`slice-session.sh:517`).
-- [ ] **2b. Close its tab.** In `slice-session.sh`, under `--self-land`, an agent that
+- [x] **2b. Close its tab.** In `slice-session.sh`, under `--self-land`, an agent that
   ended while `.slice-lock-wait` is there closes its tab with exit 86, as a land does
   (`slice-session.sh:654-661`):
 
@@ -151,11 +151,11 @@ README: "A review that could not run says so."
 
   Otherwise every lock wait would leave a dead tab behind the relaunched one, because
   an agent that ended on a signal reads as a crash.
-- [ ] **2c. Say it without `--auto`.** Once per ticket, when the lock frees:
+- [x] **2c. Say it without `--auto`.** Once per ticket, when the lock frees:
 
   > #129 waits on the DB lock, which is free now — tell its session to go on, or end it and it is started again
 
-- [ ] **2d. The contract.** In slice `SKILL.md` §3 and "If the gates will not go
+- [x] **2d. The contract.** In slice `SKILL.md` §3 and "If the gates will not go
   green", and in the refusal text in `db-lock.sh` (`refuse_claim`): commit what you
   have outside those paths, say who holds the lock, and end your turn. Under `--auto`
   the dispatcher ends this session and starts a new one when the lock frees. Do not
@@ -172,6 +172,21 @@ README: "A review that could not run says so."
   - **`sliceSessionClose.test.ts`**: an agent ended by a signal with
     `.slice-lock-wait` present exits 86 under `--self-land` and keeps its exit status
     without it.
+
+**As landed.** `wakeLockWaiters` and `endAgentUnder` in `slice-run.ts`, called each
+round right after the DB lock block. `LOCK_WAIT_QUIET = 2`: the round the lock frees
+records the worktree, and the session is ended two unchanged rounds later. The
+session's pid comes from `liveSession`, so a marker with no pid is never ended. Two
+changes from the plan:
+- The first session in the proof commits its lock-free part before it is refused, as
+  #129 did. The test then checks that this commit is not landed as half a ticket
+  when that session ends, and that the relaunch prompt says to continue from it.
+- The README's `claim` paragraph says "ends its turn" too, and gets its own
+  paragraph on the relaunch.
+
+Proof: "a session waiting on a lock that frees" (three tests) in `sliceRun.test.ts`,
+and two lock-wait tests in `sliceSessionClose.test.ts`. On the old code the relaunch
+test and the exit-86 test fail. Full suite 480/480.
 
 ## Phase 3 — a `## Blocked by` list is read as a list
 
