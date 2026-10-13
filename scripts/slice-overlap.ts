@@ -187,7 +187,12 @@ export function findOverlaps(
     else groups.set(key, { tickets, files: [file] });
   }
 
-  return [...groups.values()]
+  return ordered([...groups.values()]);
+}
+
+/** Files sorted within each group, groups by their ticket list. */
+function ordered(groups: Overlap[]): Overlap[] {
+  return groups
     .map((g) => ({ tickets: g.tickets, files: g.files.sort() }))
     .sort((a, b) => {
       const n = Math.min(a.tickets.length, b.tickets.length);
@@ -200,4 +205,145 @@ export function findOverlaps(
       }
       return a.tickets.length - b.tickets.length;
     });
+}
+
+/*
+ * TWO FILES, ONE NUMBER
+ * ---------------------
+ * The case the file report above cannot see, because the paths differ. A
+ * directory of numbered records — `docs/adr/0014-….md` — gets its next entry
+ * from whoever writes it, and two slices cut from the same base both take the
+ * same "next" number under different names. Both rebases apply cleanly, both
+ * lands go through, and the base branch ends up with two ADR 0015s that the
+ * prose around them cannot tell apart. On consumer-a it was two slices of one
+ * run; the TESTING.md journeys had the same race, and there at least git
+ * stopped on it.
+ *
+ * A numbered file here is one whose name starts with digits and a `-` or `_`.
+ * Not a `.`: `1.png` beside `1.webp` is one image in two formats. Two files
+ * collide when they sit in the same directory under the same number and their
+ * names differ before the first `.` — `0015-x.up.sql` and `0015-x.down.sql`
+ * are one entry in two files, and a migration tool's pair, not a collision.
+ */
+
+/** A numbered file's directory, number, digits as written, and name up to the first `.`. */
+type Numbered = { dir: string; n: number; digits: string; stem: string };
+
+function numbered(file: string): Numbered | null {
+  const slash = file.lastIndexOf("/");
+  const name = file.slice(slash + 1);
+  const m = /^(\d+)[-_]/.exec(name);
+  if (!m) return null;
+  const digits = m[1] as string;
+  const dot = name.indexOf(".");
+  return {
+    dir: file.slice(0, slash + 1),
+    n: Number(digits),
+    digits,
+    stem: dot === -1 ? name : name.slice(0, dot),
+  };
+}
+
+/** A file one slice added under a number its tree already has for another. */
+export type NumberClash = {
+  /** The file the slice added. */
+  file: string;
+  /** What else is under that number in the same directory. */
+  taken: string[];
+  /** The same name under the next free number, padded as the original was. */
+  to: string;
+};
+
+/**
+ * Which of the files a slice ADDED collide with a file it did not add, in
+ * the tree it is about to land — so, after its rebase, with whatever landed
+ * meanwhile. `tree` is every file there, the added ones included; files in
+ * other directories are ignored.
+ *
+ * The new numbers count up from the highest one in the directory, in the
+ * order of the clashing names, and the files of one entry (one stem) share
+ * theirs. An order the slice gave its own records can come out swapped by
+ * that; references to them are rewritten anyway, and a gap-free renumbering
+ * of somebody's records is not this function's to decide.
+ */
+export function numberClashes(
+  added: string[],
+  tree: string[],
+  ignore?: (file: string) => boolean,
+): NumberClash[] {
+  const mine = new Set(added);
+  const highest = new Map<string, number>();
+  for (const f of new Set([...tree, ...added])) {
+    const x = numbered(f);
+    if (x) highest.set(x.dir, Math.max(highest.get(x.dir) ?? 0, x.n));
+  }
+  const given = new Map<string, number>();
+  const clashes: NumberClash[] = [];
+  for (const file of [...mine].sort()) {
+    const x = numbered(file);
+    if (!x || ignore?.(file)) continue;
+    const taken = tree.filter((f) => {
+      if (mine.has(f)) return false;
+      const y = numbered(f);
+      return y?.dir === x.dir && y.n === x.n && y.stem !== x.stem;
+    });
+    if (taken.length === 0) continue;
+    const entry = `${x.dir}${x.stem}`;
+    let n = given.get(entry);
+    if (n === undefined) {
+      n = (highest.get(x.dir) ?? 0) + 1;
+      highest.set(x.dir, n);
+      given.set(entry, n);
+    }
+    const name = file.slice(x.dir.length);
+    clashes.push({
+      file,
+      taken: taken.sort(),
+      to: `${x.dir}${String(n).padStart(x.digits.length, "0")}${name.slice(
+        x.digits.length,
+      )}`,
+    });
+  }
+  return clashes;
+}
+
+/**
+ * Which slices are adding files under the same number in one directory —
+ * the warning half of the above, while they are still open. `added` maps a
+ * ticket to the files it added (landed ones too, kept by the caller); a
+ * group with nobody still open in it is dropped, as in `findOverlaps`.
+ *
+ * A landed slice is never taken out because the open one contains it: an
+ * open slice that holds the landed record and still took its number is the
+ * collision itself, not a rebase it has yet to make.
+ */
+export function findNumberClashes(
+  added: Map<TicketId, string[]>,
+  opts: Pick<FindOverlapsOptions, "open" | "ignore"> = {},
+): Overlap[] {
+  const byNumber = new Map<string, { id: TicketId; file: string }[]>();
+  for (const [id, files] of added) {
+    for (const file of new Set(files)) {
+      const x = numbered(file);
+      if (!x || opts.ignore?.(file)) continue;
+      const key = `${x.dir}\0${x.n}`;
+      const list = byNumber.get(key);
+      if (list) list.push({ id, file });
+      else byNumber.set(key, [{ id, file }]);
+    }
+  }
+
+  const groups = new Map<string, Overlap>();
+  for (const list of byNumber.values()) {
+    const stems = new Set(list.map((h) => numbered(h.file)?.stem));
+    const ids = [...new Set(list.map((h) => h.id))].sort(compareIds);
+    if (stems.size < 2 || ids.length < 2) continue;
+    if (opts.open && !ids.some((id) => opts.open?.has(id))) continue;
+    const key = ids.join(" ");
+    const files = list.map((h) => h.file);
+    const group = groups.get(key);
+    if (group) group.files.push(...files);
+    else groups.set(key, { tickets: ids, files });
+  }
+  return ordered([...groups.values()]);
 }

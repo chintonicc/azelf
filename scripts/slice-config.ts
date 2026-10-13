@@ -124,6 +124,17 @@ export type SliceConfig = {
    */
   overlapIgnore?: string[];
   /**
+   * Paths whose leading number is not a sequence, in the syntax of
+   * `overlapIgnore`. Optional; `[]` and omitted are the same.
+   *
+   * A slice that adds `docs/adr/0015-x.md` when the base branch already has
+   * another 0015 in that directory — another slice took the same "next"
+   * number and landed first — is renumbered at land, or parked without a
+   * resolver; see "two files, one number" in scripts/slice-overlap.ts. A
+   * directory where two names under one number is normal belongs here.
+   */
+  numberedIgnore?: string[];
+  /**
    * Run the test files a slice adds or changes against the base branch as it
    * was before the slice, and show the spec review the result. Optional; left
    * out, nothing is run.
@@ -367,20 +378,20 @@ function validate(c: SliceConfig): SliceConfig {
       );
     }
   }
-  if (c.overlapIgnore !== undefined) {
-    if (!Array.isArray(c.overlapIgnore)) {
-      bad("overlapIgnore must be an array of path patterns, or left out");
+  for (const key of ["overlapIgnore", "numberedIgnore"] as const) {
+    const list = c[key];
+    if (list === undefined) continue;
+    if (!Array.isArray(list)) {
+      bad(`${key} must be an array of path patterns, or left out`);
     }
-    for (const [i, p] of c.overlapIgnore.entries()) {
+    for (const [i, p] of list.entries()) {
       if (typeof p !== "string" || !p) {
-        bad(`overlapIgnore[${i}] must be a non-empty path pattern`);
+        bad(`${key}[${i}] must be a non-empty path pattern`);
       }
       // A leading `./` or `/` never matches: git prints repo-relative paths
       // with neither, so such a pattern would silently ignore nothing.
       if (p.startsWith("/") || p.startsWith("./")) {
-        bad(
-          `overlapIgnore[${i}] ("${p}") must be repo-relative — no leading / or ./`,
-        );
+        bad(`${key}[${i}] ("${p}") must be repo-relative — no leading / or ./`);
       }
     }
   }

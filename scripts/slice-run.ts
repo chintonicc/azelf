@@ -121,7 +121,13 @@ import {
 } from "./slice-lock";
 // The pure half of the overlap report; the git that feeds it is below, in the
 // overlap section, because only this file knows where a slice's branch is.
-import { findOverlaps, ignores } from "./slice-overlap";
+import {
+  type NumberClash,
+  findNumberClashes,
+  findOverlaps,
+  ignores,
+  numberClashes,
+} from "./slice-overlap";
 // Same split again: whether a conflict resolution may proceed is a decision
 // over facts and lives there; reading those facts out of a worktree is here.
 import {
@@ -3538,6 +3544,205 @@ function resolveStops(t: Ticket, conflicted: string[]): boolean {
   return true;
 }
 
+// ─── a number someone else took ──────────────────────────────────────────
+
+/**
+ * The files this slice added under a number its rebased tree has for another
+ * file — see "two files, one number" in slice-overlap.ts. Read in the
+ * worktree, after the rebase, so `base...HEAD` is exactly this slice.
+ */
+function numberClashesIn(id: TicketId): NumberClash[] {
+  const wt = worktreeFor(id);
+  const added = pathsFrom(wt, [
+    "diff",
+    "--no-renames",
+    "--diff-filter=A",
+    "--name-only",
+    `${baseBranch}...HEAD`,
+  ]);
+  const dirs = [
+    ...new Set(
+      added
+        .filter((f) => /^\d+[-_]/.test(f.slice(f.lastIndexOf("/") + 1)))
+        .map((f) => f.slice(0, f.lastIndexOf("/") + 1)),
+    ),
+  ];
+  if (dirs.length === 0) return [];
+  // The whole tree for a numbered file at the top level, which has no
+  // directory to name. Not `pathsFrom`: its `-z` would land after the `--`.
+  const tree = run(
+    [
+      "git",
+      "ls-tree",
+      "-r",
+      "-z",
+      "--name-only",
+      "HEAD",
+      ...(dirs.includes("") ? [] : ["--", ...dirs]),
+    ],
+    { cwd: wt, allowFail: true },
+  )
+    .out.split("\0")
+    .filter(Boolean);
+  return numberClashes(added, tree, numberedIgnored);
+}
+
+/** One park reason for every clash, with the way out by hand. */
+function clashReason(clashes: NumberClash[]): string {
+  const each = clashes.map(
+    (c) =>
+      `${c.file} takes a number ${baseBranch} already has for ${c.taken.join(
+        ", ",
+      )} — the next free one is ${c.to}`,
+  );
+  return `${each.join(
+    "; ",
+  )}. Rename it in the worktree, fix what refers to it, and commit — the moved branch retries the land`;
+}
+
+/**
+ * The instruction for renaming's other half. azelf has already moved the
+ * files; what an agent is for is the prose, where "ADR 0015" has to be read
+ * to know which of the two 0015s it means.
+ */
+function renumberPrompt(
+  t: Ticket,
+  clashes: NumberClash[],
+  editable: string[],
+): string {
+  return `You are updating references after a rename in this worktree. That is the whole job.
+
+Branch \`${branchFor(t.id)}\` — ticket ${ref(t.id)}, ${
+    t.title
+  } — added files under a number that \`${baseBranch}\` has meanwhile given to another file: a slice cut from the same base took the same "next" number and landed first. azelf has already renamed this branch's files, and nothing is committed yet:
+
+${clashes
+  .map(
+    (c) =>
+      `  ${c.file} → ${c.to}\n    (${baseBranch}'s ${c.taken.join(
+        ", ",
+      )} keeps the old number)`,
+  )
+  .join("\n")}
+
+Update what refers to the renamed files: their old names and paths, and the old number where it means one of them — "ADR 0015", a link to it, its own title line.
+
+RULES.
+
+1. Edit only these files, this branch's own:
+${editable.map((f) => `   ${f}`).join("\n")}
+2. The old number still exists: it now belongs only to ${baseBranch}'s file above. A mention that means THAT file stays as it is. When you cannot tell which one a mention means, leave it.
+3. Change nothing else. Do not rename anything back, and do not run \`git add\`, \`git commit\`, \`git mv\`, \`git reset\`, \`git checkout\` or \`git stash\`: azelf commits your edits itself. Reading git is fine.`;
+}
+
+/**
+ * Give this slice's clashing files the next free numbers, and let the agent
+ * rewrite what refers to them. azelf does the git — `git mv`, the stage, the
+ * commit — and the agent edits; the same split as `resolveStops`, for the
+ * same reason (its permission mode has no git writes). One commit on top of
+ * the slice, so the review reads the renumbering as its own change.
+ *
+ * True only when the new commit is there, the tree is clean, and the clash is
+ * gone. Anything else resets the branch to where it was.
+ */
+function renumber(t: Ticket, clashes: NumberClash[]): boolean {
+  const argvFor = agent.resolve;
+  if (!argvFor) return false;
+  const wt = worktreeFor(t.id);
+  const head = run(["git", "rev-parse", "HEAD"], {
+    cwd: wt,
+    allowFail: true,
+  }).out.trim();
+  if (!head) return false;
+  const moved = new Map(clashes.map((c) => [c.file, c.to]));
+  // What the agent may edit: this slice's files, under their new names.
+  const editable = changedIn(wt, `${baseBranch}...HEAD`).map(
+    (f) => moved.get(f) ?? f,
+  );
+
+  console.log(
+    `\n  renumbering ${ref(t.id)}'s files — ${baseBranch} took their numbers …`,
+  );
+  for (const c of clashes) console.log(`     ${c.file} → ${c.to}`);
+
+  let out = "";
+  const give = (why: string): boolean => {
+    run(["git", "reset", "--hard", head], { cwd: wt, allowFail: true });
+    const path = saveReport(
+      `renumber-${t.id}.md`,
+      `REJECTED: ${why}\n\n${out.trim() || "(the agent printed nothing)"}\n`,
+      `# Renumbering — ${ref(t.id)} ${t.title}`,
+    );
+    console.log(
+      `     ✗ renumbering rejected — ${why}; the branch is as it was.`,
+    );
+    console.log(`     transcript: ${path}`);
+    return false;
+  };
+
+  for (const c of clashes) {
+    const mv = gitWrite(["mv", c.file, c.to], wt);
+    if (!mv.ok) return give(`git mv ${c.file} failed: ${mv.out.trim()}`);
+  }
+  const argv = argvFor(argSafe(renumberPrompt(t, clashes, editable)));
+  if (!argv) return give("the agent declined the headless run");
+  out = run(argv, {
+    cwd: wt,
+    allowFail: true,
+    timeoutMs: RESOLVE_TIMEOUT_MS,
+  }).out;
+
+  const allowed = new Set([...editable, ...moved.keys()]);
+  const stray = [
+    ...new Set([
+      ...pathsFrom(wt, ["diff", "--name-only", "HEAD"]),
+      ...pathsFrom(wt, ["ls-files", "--others", "--exclude-standard"]),
+    ]),
+  ].filter((p) => !allowed.has(p));
+  if (stray.length) {
+    return give(`it changed ${stray.join(", ")}, which this slice does not`);
+  }
+  // All of it: nothing outside `allowed` changed, and a pathspec naming a
+  // file the slice deleted would stop the add.
+  const add = gitWrite(["add", "-A"], wt);
+  if (!add.ok) return give(`git add failed: ${add.out.trim()}`);
+  // --no-verify: the gates run on this commit next, and a consumer's hook is
+  // a session's check, not a land's.
+  const commit = gitWrite(
+    [
+      "commit",
+      "--no-verify",
+      "-m",
+      `chore: renumber ${clashes
+        .map((c) => `${c.file} → ${c.to}`)
+        .join(", ")} — ${baseBranch} took the number`,
+    ],
+    wt,
+  );
+  if (!commit.ok) return give(`git commit failed: ${commit.out.trim()}`);
+  const dirty = pathsFrom(wt, ["status", "--porcelain"]);
+  if (dirty.length)
+    return give(`the worktree is not clean: ${dirty.join(", ")}`);
+  const left = numberClashesIn(t.id);
+  if (left.length) {
+    return give(`${left.map((c) => c.file).join(", ")} still clashes`);
+  }
+
+  const path = saveReport(
+    `renumber-${t.id}.md`,
+    `ACCEPTED: ${clashes
+      .map((c) => `${c.file} → ${c.to}`)
+      .join(", ")}, committed. The gates run next.\n\n${
+      out.trim() || "(the agent printed nothing)"
+    }\n`,
+    `# Renumbering — ${ref(t.id)} ${t.title}`,
+  );
+  console.log("     ✓ renamed and committed — the gates run next");
+  console.log(`     transcript: ${path}`);
+  resolvedByAgent.add(t.id);
+  return true;
+}
+
 /**
  * Why a ticket is not being retried, and what was true when it failed.
  *
@@ -3959,6 +4164,16 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       }
       resolved = true;
     }
+    // After the rebase, so the tree is the one about to land, with whatever
+    // took this slice's number meanwhile. `[f]` lands past it, for the reader
+    // who knows the two names are meant to share it.
+    const clashes = opts.force ? [] : numberClashesIn(t.id);
+    if (clashes.length) {
+      if (!resolveUnasked || !renumber(t, clashes)) {
+        return park(t, "rebase", clashReason(clashes));
+      }
+      resolved = true;
+    }
     if (!reinstallAfterRebase(t.id, baseBefore)) {
       return park(
         t,
@@ -4005,6 +4220,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     // reaches the base branch — and so a slice that never got past the gates
     // contributes nothing.
     const landing = changedFiles(t.id);
+    const landingAdded = addedFiles(t.id);
     // The slice is rebased, so this is where its commits start.
     const landedFrom = baseHead();
     // `--end-session` under --auto only: the session in that tab was launched
@@ -4049,6 +4265,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       );
     }
     landedFiles.set(t.id, landing);
+    landedAdded.set(t.id, landingAdded);
     closePending.set(t.id, { said: false });
     const landedAt = baseHead();
     if (landedAt) landedHeads.set(t.id, landedAt);
@@ -4199,6 +4416,42 @@ function changedFiles(id: TicketId): string[] {
   changedCache.set(id, { head, files });
   return files;
 }
+
+const addedCache = new Map<TicketId, { head: string; files: string[] }>();
+
+/**
+ * The files this slice ADDED, as `changedFiles` reads its changes: the
+ * numbered-file warning compares these. `--no-renames`, so a renamed file
+ * counts as added under its new name.
+ */
+function addedFiles(id: TicketId): string[] {
+  const head = branchHead(id);
+  if (!head) return [];
+  const hit = addedCache.get(id);
+  if (hit?.head === head) return hit.files;
+  const { ok, out } = run(
+    [
+      "git",
+      "diff",
+      "--no-renames",
+      "--diff-filter=A",
+      "--name-only",
+      `${baseBranch}...${branchFor(id)}`,
+    ],
+    { allowFail: true },
+  );
+  const files = ok
+    ? out
+        .split("\n")
+        .map((l) => l.trim())
+        .filter(Boolean)
+    : [];
+  addedCache.set(id, { head, files });
+  return files;
+}
+
+/** What each landed slice added, for the numbered-file warning; see `landedFiles`. */
+const landedAdded = new Map<TicketId, string[]>();
 
 /**
  * What each landed slice put on the base branch, kept for the rest of the run.
@@ -4479,6 +4732,9 @@ const OVERLAP_FILES_SHOWN = 4;
 /** Paths the report leaves out, from slice.config.ts. Matches nothing by default. */
 const overlapIgnored = ignores(config.overlapIgnore ?? []);
 
+/** Paths whose number is not a sequence, from slice.config.ts. */
+const numberedIgnored = ignores(config.numberedIgnore ?? []);
+
 /**
  * Say which open slices are editing the same files — once per change, not
  * once per round. A poll loop that reprints the same warning every 30s for an
@@ -4512,6 +4768,7 @@ function reportOverlaps(all: Ticket[]): void {
     if (landed?.length) changed.set(t.id, landed);
   }
 
+  reportNumberClashes(all, open);
   const overlaps = findOverlaps(changed, {
     open,
     ignore: overlapIgnored,
@@ -4547,6 +4804,46 @@ function reportOverlaps(all: Ticket[]): void {
       "     ✓ = already landed, so the open one has to rebase over it.",
     );
   }
+}
+
+/** The last numbered-file report printed; see `lastOverlaps`. */
+let lastNumberClashes = "";
+
+/**
+ * Say which slices are adding files under the same number, once per change.
+ * Paths that differ, so the report above is silent about them, and no rebase
+ * stops on them either; the land renumbers the later one (`renumber`), or
+ * parks it. Said here first, while the agents can still be told.
+ */
+function reportNumberClashes(all: Ticket[], open: Set<TicketId>): void {
+  const added = new Map<TicketId, string[]>();
+  for (const t of all) {
+    const files = t.open ? addedFiles(t.id) : landedAdded.get(t.id);
+    if (files?.length) added.set(t.id, files);
+  }
+  const clashes = findNumberClashes(added, { open, ignore: numberedIgnored });
+  const key = clashes
+    .map((o) => `${o.tickets.join(",")}:${o.files.join(",")}`)
+    .join("|");
+  if (key === lastNumberClashes) return;
+  lastNumberClashes = key;
+  if (clashes.length === 0) return;
+
+  console.log("\n  ⚠ slices are adding files under the same number");
+  for (const o of clashes) {
+    const ids = o.tickets
+      .map((id) => (open.has(id) ? ref(id) : `${ref(id)}✓`))
+      .join(" ");
+    console.log(`     ${ids}  ${o.files.join("  ")}`);
+  }
+  console.log(
+    "     The names differ, so both rebase cleanly. The later land renumbers",
+  );
+  console.log(
+    `     its file${
+      resolveUnasked ? "" : " — or parks, without --auto-resolve"
+    }. ✓ = already landed.`,
+  );
 }
 
 // ─── main ─────────────────────────────────────────────────────────────────

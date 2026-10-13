@@ -397,6 +397,7 @@ export default {
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
+| `numberedIgnore` | `string[]?` | paths whose leading number is not a sequence, so two files under one number there are left alone. Same syntax. See [Two files, one number](#two-files-one-number) |
 | `testOnBase` | `{ command, files? }?` | run a slice's new test files against the base before its review; off when left out. See below |
 | `gates` | `Gate[]` | what a slice must pass before landing, in order |
 | `tracker` | `Tracker` | where tickets and blocking edges live |
@@ -1037,6 +1038,47 @@ conflict every time. `consumer-a`'s first wave reported four shared files: three
 were locale catalogues that merged cleanly, and the fourth was `TESTING.md`, which
 was the only real conflict of the four. Ignoring by how often a path shows up would
 have hidden precisely the one worth reading.
+
+### Two files, one number
+
+A directory of numbered records — `docs/adr/0014-….md`, `migrations/0007_….sql` —
+gets its next entry from whoever writes it. Two slices cut from one base both take
+the same "next" number under different names. The paths differ, so the report
+above says nothing, and both rebases apply cleanly. Without a check the base branch
+ends up with two ADR 0015s, and every "ADR 0015" in the prose means both.
+
+So the dispatcher looks for it twice:
+
+- **While both are open**, in the same poll as the report above:
+
+  ```
+    ⚠ slices are adding files under the same number
+       #31 #32  docs/adr/0015-event-log.md  docs/adr/0015-read-models.md
+  ```
+
+- **At land, after the rebase.** A file the slice added that sits under a number
+  its rebased tree already has for another file is renamed to the next free
+  number, with the original's width: `0015-read-models.md` → `0016-read-models.md`.
+  azelf does the `git mv`. The agent's resolver then updates what refers to the
+  file in the slice's own files — its name, its path, "ADR 0015" where it means
+  this one — and azelf commits that as one `chore: renumber …` commit on the
+  slice. The gates and the review run on it as on any resolution. An edit outside
+  the slice's files throws the renumbering away.
+
+  This runs where a conflict would go to the resolver unasked: under `--auto` or
+  `--auto-resolve`, with a resolver configured. Otherwise the slice parks with the
+  file, what took its number, and the next free one, and renaming it in the
+  worktree and committing retries the land. `[f]` at the prompt lands past it.
+
+A numbered file is one whose name starts with digits and a `-` or `_`; `1.png`
+beside `1.webp` is one image in two formats. Two files in one entry, like
+`0007_add.up.sql` and `0007_add.down.sql`, share a name up to the first `.` and are
+not a collision. Where two different names under one number is normal, list the
+directory in `numberedIgnore`, in the syntax of `overlapIgnore`:
+
+```ts
+numberedIgnore: ["fixtures/"],
+```
 
 ## When a slice will not land
 

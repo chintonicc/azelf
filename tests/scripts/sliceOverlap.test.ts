@@ -1,4 +1,9 @@
-import { findOverlaps, ignores } from "@/scripts/slice-overlap";
+import {
+  findNumberClashes,
+  findOverlaps,
+  ignores,
+  numberClashes,
+} from "@/scripts/slice-overlap";
 import type { TicketId } from "@/scripts/slice-tracker";
 import { describe, expect, it } from "vitest";
 
@@ -242,5 +247,142 @@ describe("findOverlaps — ignored paths", () => {
   it("drops the group entirely when every shared file is ignored", () => {
     const c = changed({ "18": ["bun.lock"], "19": ["bun.lock"] });
     expect(findOverlaps(c, { ignore: ignores(["bun.lock"]) })).toEqual([]);
+  });
+});
+
+describe("numberClashes — a file added under a number the tree already has", () => {
+  const ADR = [
+    "docs/adr/0013-c.md",
+    "docs/adr/0014-d.md",
+    "docs/adr/0015-event-log.md",
+  ];
+
+  it("names the file, what took its number, and the next free one", () => {
+    expect(
+      numberClashes(
+        ["docs/adr/0015-read-models.md", "app/x.ts"],
+        [...ADR, "docs/adr/0015-read-models.md", "app/x.ts"],
+      ),
+    ).toEqual([
+      {
+        file: "docs/adr/0015-read-models.md",
+        taken: ["docs/adr/0015-event-log.md"],
+        to: "docs/adr/0016-read-models.md",
+      },
+    ]);
+  });
+
+  it("is empty when the added number is free", () => {
+    expect(
+      numberClashes(
+        ["docs/adr/0016-read-models.md"],
+        [...ADR, "docs/adr/0016-read-models.md"],
+      ),
+    ).toEqual([]);
+  });
+
+  it("counts from the highest number in the directory, and keeps the width", () => {
+    expect(
+      numberClashes(
+        ["db/7_add.sql"],
+        ["db/7_add.sql", "db/7_drop.sql", "db/12_other.sql"],
+      ).map((x) => x.to),
+    ).toEqual(["db/13_add.sql"]);
+  });
+
+  it("gives each clashing entry its own number, and one entry's files one", () => {
+    expect(
+      numberClashes(
+        ["m/0002_a.up.sql", "m/0002_a.down.sql", "m/0003_b.sql"],
+        [
+          "m/0002_a.up.sql",
+          "m/0002_a.down.sql",
+          "m/0003_b.sql",
+          "m/0002_x.sql",
+          "m/0003_y.sql",
+        ],
+      ).map((x) => x.to),
+    ).toEqual(["m/0004_a.down.sql", "m/0004_a.up.sql", "m/0005_b.sql"]);
+  });
+
+  it("reads one entry in two files as one entry, not a clash", () => {
+    expect(
+      numberClashes(
+        ["m/0002_a.down.sql"],
+        ["m/0002_a.up.sql", "m/0002_a.down.sql"],
+      ),
+    ).toEqual([]);
+  });
+
+  it("does not compare across directories", () => {
+    expect(numberClashes(["a/01-x.md"], ["a/01-x.md", "b/01-y.md"])).toEqual(
+      [],
+    );
+  });
+
+  it("leaves names without a number and a - or _ alone", () => {
+    expect(
+      numberClashes(
+        ["img/1.webp", "app/404.tsx", "a/2x-icon.png"],
+        [
+          "img/1.webp",
+          "img/1.png",
+          "app/404.tsx",
+          "app/404.html",
+          "a/2x-icon.png",
+        ],
+      ),
+    ).toEqual([]);
+  });
+
+  it("skips what the ignore predicate matches", () => {
+    expect(
+      numberClashes(
+        ["docs/adr/0015-read-models.md"],
+        [...ADR, "docs/adr/0015-read-models.md"],
+        ignores(["docs/adr/"]),
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("findNumberClashes — slices adding the same number", () => {
+  it("groups two slices that took one number in one directory", () => {
+    expect(
+      findNumberClashes(
+        changed({
+          "31": ["docs/adr/0015-event-log.md", "lib/a.ts"],
+          "32": ["docs/adr/0015-read-models.md"],
+          "33": ["docs/adr/0016-other.md"],
+        }),
+      ),
+    ).toEqual([
+      {
+        tickets: ["31", "32"],
+        files: ["docs/adr/0015-event-log.md", "docs/adr/0015-read-models.md"],
+      },
+    ]);
+  });
+
+  it("drops a group with nobody open, and keeps a landed one beside an open one", () => {
+    const c = changed({
+      "31": ["docs/adr/0015-event-log.md"],
+      "32": ["docs/adr/0015-read-models.md"],
+    });
+    expect(findNumberClashes(c, { open: new Set() })).toEqual([]);
+    expect(findNumberClashes(c, { open: new Set(["32"]) })).toHaveLength(1);
+  });
+
+  it("is empty for one slice, and for the same entry in two slices", () => {
+    expect(
+      findNumberClashes(
+        changed({ "31": ["docs/adr/0015-a.md", "docs/adr/0015-b.md"] }),
+      ),
+    ).toEqual([]);
+    expect(
+      findNumberClashes(
+        changed({ "1": ["m/0002_a.up.sql"], "2": ["m/0002_a.down.sql"] }),
+      ),
+    ).toEqual([]);
   });
 });

@@ -3403,3 +3403,137 @@ describe("a blocker only the body names stops the dispatch", () => {
     );
   });
 });
+
+/**
+ * Two slices cut from one base both take the next ADR number under different
+ * names: no rebase stops, and the base would end with two of one number.
+ * Here main's 0002-x.md stands for the slice that landed first; ticket/40
+ * added 0002-b.md and a note that names it.
+ */
+describe("a file added under a number the base took meanwhile", () => {
+  const ADR = "docs/adr";
+
+  const taken = (opts: Parameters<typeof makeConsumer>[0] = {}) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, ...opts });
+    mkdirSync(join(fx.main, ADR), { recursive: true });
+    commitIn(fx.main, `${ADR}/0001-a.md`, "# 1. a\n", "docs: adr 1");
+    git(fx.wt(40), "rebase", "-q", "main");
+    mkdirSync(join(fx.wt(40), ADR), { recursive: true });
+    commitIn(fx.wt(40), `${ADR}/0002-b.md`, "# ADR 0002: b\n", "docs: adr b");
+    commitIn(fx.wt(40), "NOTES.md", "see ADR 0002 (0002-b.md)\n", "docs: note");
+    commitIn(fx.main, `${ADR}/0002-x.md`, "# 2. x\n", "docs: adr x");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+
+  const auto = ["--auto", "--once", "-y", "--no-review", "40"];
+
+  it("parks without a resolver, and names the file and the next free number", () => {
+    c = taken();
+
+    const r = runDispatcher(c, [...auto, "--no-auto-resolve"]);
+
+    expect(r.out).toContain(
+      `#40 did not land — ${ADR}/0002-b.md takes a number main already has for ${ADR}/0002-x.md — the next free one is ${ADR}/0003-b.md. Rename it in the worktree, fix what refers to it, and commit`,
+    );
+    expect(existsSync(join(c.main, ADR, "0002-b.md"))).toBe(false);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("docs: adr x");
+  });
+
+  it("renames the file, lets the agent fix the references, and lands", () => {
+    c = taken({
+      resolve: [
+        "bash",
+        "-c",
+        `printf '%s\\n' "$1" > ../prompt; perl -pi -e 's/0002/0003/g' NOTES.md ${ADR}/0003-b.md`,
+        "resolver",
+      ],
+    });
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.out).toContain(`${ADR}/0002-b.md → ${ADR}/0003-b.md`);
+    expect(r.out).toContain("✓ renamed and committed — the gates run next");
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(c.main, ADR, "0003-b.md"), "utf8")).toBe(
+      "# ADR 0003: b\n",
+    );
+    expect(readFileSync(join(c.main, ADR, "0002-x.md"), "utf8")).toBe(
+      "# 2. x\n",
+    );
+    expect(existsSync(join(c.main, ADR, "0002-b.md"))).toBe(false);
+    expect(readFileSync(join(c.main, "NOTES.md"), "utf8")).toBe(
+      "see ADR 0003 (0003-b.md)\n",
+    );
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe(
+      `chore: renumber ${ADR}/0002-b.md → ${ADR}/0003-b.md — main took the number`,
+    );
+    const prompt = readFileSync(join(c.root, "prompt"), "utf8");
+    expect(prompt).toContain(`main's ${ADR}/0002-x.md keeps the old number`);
+    expect(prompt).toMatch(/ {3}NOTES\.md\n/);
+  });
+
+  it("throws the renumbering away when the agent edits a file the slice does not", () => {
+    c = taken({
+      resolve: ["bash", "-c", `echo oops >> ${ADR}/0001-a.md`, "resolver"],
+    });
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.out).toContain(
+      `✗ renumbering rejected — it changed ${ADR}/0001-a.md, which this slice does not`,
+    );
+    expect(r.out).toContain("#40 did not land");
+    // Rebased onto main, as a land does first, and nothing on top.
+    expect(git(c.wt(40), "log", "-2", "--format=%s")).toBe(
+      "docs: note\ndocs: adr b",
+    );
+    expect(git(c.wt(40), "status", "--porcelain")).toBe("");
+    expect(existsSync(join(c.wt(40), ADR, "0002-b.md"))).toBe(true);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("docs: adr x");
+  });
+
+  it("lands as it is in a directory numberedIgnore names", () => {
+    c = taken({ configExtra: `numberedIgnore: ["${ADR}/"],` });
+
+    const r = runDispatcher(c, [...auto, "--no-auto-resolve"]);
+
+    expect(r.code).toBe(0);
+    expect(existsSync(join(c.main, ADR, "0002-b.md"))).toBe(true);
+    expect(existsSync(join(c.main, ADR, "0002-x.md"))).toBe(true);
+  });
+
+  it("warns while both slices are open", () => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true });
+    for (const [n, name] of [
+      [40, "0002-b.md"],
+      [41, "0002-c.md"],
+    ] as const) {
+      mkdirSync(join(c.wt(n), ADR), { recursive: true });
+      commitIn(c.wt(n), `${ADR}/${name}`, "x\n", `docs: ${name}`);
+    }
+
+    const r = runDispatcher(c, ["--once", "-y", "--no-start", "40", "41"]);
+
+    expect(r.out).toContain("⚠ slices are adding files under the same number");
+    expect(r.out).toContain(`#40 #41  ${ADR}/0002-b.md  ${ADR}/0002-c.md`);
+    expect(r.out).not.toContain("editing the same files");
+  });
+
+  it("the config refuses a numberedIgnore that is not a list of relative patterns", () => {
+    for (const [value, says] of [
+      ['"docs/adr/"', "numberedIgnore must be an array of path patterns"],
+      [
+        '["./docs/adr/"]',
+        'numberedIgnore[0] ("./docs/adr/") must be repo-relative',
+      ],
+    ]) {
+      c = makeConsumer({ configExtra: `numberedIgnore: ${value},` });
+      const r = runDispatcher(c, ["--plan"]);
+
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain(says);
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
+});
