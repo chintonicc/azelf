@@ -96,6 +96,83 @@ describe("slice-done.sh → slice-land.sh", () => {
 });
 
 /**
+ * A slice only a person can get further hands itself over. On consumer-a one
+ * session stopped on a confirmation prompt nobody was there to answer, and
+ * one on a sign-in that needed a browser. Both sat idle in their tabs, and the
+ * run waited on them and said nothing.
+ */
+describe("slice-done.sh --hand-over", () => {
+  let c: Consumer;
+  beforeEach(() => {
+    c = makeConsumer({ worktrees: [40] });
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  /** Git's own list, with `-z` so the reason's `—` is not C-quoted. */
+  const locked = () => git(c.main, "worktree", "list", "--porcelain", "-z");
+
+  it("holds a dirty worktree with no commits for its session, and marks it not finished", () => {
+    const wt = c.wt(40);
+    writeFileSync(join(wt, "a.txt"), "half\n");
+    writeFileSync(join(wt, ".slice-live"), "4242\n");
+
+    const r = shResult(wt, './scripts/slice-done.sh --hand-over "sign in"');
+
+    expect(r.code, r.out).toBe(0);
+    expect(locked()).toMatch(
+      /\0locked azelf hold: its session since \d{4}-\d\d-\d\dT\S+ — sign in\0/,
+    );
+    expect(readFileSync(join(wt, ".slice-interrupted"), "utf8")).toBe("4242\n");
+    expect(existsSync(join(wt, ".slice-ready-to-land"))).toBe(false);
+    expect(readFileSync(join(wt, ".slice-live"), "utf8")).toBe("4242\n");
+    expect(r.out).toContain(
+      "✓ held #40 for its session — nothing lands, relaunches or removes it until azelf release 40",
+    );
+    expect(r.out.trimEnd()).toMatch(
+      /end your turn — a person takes it from here$/,
+    );
+  });
+
+  it("refuses an empty reason with 64, and holds nothing", () => {
+    const wt = c.wt(40);
+    for (const why of ['""', '"  "', ""]) {
+      const r = shResult(wt, `./scripts/slice-done.sh --hand-over ${why}`);
+      expect(r.code, why).toBe(64);
+      expect(r.out).toContain("--hand-over needs what a person has to do");
+    }
+    expect(locked()).not.toContain("locked");
+    expect(existsSync(join(wt, ".slice-interrupted"))).toBe(false);
+  });
+
+  it("refuses a worktree that is already held, and names the hold", () => {
+    const wt = c.wt(40);
+    git(c.main, "worktree", "lock", "--reason", "bisecting", wt);
+
+    const r = shResult(wt, './scripts/slice-done.sh --hand-over "sign in"');
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      `#40 is already locked in git (bisecting) — git worktree unlock ${wt} first`,
+    );
+    expect(existsSync(join(wt, ".slice-interrupted"))).toBe(false);
+  });
+
+  /** Today a typo marks the slice done, and under --auto that lands it. */
+  it("refuses an argument it does not know, and marks nothing done", () => {
+    const wt = c.wt(40);
+    writeFileSync(join(wt, "a.txt"), "a\n");
+    git(wt, "add", "a.txt");
+    git(wt, "commit", "-qm", "feat: a");
+
+    const r = shResult(wt, './scripts/slice-done.sh --handover "sign in"');
+
+    expect(r.code).toBe(64);
+    expect(r.out).toContain("unknown argument: --handover");
+    expect(existsSync(join(wt, ".slice-ready-to-land"))).toBe(false);
+  });
+});
+
+/**
  * The DB lock across a land: a slice that claimed it (through
  * session-commit.sh) holds it until this moment, and this is where it is
  * released — from the main checkout, never fatally.

@@ -40,6 +40,12 @@ export const HOLD_PREFIX = "azelf hold: ";
 /** The note `azelf hold` leaves in the worktree, for `ls`. */
 export const HOLD_NOTE = ".slice-hold";
 
+/**
+ * Who a slice's hold on itself is by: `slice-done.sh --hand-over` passes this
+ * as `--by`, and the run's line for such a hold says what follows the release.
+ */
+export const SESSION_HOLDER = "its session";
+
 export type Hold = {
   /** Taken with `azelf hold`, rather than a lock someone put on with git. */
   azelf: boolean;

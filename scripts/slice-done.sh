@@ -3,6 +3,7 @@
 # Mark THIS slice finished, from inside its own worktree.
 #
 #   ./scripts/slice-done.sh
+#   ./scripts/slice-done.sh --hand-over "<what a person has to do>"
 #
 # WHY THIS EXISTS
 # ---------------
@@ -28,6 +29,34 @@
 
 set -euo pipefail
 
+# --hand-over is the other way a slice stops: not done, but stuck on something
+# only a person can do (see below). Anything else is refused before a marker
+# is written. This script used to ignore its arguments, so a mistyped flag
+# marked the slice done, and under --auto that lands it.
+handing_over=false
+why=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --hand-over)
+      handing_over=true
+      why="${2:-}"
+      if [[ $# -ge 2 ]]; then shift; fi
+      shift
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      echo "usage: ${AZELF_INVOKED_AS:-$0} [--hand-over \"<what a person has to do>\"]" >&2
+      exit 64
+      ;;
+  esac
+done
+# The reason is the whole message to the person, so an empty one holds nothing.
+if $handing_over && [[ -z "${why//[[:space:]]/}" ]]; then
+  echo "error: --hand-over needs what a person has to do, and where your work is." >&2
+  echo "       it is all they are told: ./scripts/slice-done.sh --hand-over \"sign in to …, then …\"" >&2
+  exit 64
+fi
+
 worktree_root="$(git rev-parse --show-toplevel)"
 branch="$(git rev-parse --abbrev-ref HEAD)"
 
@@ -45,6 +74,40 @@ if ! ticket="$(slice_ticket_from_branch "$branch")"; then
   echo "error: '$branch' is not a slice branch (expected $SLICE_BRANCH_PATTERN)." >&2
   echo "       run this from inside a slice worktree." >&2
   exit 1
+fi
+
+# ─── Handing the slice to a person ─────────────────────────────────────────
+#
+# For what no session can do for itself: a sign-in that needs a browser, a
+# confirmation prompt nobody will answer in its tab, a device, a secret. On
+# consumer-a one slice hung on a prompt from its database's MCP server, and
+# one came up signed out of that server. Both ended their turns, as the skill
+# says, and sat idle in their REPLs. The dispatcher waited on a live session
+# and said nothing, and a person found each one by reading its tab.
+#
+# The hold is `azelf hold`'s, taken by the slice on itself, so the run says
+# once who and why, and lands, relaunches and removes nothing until `azelf
+# release`. "its session" is SESSION_HOLDER in slice-hold.ts: the run's line
+# for such a hold also says what follows the release.
+#
+# .slice-interrupted goes with it, and no ready marker, because the work is
+# not done. The dispatcher reads that marker as "stopped before it was done"
+# (`autoFinished`), so after the release a session that has ended is started
+# again, and its commits are not landed as the ticket. One still open in its
+# tab is waited for, because .slice-live stays. A person who finishes the work
+# by hand runs this script without the flag, and that ready marker lands it.
+# A ready marker from an earlier run of this script goes, or the release
+# would land the slice.
+#
+# Neither refusal below applies. A dirty tree or no commits is what the person
+# picks up.
+if $handing_over; then
+  session_pid="$(head -n 1 "$worktree_root/.slice-live" 2>/dev/null | tr -d '[:space:]' || true)"
+  bun "$SLICE_AZELF_DIR/scripts/slice-run.ts" --hold "$ticket" --by "its session" --why "$why"
+  printf '%s\n' "$session_pid" >"$worktree_root/.slice-interrupted"
+  rm -f "$worktree_root/.slice-ready-to-land"
+  echo "  end your turn — a person takes it from here"
+  exit 0
 fi
 
 # Refuse on a dirty tree. A marker written over uncommitted work would land a

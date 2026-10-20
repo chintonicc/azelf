@@ -557,8 +557,14 @@ fi
 # base branch, and an agent that finishes its work reaches for slice-done.sh
 # unless something says a human does that. The slice skill says it too, but
 # that is a file the consumer may have edited, so the prompt does not rely on it.
+#
+# The hand-over is in the self-land half because nobody reads this tab: a
+# slice stuck on a person used to end its turn and sit there, and the run
+# waited on it in silence. The command is in the prompt itself for the reason
+# above: the skill may be an edited copy, or one from before `azelf init` last
+# ran. The skill has the rest.
 if $self_land; then
-  start_prompt="$start_prompt When it is finished and the gates are green, run ./scripts/slice-done.sh and then exit — nobody is watching this tab. If the gates will not go green, leave the worktree as it is, do NOT run slice-done.sh, and exit."
+  start_prompt="$start_prompt When it is finished and the gates are green, run ./scripts/slice-done.sh and then exit — nobody is watching this tab. If the gates will not go green, leave the worktree as it is, do NOT run slice-done.sh, and exit. If only a person can get you further (a sign-in, a prompt nobody will answer in this tab, a device, a secret), do what the slice skill's \"If only a person can get you further\" says: commit what you have, run ./scripts/slice-done.sh --hand-over \"<what the person has to do, and where your work is>\", and end your turn."
 else
   start_prompt="$start_prompt When it is finished and the gates are green, stop and say it is ready. Do NOT run ./scripts/slice-done.sh: a human releases this slice."
 fi

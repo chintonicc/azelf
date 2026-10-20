@@ -97,6 +97,7 @@ import { type Flaky, type Gate, gateApplies, runGates } from "./slice-gates";
 import {
   HOLD_NOTE,
   type Hold,
+  SESSION_HOLDER,
   canonicalPath,
   describeHold,
   holdOf,
@@ -1069,10 +1070,16 @@ function clearStaleSession(
   if (now !== seen) return;
   rmSync(path, { force: true });
   writeFileSync(join(worktreeFor(n), INTERRUPTED_MARKER), `${pid}\n`);
+  // Asked of git rather than `holds`, which is empty before the first round.
+  // A slice that handed itself over and then lost its tab is the common case.
+  const wt = worktreeFor(n);
+  const held = holdOf(repoRoot, wt);
   console.log(
     `  ${ref(
       n,
-    )}: its session (pid ${pid}) ended without clearing .slice-live — a crash, a restart, or a killed tab. Relaunching it.`,
+    )}: its session (pid ${pid}) ended without clearing .slice-live — a crash, a restart, or a killed tab. Relaunching it${
+      held ? ` after ${releaseCommand(n, wt, held)}` : ""
+    }.`,
   );
 }
 
@@ -3044,6 +3051,10 @@ const handsOff = (n: TicketId) => inProgress.has(n) || holds.has(n);
 /**
  * One `git worktree list` a round. A hold is said once when seen, with the
  * git operation in progress under it if there is one, and once when it goes.
+ *
+ * A slice that held itself (`slice-done.sh --hand-over`) is waiting on a
+ * person who may not know what comes after the release, so its line says.
+ * `.slice-interrupted` is what makes the relaunch true: see `autoFinished`.
  */
 function noteHolds(tickets: Ticket[]): void {
   const locked = locks(repoRoot);
@@ -3061,7 +3072,11 @@ function noteHolds(tickets: Ticket[]): void {
     console.log(
       `  ${ref(id)} is ${describeHold(h)}${
         what ? `, with a ${what} in progress in its worktree` : ""
-      } — not landing or relaunching it until ${releaseCommand(id, wt, h)}`,
+      } — not landing or relaunching it until ${releaseCommand(id, wt, h)}${
+        h.azelf && h.by === SESSION_HOLDER
+          ? ", then tell its session to go on, or finish it by hand and run ./scripts/slice-done.sh in its worktree — a session that has ended is started again"
+          : ""
+      }`,
     );
   }
   for (const id of [...holdsSaid.keys()]) {
@@ -4984,7 +4999,9 @@ if (flag("--hold") || flag("--release")) {
         id,
       )} for ${by} — nothing lands, relaunches or removes it until azelf release ${id}`,
     );
-    const session = liveSession(id);
+    // Not when the session is the one holding it: that is slice-done.sh
+    // --hand-over, and the session has just been told to end its turn.
+    const session = by === SESSION_HOLDER ? null : liveSession(id);
     if (session !== null) {
       console.log(
         `  a session is running in it (pid ${session}): it carries on, and is neither landed nor relaunched while the hold stands`,

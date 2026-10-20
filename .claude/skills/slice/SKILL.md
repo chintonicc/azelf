@@ -96,6 +96,31 @@ usually **not** ancestors of the base branch afterwards — never test for a lan
 SHA. Match by subject, or read the ticket: its close comment names the commit it
 landed as.
 
+## If only a person can get you further
+
+Some things no session can do for itself: a sign-in that needs a browser, a
+confirmation prompt nobody will answer in this tab, a device, a secret. When one of
+them stands between you and the ticket, hand the slice over. Do not retry it in a
+loop, and do not wait for it in the session. Nobody comes to this tab unless the run
+tells them to.
+
+1. Commit what you have. Put anything you could not apply where a person will find
+   it, and name it in the reason.
+2. If you hold the DB lock and nothing under `exclusiveLockPaths` was applied,
+   release it with `./scripts/db-lock.sh release`, so other DB tickets can go on. If
+   something was applied, keep the lock and say what was.
+3. Hand it over, and end your turn:
+
+   ```sh
+   ./scripts/slice-done.sh --hand-over "<what the person has to do, and where your work is>"
+   ```
+
+That holds the worktree. The dispatcher lands, relaunches and removes nothing while
+it is held, and tells the person who and why. The reason is all they are told, so
+name what to do and the files: "sign in to the database's MCP server, then apply
+migrations/0042_add_owner.sql", not "blocked". After the release they tell you to go
+on in this tab, or finish the work by hand.
+
 ## If the gates will not go green
 
 Leave the worktree exactly as it is. Do **not** run `slice-done.sh`. Say what is

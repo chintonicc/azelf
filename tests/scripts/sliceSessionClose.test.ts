@@ -228,12 +228,16 @@ describe("the start prompt says who declares the slice done", () => {
     expect(prompt).toContain("Do NOT run ./scripts/slice-done.sh");
     expect(prompt).toContain("a human releases this slice");
     expect(prompt).not.toContain("and then exit");
+    expect(prompt).not.toContain("--hand-over");
   }, 60_000);
 
-  it("with --self-land: run slice-done.sh and exit", () => {
+  it("with --self-land: run slice-done.sh and exit, or hand it over to a person", () => {
     const prompt = promptOf("--self-land");
     expect(prompt).toContain("run ./scripts/slice-done.sh and then exit");
     expect(prompt).not.toContain("a human releases this slice");
+    expect(prompt).toContain(
+      'If only a person can get you further (a sign-in, a prompt nobody will answer in this tab, a device, a secret), do what the slice skill\'s "If only a person can get you further" says: commit what you have, run ./scripts/slice-done.sh --hand-over "<what the person has to do, and where your work is>", and end your turn.',
+    );
   }, 60_000);
 });
 

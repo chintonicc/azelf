@@ -2753,6 +2753,82 @@ describe("a held worktree", () => {
 });
 
 /**
+ * A slice only a person can get further hands itself over with
+ * `slice-done.sh --hand-over`. On consumer-a two such slices sat idle in their
+ * tabs instead. Had either tab been closed on a clean tree with commits, the
+ * slice would have read as finished under --auto and landed half a ticket.
+ */
+describe("a slice that handed itself over", () => {
+  const WRITE_PROMPT = 'printf "%s\\n" "$1" > "$(dirname "$PWD")/prompt"';
+  const AUTO = ["--auto", "--once", "-y", "--no-review", "40"];
+  const SAID =
+    /#40 is held by its session since \d\d:\d\d \(sign in to the database\) — not landing or relaunching it until azelf release 40, then tell its session to go on, or finish it by hand and run \.\/scripts\/slice-done\.sh in its worktree — a session that has ended is started again\n/;
+
+  /** ticket/40, committed and clean, handed over by a session with this pid. */
+  const handedOver = (pid: number) => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["bash", "-c", WRITE_PROMPT, "agent"],
+      launch: true,
+    });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    writeFileSync(join(fx.wt(40), ".slice-live"), `${pid}\n`);
+    sh(
+      fx.wt(40),
+      './scripts/slice-done.sh --hand-over "sign in to the database"',
+    );
+    return fx;
+  };
+
+  /** What the relaunched session's agent was told, once it is over. */
+  const relaunchPrompt = async (fx: Consumer) => {
+    const prompt = join(fx.root, "prompt");
+    const end = Date.now() + 30_000;
+    while (!existsSync(prompt) || existsSync(join(fx.wt(40), ".slice-live"))) {
+      if (Date.now() > end) throw new Error("no relaunched session");
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return readFileSync(prompt, "utf8");
+  };
+
+  it("is neither landed nor relaunched while held, and is relaunched, not landed, after its release", async () => {
+    c = handedOver(4242);
+    // The session ended the way one does: its EXIT trap cleared the marker.
+    rmSync(join(c.wt(40), ".slice-live"));
+
+    const held = runDispatcher(c, AUTO);
+    expect(held.out).toMatch(SAID);
+    expect(held.out).not.toContain("marked done");
+    expect(held.out).not.toContain("started #40");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+
+    expect(azelfCli(c, "release", "40").code).toBe(0);
+    const after = runDispatcher(c, AUTO);
+    expect(after.out).toContain("started #40");
+    expect(after.out).not.toContain("marked done");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("init");
+    expect(await relaunchPrompt(c)).toContain("Continue from it");
+  });
+
+  it("says a session gone from under the hold is relaunched after the release, not now", () => {
+    const pid = Number(
+      spawnSync("bash", ["-c", "echo $$"], { encoding: "utf8" }).stdout.trim(),
+    );
+    c = handedOver(pid);
+
+    const r = runDispatcher(c, AUTO);
+
+    expect(r.out).toMatch(SAID);
+    expect(r.out).toContain(
+      `#40: its session (pid ${pid}) ended without clearing .slice-live — a crash, a restart, or a killed tab. Relaunching it after azelf release 40.`,
+    );
+    expect(r.out).not.toContain("started #40");
+    expect(existsSync(join(c.wt(40), ".slice-interrupted"))).toBe(true);
+  });
+});
+
+/**
  * A worktree re-added by hand with `git worktree add` has the branch and
  * nothing else: none of the provisionCopy files, no install, no brief.
  */

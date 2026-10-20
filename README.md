@@ -351,6 +351,7 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/session-commit.sh -y -F message.txt path/to/file # the message from a file (-F - reads stdin)
 ./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
 ./scripts/slice-done.sh                                    # mark ready to land (you, or the session under --auto)
+./scripts/slice-done.sh --hand-over "<what to do>"         # not done: hold it for a person, with the reason
 ./scripts/format.sh                                        # the write half, by hand
 ./scripts/format.sh --check path/to/file                   # the same, writing nothing
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths
@@ -1359,6 +1360,25 @@ Any lock git has on a slice worktree counts the same way, with its own reason an
 `git worktree unlock` as the release. Git has no lock against `git rebase --abort`;
 the `/azelf` command tells an agent never to abort, reset or remove a worktree it did
 not start, and to ask about a rebase with no session behind it.
+
+**A slice can hold itself.** A session stuck on something only a person can do (a
+sign-in that needs a browser, a confirmation prompt nobody answers in its tab, a
+device, a secret) runs `./scripts/slice-done.sh --hand-over "<what to do>"`. That is
+`azelf hold` by `its session`, with its reason, and `.slice-interrupted` with it. On
+consumer-a two slices stopped on a person and sat idle in their tabs, and the run
+waited on their live sessions and said nothing. Had either tab been closed on a clean
+tree with commits, `--auto` would have landed half a ticket. Now the run says it once:
+
+```
+  #102 is held by its session since 20:24 (sign in to the database's MCP server, then apply migrations/0042_add_owner.sql) — not landing or relaunching it until azelf release 102, then tell its session to go on, or finish it by hand and run ./scripts/slice-done.sh in its worktree — a session that has ended is started again
+```
+
+After the release, a session still open in its tab is waited for, and one that has
+ended is started again: the commits it left are not read as a finished ticket. A
+person who finished the work by hand runs `slice-done.sh` in the worktree, and that
+lands it. The hand-over needs neither a clean tree nor commits, and refuses an empty
+reason and a worktree that is already held. `slice-done.sh` refuses any other
+argument, where it used to ignore them and mark the slice done.
 
 One gap is left: the seconds between a commit and the rebase you run after it. The
 commit moves the branch, which retries a parked land, and a land that starts in that
