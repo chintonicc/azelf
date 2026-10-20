@@ -1,6 +1,6 @@
 # A formatter that could not write says so, and a slice that needs a person hands itself over
 
-**Status:** OPEN — 1 of 2 phases landed · **Written:** 2026-10-19
+**Status:** COMPLETE — both phases landed · **Written:** 2026-10-19
 **Companion:** consumer-a's friction log: the three entries still open after `fd72b89`,
 one dated 2026-10-12 and two dated 2026-10-13. Every other entry is covered by a
 complete plan or a fix.
@@ -127,9 +127,9 @@ into arrays, so there is one biome call for both modes. Changes from the plan:
   the script there, with an error and before biome runs. That failure is loud, not
   silent.
 
-## Phase 2 — a slice that needs a person hands itself over
+## Phase 2 — a slice that needs a person hands itself over (9087d3d)
 
-- [ ] **2a. `slice-done.sh --hand-over "<why>"`.**
+- [x] **2a. `slice-done.sh --hand-over "<why>"`.**
   - Parse the flag before the refusals (`slice-done.sh:50-64`), which don't apply to
     it.
   - Take the hold the way `azelf hold` does: `bun "$SLICE_AZELF_DIR/scripts/slice-run.ts"
@@ -140,7 +140,7 @@ into arrays, so there is one biome call for both modes. Changes from the plan:
   - Print the hold line, then `end your turn — a person takes it from here`.
   - Refuse an empty reason with exit 64 and lock nothing: the reason is the whole
     message to the person. Refuse a worktree that is already held, and name the hold.
-- [ ] **2b. The contract.** Add a section to the slice `SKILL.md`, before "If the gates
+- [x] **2b. The contract.** Add a section to the slice `SKILL.md`, before "If the gates
   will not go green", titled **If only a person can get you further**:
   - The cases: a sign-in, a confirmation prompt nobody will answer in this tab, a
     device, a secret.
@@ -154,13 +154,13 @@ into arrays, so there is one biome call for both modes. Changes from the plan:
 
   The self-land half of the start instruction in `slice-session.sh` gets one line
   that points at this section.
-- [ ] **2c. The run's line says what comes after.** `noteHolds` already prints `#176
+- [x] **2c. The run's line says what comes after.** `noteHolds` already prints `#176
   is held by its session since 20:24 (<why>) — not landing or relaunching it until
   azelf release 176`. For a hold the slice took on itself, add what happens after the
   release: `then tell its session to go on, or finish it by hand and run
   ./scripts/slice-done.sh in its worktree — a session that has ended is started
   again`. The end-of-run list stays as it is.
-- [ ] **2d. README.** Add one paragraph under holds: a slice can hold itself, and why.
+- [x] **2d. README.** Add one paragraph under holds: a slice can hold itself, and why.
 
   *Proof:*
   - **`sliceLand.test.ts`**:
@@ -175,6 +175,32 @@ into arrays, so there is one biome call for both modes. Changes from the plan:
     - after `--release`, it is relaunched, not landed.
 
     On `fd72b89` the same slice without the hand-over is landed.
+
+**As landed.** Changes from the plan:
+- `slice-done.sh` refuses any argument other than `--hand-over`, with exit 64, before
+  any marker is written. It used to ignore its arguments. The new dispatcher test
+  showed what that meant on `4c236e5`: the `--hand-over` was skipped, the slice was
+  marked done, and `--auto` landed it. A mistyped flag would have done the same.
+- A ready marker left by an earlier `slice-done.sh` is deleted by the hand-over, or
+  the release would land the slice.
+- `--hold` by `its session` (`SESSION_HOLDER` in `slice-hold.ts`, which `noteHolds`
+  reads too) does not print "a session is running in it: it carries on". The session
+  is the holder, and it would read that line just before "end your turn".
+- A stale `.slice-live` found under a hold now says `Relaunching it after azelf
+  release 40.` instead of `Relaunching it.` It used to say so while held, which was
+  false. A slice that handed over and then lost its tab is the common case. The hold
+  is asked of git there, because `holds` is empty before the first round.
+- The `--self-land` prompt carries the command itself, not only a pointer to the
+  section: the skill may be an edited copy, or one from before `azelf init` last ran.
+  `sliceSessionClose.test.ts` asserts the line, and its absence without `--self-land`.
+- The `SKILL.md` section is in both `agent/skills/slice/` and azelf's own
+  `.claude/skills/slice/`. The README also gets one line in the shims list.
+- Proof: four `sliceLand.test.ts` tests (the hand-over, an empty reason, an already
+  held worktree, an unknown argument) and two `sliceRun.test.ts` tests (held, then
+  relaunched after the release; a session gone under the hold). All six failed on
+  `4c236e5`. The suite passed, 525/525, under `/bin/bash` 3.2. Checked by hand with
+  a live session: no "carries on" line, and after the release the slice was neither
+  landed nor relaunched while that session ran.
 
 ## Order and cost
 
