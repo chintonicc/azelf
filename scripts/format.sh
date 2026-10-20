@@ -51,6 +51,9 @@ Runs biome on what changed, never on the whole tree.
                exit status is non-zero when anything would
   --           the end of the options, for a path that starts with -
   -h, --help   this text
+
+A file biome cannot write (or, under --check, read) fails the run, even when
+biome's own summary counts it as fixed.
 EOF
 }
 
@@ -195,11 +198,58 @@ fi
 
 # --no-errors-on-unmatched: the list carries .json, .md, .sql and images that
 # biome has no handler for, and an unmatched path is not a failure here.
-# Under --check, biome's exit status is the answer, and set -e passes it on.
+# Under --check, biome's exit status is the answer, and it is passed on.
+#
+# A file biome could not write IS a failure, and biome's status does not say
+# so. A session on consumer-a's main checkout ran this on nine paths while its
+# sandbox denied writes there: biome printed "Operation not permitted" eight
+# times, then "Fixed 8 file(s)", and exited 0, and so did this script. Biome
+# 1.5.3 does the same for an immutable file (EPERM), a read-only one (EACCES),
+# and under --check for one it cannot read. Each one gets a
+# `<path> internalError/io` diagnostic header, so that is what is read here.
+# "Skipped N file(s)" is no signal: an unmatched .md is counted there too.
+#
+# So both of biome's streams go through tee into a log (its diagnostics are
+# on stderr). Its status comes from PIPESTATUS, with set -e off around the
+# pipeline so the script does not exit on it first. tee is not a terminal and
+# biome would drop its colours, so they are forced when stdout is one, for a
+# person to see what they saw before, and stripped before matching.
+apply=()
 if [ "$check" -eq 1 ]; then
   echo "▶ biome check on ${#existing[@]} file(s) (no changes written)"
-  bunx biome check --no-errors-on-unmatched "${existing[@]}"
 else
   echo "▶ biome check --apply on ${#existing[@]} file(s)"
-  bunx biome check --no-errors-on-unmatched --apply "${existing[@]}"
+  apply=(--apply)
 fi
+colors=()
+if [ -t 1 ]; then
+  colors=(--colors=force)
+fi
+log="$(mktemp "${TMPDIR:-/tmp}/azelf-format.XXXXXX")"
+trap 'rm -f "$log"' EXIT
+set +e
+bunx biome check ${colors[@]+"${colors[@]}"} --no-errors-on-unmatched \
+  ${apply[@]+"${apply[@]}"} "${existing[@]}" 2>&1 | tee "$log"
+status=${PIPESTATUS[0]}
+set -e
+
+esc="$(printf '\033')"
+unusable=()
+while IFS= read -r f; do
+  unusable[${#unusable[@]}]="$f"
+done < <(
+  LC_ALL=C sed -n -e "s/$esc\[[0-9;]*[A-Za-z]//g" \
+    -e 's/^\([^ ].*\) internalError\/.*/\1/p' "$log" | awk '!seen[$0]++'
+)
+if [ ${#unusable[@]} -gt 0 ]; then
+  verb=write
+  if [ "$check" -eq 1 ]; then
+    verb=read
+  fi
+  echo "✗ biome could not $verb ${#unusable[@]} file(s), so they are NOT $did:" >&2
+  for f in "${unusable[@]}"; do
+    echo "  $f" >&2
+  done
+  exit 1
+fi
+exit "$status"

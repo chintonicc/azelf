@@ -14,11 +14,13 @@ import { AZELF, type Consumer, git, makeConsumer, shResult } from "./fixture";
  * error; a named path that was deleted is skipped. `bunx` is a fake on PATH
  * that records its arguments, so "nothing was formatted" can be asserted, and
  * that fails while `bunx-fails` exists, the way biome does when it would
- * change something.
+ * change something. While `bunx-says` exists it prints that file to stderr
+ * first, where biome prints its diagnostics.
  */
 describe("format.sh", () => {
   let c: Consumer;
   let calls: string;
+  let says: string;
   const format = (...args: string[]) => formatIn(c.main, ...args);
   const formatIn = (cwd: string, ...args: string[]) =>
     shResult(
@@ -31,12 +33,15 @@ describe("format.sh", () => {
   beforeEach(() => {
     c = makeConsumer({});
     calls = join(c.root, "bunx-calls");
+    says = join(c.root, "bunx-says");
     mkdirSync(join(c.root, "bin"));
     writeFileSync(
       join(c.root, "bin", "bunx"),
       `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(
         calls,
-      )}\n[ ! -e ${JSON.stringify(join(c.root, "bunx-fails"))} ]\n`,
+      )}\n[ ! -e ${JSON.stringify(says)} ] || cat ${JSON.stringify(
+        says,
+      )} >&2\n[ ! -e ${JSON.stringify(join(c.root, "bunx-fails"))} ]\n`,
       { mode: 0o755 },
     );
     writeFileSync(join(c.main, "a.ts"), "a\n");
@@ -167,6 +172,61 @@ describe("format.sh", () => {
       expect(readFileSync(calls, "utf8").trim()).toBe(
         "biome check --no-errors-on-unmatched --apply ./-odd.ts",
       );
+    });
+  });
+
+  /**
+   * A session on consumer-a's main checkout ran format.sh on nine paths while
+   * its sandbox denied writes there. Biome printed "Operation not permitted"
+   * eight times and "Fixed 8 file(s)", and exited 0, and so did format.sh.
+   * The diagnostics here are the ones biome 1.5.3 prints for that file.
+   */
+  describe("a file biome could not write", () => {
+    const internal = (path: string, why: string) =>
+      `${path} internalError/io  INTERNAL  ━━━━━━━━━━━━━━━━━━━━\n\n  × ${why}\n  \n  ! This diagnostic was derived from an internal Biome error. Potential bug, please report it if necessary.\n  \n\n`;
+
+    it("fails the run and names the file, though biome exits 0", () => {
+      writeFileSync(
+        says,
+        internal("a.ts", "Operation not permitted (os error 1)"),
+      );
+      const r = format("a.ts");
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("Operation not permitted (os error 1)");
+      expect(r.out).toContain(
+        "✗ biome could not write 1 file(s), so they are NOT formatted:\n  a.ts\n",
+      );
+    });
+
+    it("under --check, says it could not read the file", () => {
+      writeFileSync(says, internal("a.ts", "Permission denied (os error 13)"));
+      const r = format("--check", "a.ts");
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain(
+        "✗ biome could not read 1 file(s), so they are NOT checked:\n  a.ts\n",
+      );
+    });
+
+    it("reads the header through biome's colours", () => {
+      const e = "\u001b";
+      writeFileSync(
+        says,
+        `${e}[0m\n${e}[0ma.ts${e}[0m${e}[0m ${e}[0m${e}[0minternalError/io${e}[0m${e}[0m ${e}[0m${e}[0m${e}[30m${e}[41m INTERNAL ${e}[0m\n`,
+      );
+      const r = format("a.ts");
+      expect(r.code, r.out).toBe(1);
+      expect(r.out).toContain("NOT formatted:\n  a.ts\n");
+    });
+
+    it("still passes a file biome has no handler for", () => {
+      writeFileSync(join(c.main, "notes.md"), "# notes\n");
+      writeFileSync(
+        says,
+        "notes.md files/missingHandler ━━━━━━━━━━━━━━━━━━━━\n\n  ! Biome doesn't know how to process this file\n  \n\n",
+      );
+      const r = format("a.ts", "notes.md");
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).not.toContain("✗");
     });
   });
 });

@@ -360,8 +360,10 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 `format.sh` with named paths fails on one that does not exist and that git does not
 know, and formats nothing. A named path that was deleted is skipped. `--check` runs
 the same biome check without writing, and exits non-zero when it would change
-something. `--help` prints the usage, an unknown option exits 64, and `--` ends the
-options for a path that starts with `-`.
+something. A file biome could not write (under `--check`, could not read) fails the
+run and is named, even when biome exits 0 and counts it as fixed, which it does
+under a sandbox that denies writes to the checkout. `--help` prints the usage, an
+unknown option exits 64, and `--` ends the options for a path that starts with `-`.
 
 ## Configuration reference
 
