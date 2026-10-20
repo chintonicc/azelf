@@ -1,6 +1,6 @@
 # A formatter that could not write says so, and a slice that needs a person hands itself over
 
-**Status:** OPEN — 0 of 2 phases landed · **Written:** 2026-10-19
+**Status:** OPEN — 1 of 2 phases landed · **Written:** 2026-10-19
 **Companion:** consumer-a's friction log: the three entries still open after `fd72b89`,
 one dated 2026-10-12 and two dated 2026-10-13. Every other entry is covered by a
 complete plan or a fix.
@@ -86,9 +86,9 @@ after the heading. Line numbers are as of `fd72b89`.
   nothing under the lock paths was applied, so other DB tickets can go on. If anything
   was applied, the slice keeps it and says what.
 
-## Phase 1 — `format.sh` fails on a file biome could not write
+## Phase 1 — `format.sh` fails on a file biome could not write (e0b75c1)
 
-- [ ] **1a. Read the diagnostics.**
+- [x] **1a. Read the diagnostics.**
   - Run biome through `tee` into a temp file, and keep its status from `PIPESTATUS`.
     `set -e` must not exit on it first.
   - Find the `<path> internalError/…` header lines. Keep colours when stdout is a
@@ -97,7 +97,7 @@ after the heading. Line numbers are as of `fd72b89`.
   - When any are found, print `✗ biome could not write N file(s), so they are NOT
     formatted:` with one path per line, and exit 1 whatever biome returned. Under
     `--check` the line says `could not read`.
-- [ ] **1b. The usage says it.** Add one line to `usage()`: a file biome cannot write
+- [x] **1b. The usage says it.** Add one line to `usage()`: a file biome cannot write
   or read fails the run, even when biome's own summary counts it as fixed.
 
   *Proof:* **`format.test.ts`**. The fake `bunx` gains a mode that prints an
@@ -105,6 +105,27 @@ after the heading. Line numbers are as of `fd72b89`.
   - `format.sh a.ts` exits 1 and names `a.ts`, and so does `format.sh --check a.ts`.
   - A fake that prints `files/missingHandler` for an `.md` and exits 0 still passes.
   - The first two fail on `fd72b89`.
+
+**As landed.** All in `format.sh`, after the paths are settled. The flags are built
+into arrays, so there is one biome call for both modes. Changes from the plan:
+- Both of biome's streams go through `tee` (`2>&1`), because 1.5.3 prints its
+  diagnostics on stderr and only the summary on stdout. The `✗` line and the paths go
+  to stderr. A person at a terminal sees the same text, in the order biome wrote it.
+- The match is `^<path> internalError/` on a line that does not start with a space,
+  read with `LC_ALL=C` after the escapes are stripped. A path with a space comes
+  through whole. Each path is named once, in biome's order.
+- The fake `bunx` prints the file `bunx-says` to stderr while it exists. A third test
+  feeds it a header in biome's escapes, because the test's stdout is never a terminal.
+  The new tests failed on `fd72b89` and the `.md` one passed.
+- The README's `format.sh` paragraph gets one sentence too.
+- Checked by hand with real biome 1.5.3 under `/bin/bash` 3.2: an immutable file, a
+  read-only one and a read-only `sp ace/c.ts` gave `Fixed 4 file(s)`. The script named
+  the three and exited 1. Under `script` (a pty) the colours stayed and the match still
+  held. `--check` on an unreadable file exited 1. A clean run exited 0, and no temp log
+  was left behind.
+- The log is made with `mktemp` in `$TMPDIR`. A sandbox that denies that too stops
+  the script there, with an error and before biome runs. That failure is loud, not
+  silent.
 
 ## Phase 2 — a slice that needs a person hands itself over
 
