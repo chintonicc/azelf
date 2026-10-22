@@ -1,6 +1,6 @@
 # A repo that is not a bun project can run azelf
 
-**Status:** OPEN — Phase 1 landed, Phase 2 not started · **Written:** 2026-10-22
+**Status:** DONE — both phases landed 2026-10-22 · **Written:** 2026-10-22
 **Companion:** consumer-b's adoption analysis, written in a consumer-b session on
 2026-10-22 and not committed anywhere. Its other findings are under "Not in this plan"
 and "What the consumer does itself".
@@ -72,7 +72,7 @@ runs.
   In the Python repo it would be an untracked directory. **Not tsconfig `paths` either:**
   that needs a `tsconfig.json` in a Python repo.
 
-## Phase 1 — the install step follows the lockfile
+## Phase 1 — the install step follows the lockfile — `137df67`
 
 State when this was written: uncommitted in the main checkout on `b77b291`, written by
 another session that was then stopped.
@@ -119,9 +119,9 @@ If it was committed in the meantime, review that commit instead. Run `git status
   - The ten new or changed install tests in `sliceRun.test.ts` fail on `b77b291`. The full
     suite passes under `/bin/bash` 3.2.57, the only bash on `PATH`.
 
-## Phase 2 — the config loads without the package in `node_modules`
+## Phase 2 — the config loads without the package in `node_modules` — `dc29b0e`
 
-- [ ] **2a. The loader rewrites the package name.** In `slice-config.ts`, before
+- [x] **2a. The loader rewrites the package name.** In `slice-config.ts`, before
   `await import(configPath)`, register a plugin with `Bun.plugin`.
   - Its `onLoad` filter matches `configPath` exactly, as an escaped regex.
   - It reads the file and replaces the package name in both quote styles:
@@ -134,7 +134,7 @@ If it was committed in the meantime, review that commit instead. Run `git status
   - It returns the rewritten text with `loader: "ts"`.
   - The comment says why: a repo with no azelf in `node_modules`, why `onLoad` and not
     `onResolve`, and why the running package.
-- [ ] **2b. README.** Two additions:
+- [x] **2b. README.** Two additions:
   - **Next to the paragraph on how shims resolve the package:** a repo that cannot
     take azelf as a dependency runs it from a checkout with `AZELF_DIR`. The config's
     import then points at that checkout. Only `slice.config.ts` is rewritten.
@@ -156,6 +156,29 @@ If it was committed in the meantime, review that commit instead. Run `git status
     particular any machine-specific fallback path in the shims.
   - `./scripts/slice-config.sh` gives the values.
   - A prep with `install: []` prints `no install step`.
+
+  *What building it found:*
+  - Bun hands `onLoad` the path with symlinks resolved, but with the case as it was
+    typed. On macOS `/tmp` → `/private/tmp`, and `~/documents` stays lower case
+    while `realpathSync` gives `Documents`. An exact filter on either form alone
+    misses the other. The filter takes both forms and ignores case, and a test
+    loads the config through a symlinked `SLICE_CONFIG`.
+  - vitest runs under node, where there is no `Bun`. The plugin is only
+    registered under bun. `sliceTabTitle.test.ts` imports the loader in vitest.
+  - `ownRoot` comes from `slice-version.ts`, which imports only node modules, so
+    there is no cycle.
+  - All four tests in `sliceConfigLoad.test.ts` fail on `137df67` with
+    `Cannot find module`.
+  - Hand check, 2026-10-22, passed:
+    - `init` wrote the shims with a fallback to the absolute path of the checkout
+      `AZELF_DIR` named, and printed a note that it is machine-specific. So run
+      `init` with `AZELF_DIR` set to the checkout that slices should run.
+    - With `AZELF_DIR` unset, `slice-config.sh` gave `SLICE_INSTALL=()` and `no
+      package.json — nothing to install` through that fallback.
+    - With a stub tracker, `slice-session.sh 40 --prep-only` printed `no install
+      step (install: [] in slice.config.ts)` and left a clean worktree.
+    - Still open: the shims' error for a missing package says "run 'bun install'
+      here", which is the wrong advice in such a repo.
 
 ## Order and cost
 
@@ -210,6 +233,19 @@ consumer-b (two repos; the mapping is in `CONSUMERS.local.md`):
     will not check out `main` twice.
   - The CI gate script lives in that repo.
   - No `--auto`.
+- **As consumer-b actually set it up (2026-10-22, on `137df67`):**
+  - One dedicated clone per repo, used only by azelf and on `main`. Nobody runs an
+    install in their main checkouts.
+  - In each clone, `node_modules/@chintonicc/azelf` is a symlink to a plain clone of
+    azelf at the landed commit. The bare import and the shims both resolve through
+    it, also from a new tab with no `AZELF_DIR`. The symlink this plan rejected is
+    therefore fine in a clone where nothing runs `npm ci`. Phase 2 is what a
+    checkout without one needs.
+  - Nothing azelf writes is committed there. The shims, `.claude/` and
+    `slice.config.ts` are untracked, listed in `.git/info/exclude`, and copied into
+    each worktree through `provisionCopy`. The copies keep their exec bit.
+  - Verified: `npm ci` at prep. Both suites green and read-only as gates (29 s and
+    81 s). Both sessions launched by the hook.
 - **consumer-a:** nothing changes for it. Bump it after Phase 2 anyway (`bun install
   --force`, because bun reuses a cached SHA), so that config and scripts are one
   version there too. Neither phase changes shims or skills, so no `azelf init`.
