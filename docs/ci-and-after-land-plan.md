@@ -139,15 +139,15 @@ after the heading. Line numbers are as of `6f94898`.
 - **The header line, not `--gates`.** The run header says
   `afterLand: <cmd> — after every land, under the land lock; a failure stops the
   landing.`
-- Nine tests:
+- Eight tests:
   - four for `slice-land.sh`: environment and order, exit 3 with the land kept, not
     run on a refusal, the lock held while it runs;
   - two for the dispatcher;
   - one for the finish at startup;
-  - one for the config refusing a bad `afterLand`;
-  - one already true before this phase: a refused land does not run it.
+  - one for the config refusing a bad `afterLand`.
 
   Three of the slice-land tests and both dispatcher tests failed before the change.
+  The refusal test was already true.
 - Full suite: 564/564. vitest also reported one unhandled
   `Timeout calling "onTaskUpdate"`. That is its own worker RPC under load, and it
   appeared once before this phase too.
