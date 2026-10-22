@@ -4736,14 +4736,15 @@ function retryCloses(): void {
       }
       continue;
     }
+    // Cleaned up before the line, so what the line reports is already true.
+    rmSync(saved, { force: true });
+    closePending.delete(id);
+    dropFinishedRecord(id);
     console.log(
       `\n[round ${round}] closed ${ref(
         id,
       )} — the close after its land had failed`,
     );
-    rmSync(saved, { force: true });
-    closePending.delete(id);
-    dropFinishedRecord(id);
   }
 }
 
