@@ -148,13 +148,21 @@ after the heading. Line numbers are as of `ffca576`.
 - [x] 2a. `idsIn` reads `owner/repo#n` as one qualified id, and never as `#n`.
   `blockersFromBody`, `blockerLine` and `bodyOnlyBlockers` follow.
 - [ ] 2b. The tracker's `addBlocker(id, "owner/repo#n")` resolves the internal id under
-  `repos/owner/repo/issues/n`.
+  `repos/owner/repo/issues/n`, and posts it to this repo's
+  `repos/{owner}/{repo}/issues/<id>/dependencies/blocked_by` as today.
+  - It replaces the refusal Phase 1 put in `addBlocker`. That `throw` for an id that
+    is not `^[0-9]+$` goes, and its test ("addBlocker refuses a blocker in another
+    repo") becomes the test that it resolves under the other repo's path.
+  - The README line under "A blocker in another repo is waited for" that says
+    `--sync-edges` does not write across repos yet changes to say it does.
 - [ ] 2c. Tests
-  - `## Blocked by\n- <owner>/<backend>#140` claims `"<owner>/<backend>#140"`, not
-    `"140"`.
-  - A claim that matches a qualified edge is not missing.
-  - `--sync-edges` writes the edge with the other repo's internal id.
-  - A bare `#140` next to it still reads as this repo's #140.
+  - Done in Phase 1, with 2a: the qualified claim, a claim matched to the qualified
+    edge, and a bare `#140` that stays this repo's.
+  - Left: `addBlocker("20", "acme/api#140")` resolves `repos/acme/api/issues/140`
+    and posts that internal id; an edge that already exists is still success; a
+    failed lookup still posts nothing.
+  - Left: `--sync-edges` in the dispatcher with the fixture tracker writes
+    `acme/web#7` as the blocker, and prints it as `acme/web#7`, not `#acme/web#7`.
 
 ## Order and cost
 
