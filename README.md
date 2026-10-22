@@ -112,7 +112,7 @@ Two invariants hold the whole thing together:
 | --- | --- |
 | **bun** ≥ 1.2 | required, including for Python projects — see [Runtime](#runtime-and-limitations) |
 | **git** with worktree support | 2.5+, so effectively any git |
-| **`gh`**, authenticated | only if you use the `github()` tracker |
+| **`gh`**, authenticated | only if you use the `github()` tracker or the `ciRuns()` gate |
 | a coding agent on PATH | `claude`, `codex`, or whatever you point `custom()` at |
 | macOS or Linux | the shell half is POSIX sh / bash 3.2 compatible |
 | **any terminal** | no PARTICULAR terminal is needed; `warp()` and `tmux()` are optional conveniences |
@@ -467,7 +467,7 @@ projects in *shape*, not just in the command it runs.
 
 | seam | ships | contract |
 | --- | --- | --- |
-| [gates](#gates) | `exitCode`, `exitCodeOverFiles`, `baselineDiff` | every gate is READ-ONLY, enforced |
+| [gates](#gates) | `exitCode`, `exitCodeOverFiles`, `baselineDiff`, `ciRuns` | every gate is READ-ONLY, enforced |
 | [tracker](#tracker) | `github()` | five methods; its "done" must be its "closed" |
 | [launcher](#launcher) | `manual()`, `warp()`, `tmux()` | `manual` is the default and a real answer |
 | [agent](#agent) | `claude()`, `codex()`, `custom()` | an interactive session, and an optional headless review |
@@ -475,7 +475,9 @@ projects in *shape*, not just in the command it runs.
 
 ### Gates
 
-Three shapes, because gates differ in shape and not only in argv.
+Three shapes for checks that run on your machine, because gates differ in shape and
+not only in argv. A fourth, `ciRuns`, waits for CI on GitHub: see
+[CI as a gate](#ci-as-a-gate).
 
 ```ts
 // 1. An exit code. Runs in the slice's worktree.
@@ -545,6 +547,44 @@ passed and, separately, which were skipped, so a skipped build is never read as 
 passed one. A scoped gate that does run holds the
 [gate lock](#two-dispatchers-on-one-repo) while it runs, like any gate. The config
 refuses `when: []` and a bare string: both would skip the gate for every slice.
+
+#### CI as a gate
+
+Some projects only move the base branch once CI is green on the exact SHA that lands.
+The dispatcher gates locally and pushes the base right after, so CI has to run inside a
+gate. `ciRuns` does that for GitHub Actions:
+
+```ts
+gates: [
+  exitCode(["bun", "run", "test"]),
+  ciRuns({ workflows: ["Tests", "Docker-Gate"] }),
+],
+```
+
+- **Already green:** when every named workflow already succeeded on the slice's SHA, the
+  gate passes without pushing anything. A retry with no new commit costs one call.
+- **The push:** otherwise it pushes the SHA to a branch of its own,
+  `azelf-ci/<branch>-<sha12>`, never to the slice's branch. Under `--auto` the base
+  moves and the land rebases. A second push of the slice's branch would then be a force
+  push, and a name per SHA never needs one. The branch is deleted at the end, green or
+  red. The runs stay readable through `gh run list --commit <sha>`.
+- **What decides:** only runs created after that push count, so an old red run on the
+  same SHA does not fail a retry. The newest run of each workflow decides. All of them
+  have to succeed.
+- **The deadline:** 45 minutes by default (`deadlineMinutes`), with a look every 20
+  seconds (`pollSeconds`). Past it, the gate is red. The message says which workflow was
+  still running and which never started.
+
+What it needs:
+
+- **A trigger:** the workflows have to run on a push to `azelf-ci/**`, or to any branch.
+  A workflow that never starts runs the gate into its deadline.
+- **`gh`**, signed in. The repository is origin's, read from its URL. If `gh` cannot list
+  the runs before the push, the gate fails at once.
+
+What it costs: the dispatcher waits inside the gate for as long as CI takes, and holds
+the [gate lock](#two-dispatchers-on-one-repo) while it waits. It preps nothing and lands
+nothing in that time. Put `ciRuns` last, so a red local suite never pushes.
 
 ### Tracker
 

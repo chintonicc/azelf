@@ -1,9 +1,10 @@
 /**
- * The landing gates, as three SHAPES rather than three commands.
+ * The landing gates, as SHAPES rather than commands.
  *
  *   exitCode(cmd)                                   # `bun run test`
  *   exitCodeOverFiles(cmd)                          # `biome check <changed files>`
  *   baselineDiff({ cmd, errorMatch, normalize })    # `tsc`, with standing debt
+ *   ciRuns({ workflows })                           # GitHub Actions on the slice's SHA
  *
  * `slice.config.ts` picks and orders them under `gates`; `slice-run.ts` hands
  * them to `runGates` before every land. Nothing here reads the config, on
@@ -277,6 +278,260 @@ export function baselineDiff(opts: BaselineDiffOptions): Gate {
         ),
         detail: introduced,
       };
+    },
+  };
+}
+
+// ─── CI on the slice's SHA ────────────────────────────────────────────────
+
+export type CiRunsOptions = {
+  /**
+   * The GitHub Actions workflows that must succeed on the slice's SHA, by the
+   * name GitHub shows for them. All of them; one that never runs is a red gate
+   * at the deadline, not a pass.
+   */
+  workflows: string[];
+  /** How long to wait for them before the gate is red. Default 45. */
+  deadlineMinutes?: number;
+  /** The pause between two looks at the runs. Default 20. */
+  pollSeconds?: number;
+} & GateOptions;
+
+type CiRun = {
+  databaseId: number;
+  name: string;
+  status: string;
+  conclusion: string;
+  url: string;
+};
+
+type CiVerdict =
+  | { kind: "green" }
+  | { kind: "red"; run: CiRun }
+  | { kind: "open"; running: string[]; missing: string[] };
+
+/**
+ * `owner/repo` for a remote URL on github.com, `host/owner/repo` for any other
+ * host (GitHub Enterprise), as `gh -R` takes it. null for a URL with no host,
+ * like a local path: there is no GitHub to ask.
+ */
+export function ghRepoOf(url: string): string | null {
+  const bare = url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "");
+  // Two forms: a URL with a scheme, and scp's `user@host:path`. Kept apart,
+  // because read as the second, `file:///srv/app` is host `file`.
+  const m =
+    bare.match(
+      /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i,
+    ) ?? bare.match(/^(?:[^@/]+@)?([^/:]+):(?!\/\/)(.+)$/);
+  if (!m) return null;
+  const [, host, path] = m as unknown as [string, string, string];
+  const parts = path.split("/").filter(Boolean);
+  if (parts.length < 2) return null;
+  const repo = parts.slice(-2).join("/");
+  return host.toLowerCase() === "github.com" ? repo : `${host}/${repo}`;
+}
+
+/**
+ * Pass iff GitHub Actions ran every named workflow on exactly the SHA that is
+ * about to land, and each succeeded. For a project whose rule is "green CI on
+ * the pushed SHA before the base branch moves": the dispatcher gates locally
+ * and pushes the base right after, so the CI run has to happen inside a gate.
+ *
+ *   ciRuns({ workflows: ["Tests", "Docker-Gate"] })
+ *
+ * Ported from consumer-b's backend, whose own script did this from its
+ * adoption. What it does, and why:
+ *
+ *  - **Already green, no push.** A retry with no new head costs one call.
+ *  - **A branch of its own per SHA**, `azelf-ci/<branch>-<sha12>`, never the
+ *    slice's branch. Under `--auto` the base moves, the land rebases, and a
+ *    second push of the slice's branch would be a force push. A name per SHA
+ *    never needs one. It is deleted at the end, green or red; the runs stay
+ *    readable through `gh run list --commit <sha>`. The workflows have to run
+ *    on a push to it: on every branch, or at least on `azelf-ci/**`.
+ *  - **The branch is deleted before the push too.** A dispatcher killed while
+ *    it waited leaves the branch at this SHA, and pushing it again would change
+ *    nothing on GitHub and start no workflow.
+ *  - **Only runs created after the push count.** The newest run on the SHA is
+ *    noted before it, so an old red run from an earlier attempt does not fail
+ *    the retry. After the push, the newest run per workflow decides.
+ *  - **A deadline, counted in waits.** Every look and every sleep goes through
+ *    `ctx.exec`, so the tests drive it with no clock; the real wait runs past
+ *    the deadline by what the looks themselves take, a second or two each.
+ *  - **gh failing before the push fails the gate** (not installed, signed out,
+ *    no such repo). During the wait it is one look that found nothing, and the
+ *    deadline names the last failure.
+ *
+ * The repo is origin's, from its URL, because origin is where the push goes:
+ * gh's own guess prefers an `upstream` remote. Read-only like every gate: the
+ * pushes move refs, which `git status` does not show.
+ *
+ * It holds the dispatcher for as long as CI takes, gate lock included, like
+ * any slow gate. Put it last, so a red local suite never pushes.
+ */
+export function ciRuns(opts: CiRunsOptions): Gate {
+  const { workflows } = opts;
+  if (!workflows.length || workflows.some((w) => !w.trim())) {
+    throw new Error(
+      "ciRuns: workflows must name at least one workflow, and no empty name — with none, every SHA would pass",
+    );
+  }
+  const deadlineMinutes = opts.deadlineMinutes ?? 45;
+  const pollSeconds = opts.pollSeconds ?? 20;
+  for (const [key, v] of [
+    ["deadlineMinutes", deadlineMinutes],
+    ["pollSeconds", pollSeconds],
+  ] as const) {
+    if (!Number.isFinite(v) || v <= 0) {
+      throw new Error(`ciRuns: ${key} must be a positive number, not ${v}`);
+    }
+  }
+  const polls = Math.ceil((deadlineMinutes * 60) / pollSeconds);
+  const name = `CI: ${workflows.join(", ")}`;
+
+  return {
+    name,
+    retries: opts.retries,
+    when: opts.when,
+    run(ctx) {
+      const red = (why: string, detail?: string[]): GateResult => ({
+        ok: false,
+        why: withHint(`CI: ${why}`, opts.hint),
+        ...(detail ? { detail } : {}),
+      });
+      const git = (...args: string[]) =>
+        ctx.exec(["git", ...args], ctx.worktree);
+
+      const branch = git("branch", "--show-current").out.trim();
+      if (!branch) {
+        return red(
+          "the worktree is on a detached HEAD — the CI push is named after its branch",
+        );
+      }
+      const head = git("rev-parse", "HEAD");
+      const sha = head.out.trim();
+      if (!head.ok || !/^[0-9a-f]{40}$/.test(sha)) {
+        return red("could not read the worktree's HEAD", tail(head.out));
+      }
+      const short = sha.slice(0, 7);
+      const originUrl = git("remote", "get-url", "origin").out.trim();
+      const repo = ghRepoOf(originUrl);
+      if (!repo) {
+        return red(
+          `origin is not a GitHub repository (${originUrl}) — ciRuns reads GitHub Actions through gh`,
+        );
+      }
+      const listArgv = ["gh", "run", "list", "-R", repo, "--commit", sha];
+      const listCmd = listArgv.join(" ");
+
+      const look = (): { runs: CiRun[] } | { error: string[] } => {
+        const r = ctx.exec(
+          [
+            ...listArgv,
+            "--limit",
+            "30",
+            "--json",
+            "databaseId,name,status,conclusion,url",
+          ],
+          ctx.worktree,
+        );
+        // `out` carries stderr too; gh prints its JSON as one line of its own.
+        const json = r.ok
+          ? r.out.split("\n").find((l) => l.trim().startsWith("["))
+          : undefined;
+        if (json === undefined) return { error: tail(r.out) };
+        try {
+          return { runs: JSON.parse(json) as CiRun[] };
+        } catch {
+          return { error: tail(r.out) };
+        }
+      };
+      const verdict = (runs: CiRun[], after: number): CiVerdict => {
+        const counted = runs
+          .filter((r) => r.databaseId > after)
+          .sort((a, b) => b.databaseId - a.databaseId);
+        const running: string[] = [];
+        const missing: string[] = [];
+        for (const wf of workflows) {
+          const newest = counted.find((r) => r.name === wf);
+          if (!newest) missing.push(wf);
+          else if (newest.status !== "completed") running.push(wf);
+          else if (newest.conclusion !== "success") {
+            return { kind: "red", run: newest };
+          }
+        }
+        return running.length || missing.length
+          ? { kind: "open", running, missing }
+          : { kind: "green" };
+      };
+
+      const first = look();
+      if ("error" in first) {
+        return red(`gh could not list the runs on ${short}`, first.error);
+      }
+      if (verdict(first.runs, 0).kind === "green") return { ok: true };
+      const after = Math.max(0, ...first.runs.map((r) => r.databaseId));
+
+      const ciRef = `refs/heads/azelf-ci/${branch.replaceAll(
+        "/",
+        "-",
+      )}-${sha.slice(0, 12)}`;
+      const ciBranch = ciRef.slice("refs/heads/".length);
+      const remove = () => git("push", "-q", "origin", `:${ciRef}`);
+      remove();
+      const pushed = git("push", "-q", "origin", `HEAD:${ciRef}`);
+      if (!pushed.ok) {
+        return red(
+          `the push of ${short} to ${ciBranch} was refused`,
+          tail(pushed.out),
+        );
+      }
+      try {
+        let last: CiVerdict = { kind: "open", running: [], missing: workflows };
+        let lastError: string[] | null = null;
+        for (let i = 0; i < polls; i++) {
+          ctx.exec(["sleep", String(pollSeconds)], ctx.worktree);
+          const now = look();
+          if ("error" in now) {
+            lastError = now.error;
+            continue;
+          }
+          lastError = null;
+          last = verdict(now.runs, after);
+          if (last.kind === "green") return { ok: true };
+          if (last.kind === "red") {
+            return red(
+              `\`${last.run.name}\` is ${
+                last.run.conclusion || "not a success"
+              } on ${short}`,
+              [last.run.url, listCmd],
+            );
+          }
+        }
+        const open = last.kind === "open" ? last : { running: [], missing: [] };
+        const state = [
+          ...open.running.map((w) => `\`${w}\` still running`),
+          ...open.missing.map((w) => `\`${w}\` never started`),
+        ].join(", ");
+        const minutes = `${deadlineMinutes} minute${
+          deadlineMinutes === 1 ? "" : "s"
+        }`;
+        return red(`not finished on ${short} after ${minutes} — ${state}`, [
+          listCmd,
+          ...(lastError
+            ? [`The last look at the runs failed: ${lastError.join(" ")}`]
+            : open.missing.length
+              ? [
+                  "A workflow that never starts: check its name, and that it runs on a push to azelf-ci/**.",
+                ]
+              : []),
+        ]);
+      } finally {
+        remove();
+      }
     },
   };
 }

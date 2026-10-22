@@ -16,6 +16,7 @@ export type { Agent, Which } from "./scripts/slice-agent";
 export { claude, codex, custom } from "./scripts/slice-agent";
 
 export type {
+  CiRunsOptions,
   Flaky,
   Gate,
   GateOptions,
@@ -24,6 +25,7 @@ export type {
 } from "./scripts/slice-gates";
 export {
   baselineDiff,
+  ciRuns,
   exitCode,
   exitCodeOverFiles,
   runGates,
