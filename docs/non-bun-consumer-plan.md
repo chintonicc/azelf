@@ -212,8 +212,9 @@ paragraphs.
 - **Python manifests in `INSTALL_MANIFESTS`** (`pyproject.toml`, `uv.lock`). A configured
   Python install does not run again after a rebase. consumer-b's backend installs
   nothing.
-- **A `package.json` without a lockfile** still gets `bun install` at prep, which
-  writes an untracked `bun.lock`, as before.
+- **A `package.json` without a lockfile** still got `bun install` at prep, which
+  wrote an untracked `bun.lock`. Fixed after the plan: it gets
+  `bun install --frozen-lockfile` in both phases, which writes none.
 
 ## What the consumer does itself
 

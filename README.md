@@ -410,7 +410,7 @@ export default {
 | `exclusiveLockLabel` | `string?` | tracker label on tickets that will touch `exclusiveLockPaths`; they are started one at a time. Needs `exclusiveLockPaths` |
 | `humanLabel` | `string?` | tracker label on tickets only a person can do. They are never dispatched, even when named, and they hold their dependents until closed. `init` writes `ready-for-human` |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
-| `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, no `package.json` → nothing. `[]` installs nothing |
+| `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
 | `numberedIgnore` | `string[]?` | paths whose leading number is not a sequence, so two files under one number there are left alone. Same syntax. See [Two files, one number](#two-files-one-number) |

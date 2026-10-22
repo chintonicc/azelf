@@ -24,6 +24,8 @@
  * So the lockfile decides, and the consumer can say otherwise in `install`.
  * A `package.json` with no lockfile at all still gets bun: it is the one tool
  * azelf already requires on PATH, where npm, pnpm and yarn may not be there.
+ * It gets the frozen form in both phases, because it has no lockfile to keep
+ * and the plain one would write one.
  *
  * TWO PHASES, ONE RULE
  * --------------------
@@ -89,15 +91,12 @@ export function detectInstall(dir: string, phase: InstallPhase): InstallChoice {
   if (at("package-lock.json")) {
     return { argv: ["npm", "ci"], why: "package-lock.json" };
   }
-  // bun's two forms, as before this module existed. The frozen one with no
-  // lockfile at all installs and writes no lockfile (bun 1.3.5), which is what a
-  // reinstall before the gates needs: a plain install would write a bun.lock
-  // into the tree the gates are about to judge.
+  // Frozen in both phases. With no lockfile at all it installs and writes no
+  // lockfile (bun 1.3.5). The plain form wrote a bun.lock that git does not
+  // track, so the prep left a dirty worktree, which slice-done.sh refuses, and
+  // the reinstall changed the tree the gates were about to judge.
   return {
-    argv:
-      phase === "prep"
-        ? ["bun", "install"]
-        : ["bun", "install", "--frozen-lockfile"],
+    argv: ["bun", "install", "--frozen-lockfile"],
     why: "package.json without a lockfile — bun, which azelf already requires",
   };
 }

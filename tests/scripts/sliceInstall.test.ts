@@ -60,15 +60,12 @@ describe("the lockfile decides", () => {
 
   it("falls back to bun for a package.json with no lockfile — the one tool azelf requires", () => {
     touch("package.json");
+    // Frozen in both phases: with no lockfile it writes none, and the plain
+    // form wrote an untracked bun.lock into the worktree.
     const prep = detectInstall(dir, "prep");
-    expect(prep.argv).toEqual(["bun", "install"]);
+    expect(prep.argv).toEqual(["bun", "install", "--frozen-lockfile"]);
     expect(prep.why).toContain("without a lockfile");
-    // As before: frozen after a rebase, which with no lockfile writes nothing.
-    expect(detectInstall(dir, "reinstall").argv).toEqual([
-      "bun",
-      "install",
-      "--frozen-lockfile",
-    ]);
+    expect(detectInstall(dir, "reinstall").argv).toEqual(prep.argv);
   });
 
   it("prefers bun's lockfile when a checkout carries more than one", () => {

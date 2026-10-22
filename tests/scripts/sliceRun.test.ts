@@ -1173,6 +1173,36 @@ describe("the prep's install step", () => {
     expect(existsSync(join(c.root, "installed-marker"))).toBe(true);
   });
 
+  /**
+   * A plain `bun install` with no lockfile writes a bun.lock that git does not
+   * track, and slice-done.sh refuses a dirty tree. The frozen form installs
+   * and writes none (bun 1.3.5). The dependency is a `file:` one, so no network.
+   */
+  it("leaves no bun.lock behind where package.json has no lockfile", () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    mkdirSync(join(c.main, "dep"));
+    writeFileSync(
+      join(c.main, "dep", "package.json"),
+      '{ "name": "dep", "version": "1.0.0" }\n',
+    );
+    writeFileSync(
+      join(c.main, "package.json"),
+      '{ "name": "fx", "dependencies": { "dep": "file:./dep" } }\n',
+    );
+    git(c.main, "add", "-A");
+    git(c.main, "commit", "-qm", "chore: a dependency, and no lockfile");
+    git(c.main, "push", "-q", "origin", "main");
+
+    const out = sh(c.main, "./scripts/slice-session.sh 40 --prep-only");
+
+    expect(out).toContain(
+      "✓ dependencies installed (bun install --frozen-lockfile)",
+    );
+    expect(existsSync(join(c.wt(40), "node_modules", "dep"))).toBe(true);
+    expect(existsSync(join(c.wt(40), "bun.lock"))).toBe(false);
+    expect(git(c.wt(40), "status", "--porcelain")).toBe("");
+  });
+
   it("fails the prep when the configured command fails, naming it", () => {
     c = makeConsumer({
       worktrees: [40],
