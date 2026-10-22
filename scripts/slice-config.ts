@@ -46,7 +46,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { type Agent, claude } from "./slice-agent";
 import type { Gate } from "./slice-gates";
@@ -61,6 +61,7 @@ import {
   parentFromBody,
   refFor,
 } from "./slice-tracker";
+import { ownRoot } from "./slice-version";
 
 export type SliceConfig = {
   /** Branch slices are cut from and land onto. */
@@ -620,6 +621,52 @@ function findConfigPath(): string {
 }
 
 export const configPath = findConfigPath();
+
+/**
+ * The config imports the package by name, and Bun resolves that name from the
+ * config's own directory, through the repo's node_modules. A repo that cannot
+ * take azelf as a dependency has none there (consumer-b: a Python repo with no
+ * package.json, and an npm repo whose CI `npm ci` would refuse a dependency
+ * its lockfile does not list). It runs azelf from a checkout through
+ * AZELF_DIR, and the import below failed before the first ticket:
+ * `Cannot find module '@chintonicc/azelf' from '<repo>/slice.config.ts'`.
+ *
+ * So the config's source is rewritten as it loads. The package name and its
+ * one other export, `/package.json`, point at the package that is running.
+ * That is the copy the scripts are, too: with AZELF_DIR set in a repo that also
+ * has the package in node_modules, the config used to load the other one. Any
+ * other subpath is left alone and fails with Bun's own message, as before.
+ *
+ * - `onLoad`, not `onResolve`: a runtime `onResolve` was never asked about the
+ *   bare name (bun 1.3.5), and the import failed as it did without it.
+ * - Only the config file. A helper module it imports loads as it is, so only
+ *   slice.config.ts can import the package by name. The README says so.
+ * - The filter is the path as found and as resolved, ignoring case. Bun hands
+ *   `onLoad` the path with symlinks resolved but the case as it was typed:
+ *   macOS's /tmp is the one, a ~/documents typed in lower case the other.
+ * - Under vitest there is no `Bun`, and vitest resolves the name itself.
+ */
+const PACKAGE_IMPORT = /(["'])@chintonicc\/azelf(\/package\.json)?\1/g;
+if (typeof Bun !== "undefined") {
+  const literal = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const paths = [...new Set([configPath, realpathSync(configPath)])];
+  Bun.plugin({
+    name: "azelf: the config's import of azelf",
+    setup(build) {
+      build.onLoad(
+        { filter: new RegExp(`^(?:${paths.map(literal).join("|")})$`, "i") },
+        async ({ path }) => ({
+          contents: (await Bun.file(path).text()).replace(
+            PACKAGE_IMPORT,
+            (_, _quote, json) =>
+              JSON.stringify(join(ownRoot, json ? "package.json" : "index.ts")),
+          ),
+          loader: "ts",
+        }),
+      );
+    },
+  });
+}
 
 /**
  * Top-level await, deliberately. The config is a TypeScript module holding

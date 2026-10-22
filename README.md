@@ -172,6 +172,17 @@ the tree they were run in either way, and are a few lines of logic, safe to comm
 After a pin bump, `bun install --force` and `azelf init` in the main checkout, and
 commit and push, so new worktrees get the new shims.
 
+A repo that cannot take azelf as a dependency runs it from a checkout instead: a
+Python repo with no `package.json`, or an npm repo whose CI `npm ci` would refuse a
+dependency its lockfile does not list. Set `AZELF_DIR` to the checkout and run the
+CLI as `bun $AZELF_DIR/bin/azelf.ts`. `slice.config.ts` still imports
+`@chintonicc/azelf`, and the loader points that import at the package that is
+running, so no `node_modules` is needed. Only `slice.config.ts` itself is rewritten:
+a helper module it imports cannot import the package by name. If the repo's
+`tsconfig` or linter covers its root, exclude `slice.config.ts` there, since tsc
+cannot resolve the name either. Give azelf a checkout of its own, not one you edit,
+or every slice runs your uncommitted changes.
+
 A bump during a wave splits it: a running dispatcher keeps the code it started with,
 and every session and land it starts after that runs the new scripts. It shows its
 version at the start and says so the first round the install differs:
@@ -1533,7 +1544,8 @@ this and a project that does not already have bun.
 
 That has one consequence worth stating up front: **a Python project still needs bun
 on PATH**, because the loader reads a TypeScript config and the shell bridge shells
-out to it. The gates themselves are just argv, so pytest and ruff are no harder to
+out to it. It also needs `AZELF_DIR`, since it has nowhere to install azelf, and runs
+the CLI as `bun $AZELF_DIR/bin/azelf.ts` (see [What `init` writes](#what-init-writes)). The gates themselves are just argv, so pytest and ruff are no harder to
 express than vitest and biome. The install step follows the lockfile, not bun: a
 checkout without `package.json` installs nothing, one with `package-lock.json` runs
 `npm ci` (see `install` in the configuration reference), so neither a Python repo
