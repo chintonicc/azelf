@@ -311,8 +311,12 @@ export default {
       : "[]"
   },
   startPrompt: "x",${agent}${launcher}${
-    opts.configExtra ? `\n  ${opts.configExtra}` : ""
-  }
+    // The disk floor is off unless a test sets it: with the default 10 GB, a
+    // machine short of space failed every test that preps a worktree.
+    /\bminFreeDiskGb\b/.test(opts.configExtra ?? "")
+      ? ""
+      : "\n  minFreeDiskGb: 0,"
+  }${opts.configExtra ? `\n  ${opts.configExtra}` : ""}
 } satisfies SliceConfig;
 `,
   );
