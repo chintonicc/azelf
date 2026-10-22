@@ -4049,6 +4049,13 @@ function askAboutBlocked(
 /** Set by the escalation prompt; the round loop checks it and stops cleanly. */
 let stopRequested = false;
 
+/**
+ * The slice whose land went through and whose `afterLand` then failed
+ * (slice-land.sh's exit 3). The round loop stops on it before landing
+ * anything else: the base needs a person, and a next land would go on top.
+ */
+let afterLandFailed: TicketId | null = null;
+
 /** Resolver passes one land attempt gets when the base moves under it. */
 const RESOLVE_PASSES = 2;
 
@@ -4123,6 +4130,9 @@ const LAND_RACES = 2;
 
 /** `slice-land.sh`'s exit for a base that moved: rebase, and try again. */
 const LAND_DIVERGED = 75;
+
+/** `slice-land.sh`'s exit for a land that went through and whose `afterLand` failed. */
+const LAND_AFTER_FAILED = 3;
 
 /**
  * The files the base changed between two of its commits that this slice
@@ -4285,13 +4295,16 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
         } times between its rebase and its land`,
       );
     }
-    if (!ok) {
+    // Exit 3 is not a refusal: the slice is pushed and closed, and only the
+    // check after it failed. It is recorded as landed below, like any other.
+    if (!ok && status !== LAND_AFTER_FAILED) {
       return park(
         t,
         "land",
         "slice-land.sh refused — a hold, a hook, or a push that failed; its output above says which",
       );
     }
+    if (status === LAND_AFTER_FAILED) afterLandFailed = t.id;
     landedFiles.set(t.id, landing);
     landedAdded.set(t.id, landingAdded);
     closePending.set(t.id, { said: false });
@@ -5214,6 +5227,13 @@ console.log(
         .join(", ")}`
     : "  gates: NONE configured — whatever is committed lands. See slice.config.ts.",
 );
+if (config.afterLand?.length) {
+  console.log(
+    `  afterLand: ${config.afterLand.join(
+      " ",
+    )} — after every land, under the land lock; a failure stops the landing.`,
+  );
+}
 console.log(
   reviewEnabled
     ? `  review: spec + standards before each land${
@@ -5288,17 +5308,21 @@ for (const file of readdirSync(commonDir())) {
   console.log(
     `\n  ${ref(id)}: its land was interrupted after the push — finishing it …`,
   );
-  const { ok } = run(
+  const { ok, status } = run(
     ["./scripts/slice-land.sh", id, ...(autoLand ? ["--end-session"] : [])],
     { inherit: true, allowFail: true },
   );
+  // Exit 3 finished the land and then failed its afterLand: landed, and the
+  // first round stops before landing anything else.
+  const finished = ok || status === LAND_AFTER_FAILED;
+  if (status === LAND_AFTER_FAILED) afterLandFailed = id;
   // No record left means the ticket closed. A record and a zero exit means the
   // close failed, and the dispatcher's own retry takes it from there. A
   // non-zero exit is a refusal (origin lacks what the record says landed): the
   // ticket stays open, and the record keeps it from starting.
   if (!hasLandRecord(id)) {
     t.open = false;
-  } else if (ok) {
+  } else if (finished) {
     t.open = false;
     closePending.set(id, { said: false });
   }
@@ -5337,6 +5361,23 @@ let lastLockBlockAt = 0;
 // Set when the run stopped on an error rather than finishing or parking: the
 // ending prints the resume command for it too.
 let stoppedOnError = false;
+
+/**
+ * A land went through and its `afterLand` failed: stop before the next land
+ * goes on top of a base nobody has looked at. Not `stopOnError`, because
+ * nothing is wrong with the run — sessions keep working in their tabs, and
+ * the same command picks it up once the base is fixed. True when it stopped.
+ */
+function stopForAfterLand(): boolean {
+  if (!afterLandFailed) return false;
+  console.log(
+    `\n  stopping: ${ref(
+      afterLandFailed,
+    )} landed, and afterLand failed after it. It stays landed and closed; nothing else lands until ${baseBranch} has been looked at. Sessions still running keep working. Fix ${baseBranch}, then pick the run up again:\n\n    ${resumeCommand()}`,
+  );
+  process.exitCode = 1;
+  return true;
+}
 
 /**
  * The run cannot go on, and slices may still be running: say so, name them,
@@ -5390,6 +5431,9 @@ try {
     // Land before launching, so a slot freed this round is refilled this round.
     // One per round: every land fast-forwards the same master in the same main
     // worktree, so they cannot be done concurrently.
+    // Before the land too: a land finished at startup may have failed its
+    // afterLand already.
+    if (stopForAfterLand()) break;
     const finished = tickets.filter((t) => awaitingLand(t, isParked));
     if (finished.length) {
       console.log(
@@ -5397,6 +5441,7 @@ try {
       );
       tryLand(finished[0] as Ticket);
     }
+    if (stopForAfterLand()) break;
 
     if (stopRequested) {
       console.log(

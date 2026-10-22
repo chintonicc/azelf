@@ -25,6 +25,7 @@
 #   SLICE_HUMAN_LABEL
 #   SLICE_EXCLUSIVE_LOCK_PATHS[] SLICE_PROVISION_COPY[]
 #   SLICE_INSTALL[] SLICE_INSTALL_WHY (the prep's install step, and why)
+#   SLICE_AFTER_LAND[] (slice-land.sh's last step; empty when none)
 #
 # The tracker's METHODS are not exported — they are functions, like the gates.
 # The four slice_tracker_* helpers each spawn bun once and ask the loader to

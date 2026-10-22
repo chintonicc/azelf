@@ -111,6 +111,20 @@ export type SliceConfig = {
    */
   install?: string[];
   /**
+   * A command run after every land, in the main checkout, as the last step of
+   * slice-land.sh: after the push, the close and the cleanup, and while the
+   * land lock is still held, so the next land waits for it. It gets
+   * SLICE_TICKET and SLICE_LANDED_HEAD. Optional; left out or `[]`, nothing
+   * runs.
+   *
+   * For a check that only a landed base can answer: consumer-b deploys from
+   * main, and under --auto nobody looked at the deploy before the next slice
+   * landed on top of it. A failure leaves the land as it is — it is pushed and
+   * closed — and stops the dispatcher. azelf sets no timeout: a check that can
+   * hang bounds itself (`curl --max-time`).
+   */
+  afterLand?: string[];
+  /**
    * Free space, in GB, the dispatcher keeps where the worktrees go. Optional;
    * 10 when left out. Below it, nothing new is prepped: landing carries on,
    * and each land removes a worktree.
@@ -580,6 +594,16 @@ function validate(c: SliceConfig): SliceConfig {
       );
     }
   }
+  if (c.afterLand !== undefined) {
+    if (
+      !Array.isArray(c.afterLand) ||
+      c.afterLand.some((w) => typeof w !== "string" || w === "")
+    ) {
+      bad(
+        'afterLand must be an array of non-empty strings, like ["./scripts/health.sh"] — [] or left out runs nothing',
+      );
+    }
+  }
   return c;
 }
 
@@ -762,6 +786,7 @@ export function shellAssignments(): string {
     shArray("SLICE_PROVISION_COPY", config.provisionCopy),
     shArray("SLICE_INSTALL", install.argv),
     `SLICE_INSTALL_WHY=${shq(install.why)}`,
+    shArray("SLICE_AFTER_LAND", config.afterLand ?? []),
   ].join("\n");
 }
 

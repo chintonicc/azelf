@@ -362,6 +362,98 @@ describe("slice-land.sh and the land lock", () => {
 });
 
 /**
+ * A command after every land. consumer-b deploys from main, and under --auto
+ * nobody checked the deploy before the next slice landed on top of it. It runs
+ * last, in the main checkout, under the land lock; a failure leaves the land
+ * as it is and exits 3.
+ */
+describe("slice-land.sh and afterLand", () => {
+  let c: Consumer;
+  const commitIn = (n: number) => {
+    const wt = c.wt(n);
+    writeFileSync(join(wt, `${n}.txt`), `${n}\n`);
+    git(wt, "add", `${n}.txt`);
+    git(wt, "commit", "-qm", `feat: ${n}`);
+  };
+  const consumer = (script: string) => {
+    c = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      configExtra: `afterLand: ["bash", "-c", ${JSON.stringify(script)}],`,
+    });
+    commitIn(40);
+    commitIn(41);
+  };
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("runs after the push and the close, in the main checkout, with the ticket and the landed head", () => {
+    consumer(
+      'echo "$PWD|$SLICE_TICKET|$SLICE_LANDED_HEAD|$(git rev-parse origin/main)|$(cat ../closes.txt | head -n 1)" > ../after-land.txt',
+    );
+
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+
+    const head = git(c.main, "rev-parse", "HEAD");
+    expect(land).toContain('── after the land: bash -c echo "$PWD|');
+    expect(land).toContain("✓ afterLand passed");
+    expect(readFileSync(join(c.root, "after-land.txt"), "utf8").trim()).toBe(
+      `${c.main}|40|${head}|${head}|40`,
+    );
+  });
+
+  it("exits 3 when it fails, and leaves the land pushed and the ticket closed", () => {
+    consumer("echo the health check is red; exit 7");
+    const lock = join(c.main, ".git", "azelf-land.lock");
+
+    const r = shResult(c.main, "./scripts/slice-land.sh 40");
+
+    expect(r.code).toBe(3);
+    expect(r.out).toContain("the health check is red");
+    expect(r.out).toContain(
+      "✗ afterLand failed (exit 7) — #40 is landed and closed; main needs a look before anything else lands",
+    );
+    expect(git(c.main, "log", "-1", "--format=%s", "origin/main")).toBe(
+      "feat: 40",
+    );
+    expect(readFileSync(c.closeFile, "utf8")).toContain("40\n");
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("does not run for a land that is refused", () => {
+    consumer("echo AFTER-LAND-RAN");
+
+    const r = shResult(c.main, "./scripts/slice-land.sh 77");
+
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain("AFTER-LAND-RAN");
+    expect(r.out).not.toContain("after the land");
+  });
+
+  it("holds the land lock while it runs, so the next land waits for it", async () => {
+    consumer("while [ ! -f ../go ]; do sleep 0.1; done");
+    const first = startScript(c.main, "./scripts/slice-land.sh 40");
+    try {
+      await first.until("── after the land");
+      const second = startScript(c.main, "./scripts/slice-land.sh 41");
+      try {
+        await second.until(/waiting for ticket\/40's land \(pid \d+, since /);
+        expect(second.output()).not.toContain("fast-forwarding");
+
+        writeFileSync(join(c.root, "go"), "");
+        expect(await first.exited).toBe(0);
+        // 41 was cut from the old main, so it is refused as diverged.
+        expect(await second.exited).toBe(75);
+      } finally {
+        await second.stop();
+      }
+    } finally {
+      writeFileSync(join(c.root, "go"), "");
+      await first.stop();
+    }
+  }, 60_000);
+});
+
+/**
  * A land interrupted after its push: the work is public, the ticket open, and
  * the worktree or the branch may be half gone. The record slice-land.sh writes
  * after the push is what a second run finishes from. A close that fails stands

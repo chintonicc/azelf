@@ -40,6 +40,7 @@ session in each, and lands the finished ones — re-running the gates itself, be
   - [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict)
   - [What retries a parked slice](#what-retries-a-parked-slice)
   - [Fixing a slice by hand while the dispatcher runs](#fixing-a-slice-by-hand-while-the-dispatcher-runs)
+  - [A check after every land](#a-check-after-every-land)
 - [Two dispatchers on one repo](#two-dispatchers-on-one-repo)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
@@ -411,6 +412,7 @@ export default {
 | `humanLabel` | `string?` | tracker label on tickets only a person can do. They are never dispatched, even when named, and they hold their dependents until closed. `init` writes `ready-for-human` |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
+| `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
 | `numberedIgnore` | `string[]?` | paths whose leading number is not a sequence, so two files under one number there are left alone. Same syntax. See [Two files, one number](#two-files-one-number) |
@@ -1426,6 +1428,40 @@ It finishes from the record, even if the branch is already gone:
 A dispatcher does the same, before its first round, for every ticket in its run that
 has a record, and never preps that ticket again. A record for a ticket outside its run
 gets one line, naming the command.
+
+### A check after every land
+
+Gates judge the slice before it lands. Some checks can only run after it: a deploy
+from the base branch, for example. Under `--auto` nobody looks at that deploy before
+the next slice lands on top of it. `afterLand` is such a check:
+
+```ts
+afterLand: ["./scripts/health-after-deploy.sh"],
+```
+
+- **When it runs:** `slice-land.sh` runs it as its last step, after the push, the close
+  and the cleanup. That covers every land: the dispatcher's, one by hand, and the
+  finishing of an interrupted one. It runs in the main checkout, with `SLICE_TICKET`
+  and `SLICE_LANDED_HEAD` (the full SHA) in its environment.
+- **The land lock:** the lock is still held while it runs. The next land, from this
+  dispatcher or another one or by hand, waits until the check has passed.
+- **When it fails:** the land stays. It is pushed and closed. `slice-land.sh` exits 3
+  with `✗ afterLand failed (exit N) — #n is landed and closed`. A dispatcher records the
+  slice as landed and lands nothing more. Sessions in their tabs keep working. It
+  exits 1 with the command that picks the run up once the base is fixed:
+
+  ```
+    stopping: #101 landed, and afterLand failed after it. It stays landed and closed; …
+
+      bunx azelf run --auto -y 102 103
+  ```
+
+  Whether the base needs a revert is your call. azelf does not undo a land.
+- **No timeout.** The command bounds itself (`curl --max-time`, a loop with a deadline).
+  One that hangs holds the land lock, and every other land gives up after five minutes
+  of waiting and parks.
+- **A land killed while its check runs** does not run the check again: the record is
+  already gone by then.
 
 ## Two dispatchers on one repo
 

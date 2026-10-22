@@ -8,7 +8,8 @@
 #                                                # sitting in the removed worktree
 #
 # Exits 75 when the base branch has moved and the slice needs a rebase before
-# it can land, and 1 for every other refusal.
+# it can land, and 1 for every other refusal. Exits 3 when it LANDED and the
+# config's afterLand then failed: the land stands, the base needs a look.
 #
 # WHY THIS EXISTS
 # ---------------
@@ -540,4 +541,31 @@ fi
 if $closed; then
   rm -f "$landed_record"
   if $finishing; then echo "✓ finished the land of $ticket_ref"; fi
+fi
+
+# ─── After the land ────────────────────────────────────────────────────────
+#
+# The config's afterLand: a check only a landed base can answer, like a health
+# check on what main just deployed. consumer-b deploys from main, and under
+# --auto nobody looked at the deploy before the next slice landed on top of it.
+#
+# Here, so that no way of landing skips it: the dispatcher, slice-done.sh's
+# advice and a hand land all come through this script, and so does finishing
+# an interrupted land. Last, because the close is what the next wave waits on.
+# Still under the land lock (released by the EXIT trap), so the next land
+# waits until this has passed. No timeout: the command bounds itself, and one
+# that hangs holds every other land until their LAND_LOCK_WAIT runs out.
+#
+# A failure undoes nothing — the work is pushed and the ticket closed — and
+# exits 3, which the dispatcher reads as "landed, then stop landing".
+if [[ ${#SLICE_AFTER_LAND[@]} -gt 0 ]]; then
+  echo "── after the land: ${SLICE_AFTER_LAND[*]} ──"
+  after_rc=0
+  SLICE_TICKET="$ticket" SLICE_LANDED_HEAD="$(git rev-parse "$landed_head")" \
+    "${SLICE_AFTER_LAND[@]}" || after_rc=$?
+  if [[ $after_rc -ne 0 ]]; then
+    echo "✗ afterLand failed (exit $after_rc) — $ticket_ref is landed and closed; $SLICE_BASE_BRANCH needs a look before anything else lands." >&2
+    exit 3
+  fi
+  echo "✓ afterLand passed"
 fi

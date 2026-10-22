@@ -85,6 +85,72 @@ describe("the dispatcher", () => {
   });
 });
 
+/**
+ * slice-land.sh runs the config's afterLand last and exits 3 when it fails.
+ * The land stands; what must not happen is the next slice landing on top of a
+ * base nobody has looked at. Two slices are done, so without the stop one run
+ * lands both.
+ */
+describe("afterLand in the dispatcher", () => {
+  const twoDone = (script: string) => {
+    c = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      agent: ["true"],
+      configExtra: `afterLand: ["bash", "-c", ${JSON.stringify(script)}],`,
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    commitIn(c.wt(41), "b.txt", "b\n", "feat: b");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    sh(c.wt(41), "./scripts/slice-done.sh");
+  };
+  const RUN = ["--auto", "-y", "--no-review", "--interval", "1", "40", "41"];
+
+  it("lands the slice whose afterLand failed, then lands nothing more and says how to resume", () => {
+    twoDone("exit 7");
+
+    const r = runDispatcher(c as Consumer, RUN);
+
+    expect(r.out).toContain(
+      "✗ afterLand failed (exit 7) — #40 is landed and closed",
+    );
+    expect(r.out).toContain(
+      "stopping: #40 landed, and afterLand failed after it.",
+    );
+    expect(r.out).toContain(
+      "\n    bunx azelf run --auto -y --no-review --interval 1 41\n",
+    );
+    expect(r.code).toBe(1);
+    const cc = c as Consumer;
+    expect(git(cc.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    expect(readFileSync(cc.closeFile, "utf8")).toContain("40\n");
+    expect(readFileSync(cc.closeFile, "utf8")).not.toContain("41\n");
+    expect(existsSync(cc.wt(41))).toBe(true);
+  });
+
+  it("changes nothing in a run when it passes, and the header names it", () => {
+    twoDone("true");
+
+    const r = runDispatcher(c as Consumer, RUN);
+
+    expect(r.out).toContain("afterLand: bash -c true");
+    expect(r.out).toContain("✓ every ticket closed — plan complete.");
+    expect(r.code).toBe(0);
+  });
+
+  it("the config refuses an afterLand that is not a list of words", () => {
+    for (const value of ['"./health.sh"', '["./health.sh", ""]']) {
+      c = makeConsumer({ configExtra: `afterLand: ${value},` });
+      const r = runDispatcher(c, ["--plan"]);
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain(
+        "afterLand must be an array of non-empty strings",
+      );
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("the round line", () => {
   it("is printed when its counts change, and otherwise once a heartbeat", async () => {
     // The stop below is a crash to the dispatcher, which relaunches the slice.
@@ -520,6 +586,38 @@ describe("a land interrupted after its push", () => {
     expect(existsSync(join(c.main, ".git", "azelf-landed-41.txt"))).toBe(true);
     expect(readFileSync(c.closeFile, "utf8")).not.toContain("41\n");
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  });
+
+  /** Finishing runs the land's last step too, afterLand included. */
+  it("stops the run before any other land when its afterLand fails", () => {
+    c = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      agent: ["true"],
+      configExtra: 'afterLand: ["false"],',
+    });
+    interrupt(40);
+    commitIn(c.wt(41), "b.txt", "b\n", "feat: b");
+    sh(c.wt(41), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, [
+      "--auto",
+      "-y",
+      "--no-review",
+      "--interval",
+      "1",
+      "40",
+      "41",
+    ]);
+
+    expect(r.out).toContain("✓ finished the land of #40");
+    expect(r.out).toContain(
+      "stopping: #40 landed, and afterLand failed after it.",
+    );
+    expect(r.out).not.toContain("landing #41");
+    expect(readFileSync(c.closeFile, "utf8")).toContain("40\nLanded on main");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: 40");
+    expect(r.code).toBe(1);
   });
 });
 
