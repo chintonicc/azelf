@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -330,6 +330,73 @@ describe("shimText", () => {
           AZELF_DIR: join(other, "node_modules", "@chintonicc", "azelf"),
         }),
       ).toBe("other");
+    });
+  });
+
+  /**
+   * The error for a missing package says what to do in THIS repo. "run 'bun
+   * install' here" is the wrong advice where azelf is no dependency: a Python
+   * repo with no package.json, or an npm repo that runs azelf from a checkout.
+   */
+  describe("with no package to run", () => {
+    let repo: string;
+    const runShim = (env: Record<string, string> = {}) => {
+      const r = spawnSync(join(repo, "scripts", "x.sh"), {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, AZELF_DIR: "", ...env },
+      });
+      return { code: r.status, err: r.stderr };
+    };
+
+    beforeEach(() => {
+      repo = realpathSync(mkdtempSync(join(tmpdir(), "azelf-shimmiss-")));
+      mkdirSync(join(repo, "scripts"));
+      writeFileSync(
+        join(repo, "scripts", "x.sh"),
+        shimText({ name: "x.sh", how: "exec", fallback: null }),
+        { mode: 0o755 },
+      );
+    });
+    afterEach(() => rmSync(repo, { recursive: true, force: true }));
+
+    it("says to install it where package.json lists it", () => {
+      writeFileSync(
+        join(repo, "package.json"),
+        '{ "devDependencies": { "@chintonicc/azelf": "github:chintonicc/azelf" } }',
+      );
+
+      const r = runShim();
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain("run 'bun install' here");
+    });
+
+    it("says to set AZELF_DIR where the repo does not depend on it", () => {
+      for (const manifest of [
+        null,
+        '{ "devDependencies": { "vite": "^5" } }',
+      ]) {
+        rmSync(join(repo, "package.json"), { force: true });
+        if (manifest) writeFileSync(join(repo, "package.json"), manifest);
+
+        const r = runShim();
+
+        expect(r.code).toBe(1);
+        expect(r.err).not.toContain("bun install");
+        expect(r.err).toContain("set AZELF_DIR to an azelf checkout");
+      }
+    });
+
+    it("names AZELF_DIR when that is what points nowhere", () => {
+      const empty = join(repo, "empty");
+      mkdirSync(empty);
+
+      const r = runShim({ AZELF_DIR: empty });
+
+      expect(r.code).toBe(1);
+      expect(r.err).toContain(`AZELF_DIR=${empty} is not`);
+      expect(r.err).not.toContain("bun install");
     });
   });
 

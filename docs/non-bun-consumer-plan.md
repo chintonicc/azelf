@@ -177,8 +177,11 @@ If it was committed in the meantime, review that commit instead. Run `git status
       package.json — nothing to install` through that fallback.
     - With a stub tracker, `slice-session.sh 40 --prep-only` printed `no install
       step (install: [] in slice.config.ts)` and left a clean worktree.
-    - Still open: the shims' error for a missing package says "run 'bun install'
-      here", which is the wrong advice in such a repo.
+    - The shims' error for a missing package said "run 'bun install' here", which
+      is the wrong advice in such a repo. Fixed after the plan: it says that only
+      where package.json lists azelf. Otherwise it says to set `AZELF_DIR`, or,
+      when `AZELF_DIR` is set, that it points at no package. Existing shims
+      change on the next `azelf init`.
 
 ## Order and cost
 

@@ -192,7 +192,10 @@ export const SHIMS: { name: string; how: "source" | "exec" }[] = [
  *
  * A missing package is a loud, specific failure rather than
  * `source: no such file`, because these shims sit in the COMMIT path — the one
- * place where an unexplained error costs someone their staged work.
+ * place where an unexplained error costs someone their staged work. Its advice
+ * fits the repo: `bun install` only where package.json lists azelf. A repo that
+ * cannot take it as a dependency (consumer-b's Python and npm repos) is told to
+ * set AZELF_DIR instead.
  */
 export function shimText(opts: {
   name: string;
@@ -220,7 +223,13 @@ fi
 _azelf_dir="\${AZELF_DIR:-$_azelf_dir}"${fb}
 if [ ! -f "$_azelf_dir/scripts/${name}" ]; then
   echo "error: azelf is not installed — no $_azelf_dir/scripts/${name}" >&2
-  echo "       run 'bun install' here, or set AZELF_DIR to the package root." >&2
+  if [ -n "\${AZELF_DIR:-}" ]; then
+    echo "       AZELF_DIR=$AZELF_DIR is not an azelf package root or checkout." >&2
+  elif grep -qs '"@chintonicc/azelf"' "$_azelf_repo/package.json"; then
+    echo "       run 'bun install' here, or set AZELF_DIR to the package root." >&2
+  else
+    echo "       this repo does not list azelf as a dependency — set AZELF_DIR to an azelf checkout." >&2
+  fi
   ${stop}
 fi
 ${
