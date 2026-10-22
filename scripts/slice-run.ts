@@ -295,7 +295,10 @@ type Ticket = {
   open: boolean;
   /** Blockers, restricted to tickets in this run's set. */
   blockedBy: TicketId[];
-  /** Blockers outside the set — reported, never scheduled around silently. */
+  /**
+   * Blockers outside the set — reported, never scheduled around silently. A
+   * blocker in another repo is one too, under an id `isTicketId` refuses.
+   */
   foreignBlockers: TicketId[];
   wave: number;
   /** Carries `exclusiveLockLabel`: scheduled one at a time, see `runnable`. */
@@ -870,13 +873,22 @@ function printTree(tickets: Ticket[]): number {
       const blockers = t.blockedBy.length
         ? `  ← blocked by ${t.blockedBy.map(ref).join(", ")}`
         : "";
-      const foreign = t.foreignBlockers.length
-        ? `  ← blocked by ${t.foreignBlockers
-            .map(ref)
-            .join(", ")} (outside this set${
-            t.foreignHuman.length ? ", waiting on a human" : ""
-          })`
-        : "";
+      // This repo's tickets outside the set, and another repo's, which no
+      // land here can close: one group each.
+      const group = (ids: TicketId[], where: string) =>
+        ids.length
+          ? `  ← blocked by ${ids.map(ref).join(", ")} (${where}${
+              ids.some((b) => t.foreignHuman.includes(b))
+                ? ", waiting on a human"
+                : ""
+            })`
+          : "";
+      const foreign =
+        group(t.foreignBlockers.filter(isTicketId), "outside this set") +
+        group(
+          t.foreignBlockers.filter((b) => !isTicketId(b)),
+          "in another repo",
+        );
       const done = t.open ? "" : "  ✓ closed";
       const label = t.exclusive ? `  [${config.exclusiveLockLabel}]` : "";
       const human = t.human && t.open ? "  [waiting on a human]" : "";
@@ -5647,13 +5659,25 @@ try {
       onHuman.length -
       heldIdle.length -
       openNow.filter((t) => parked.has(t.id) && !occupied(t.id)).length;
+    // When nothing here can move and what is blocked waits on another repo,
+    // no land here advances it: that repo's own land closes the blocker, and
+    // the round after reads it closed.
+    const elsewhere = [
+      ...new Set(
+        blocked.flatMap((t) => t.foreignBlockers.filter((b) => !isTicketId(b))),
+      ),
+    ];
+    const advance =
+      elsewhere.length && !running.length && !toLand.length && queued <= 0
+        ? `waiting on another repo: ${elsewhere.map(ref).join(", ")}`
+        : "land one to advance";
     const roundLine = `${running.length} running · ${
       toLand.length ? `${toLand.length} to land · ` : ""
     }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
       onHuman.length ? `${onHuman.length} waiting on a human · ` : ""
     }${openNow.length} open${parked.size ? ` · ${parked.size} parked` : ""}${
       held ? ` · ${held} held` : ""
-    } — land one to advance`;
+    } — ${advance}`;
     if (
       roundLine !== lastRoundLine ||
       Date.now() - lastRoundLineAt >= heartbeatMs
@@ -5729,7 +5753,11 @@ try {
       for (const [id, g] of gates) {
         console.log(
           `    ${ref(id)}  ${config.humanLabel}${
-            g.outside ? ", outside this set" : ""
+            g.outside
+              ? isTicketId(id)
+                ? ", outside this set"
+                : ", in another repo"
+              : ""
           }${
             g.blocks.length ? ` — blocks ${g.blocks.map(ref).join(", ")}` : ""
           }`,

@@ -58,6 +58,17 @@
  * `[0-9]+`. The pattern is tested by bash's `=~` as well as by JavaScript,
  * which is why it must be written in the subset both understand: see
  * `idPatternProblem` for the rules.
+ *
+ * A BLOCKER IN ANOTHER PROJECT HAS AN ID OF ITS OWN
+ * -------------------------------------------------
+ * GitHub's dependencies cross repos: a frontend issue can be blocked by a
+ * backend one. `blockers` names such a ticket by an id `idPattern` does not
+ * match, `owner/repo#140` from `github()`. So it is never in a run's set,
+ * never a branch and never closed here. The dispatcher only waits for it,
+ * re-reading it through `get` every round until the other project's own land
+ * closes it. Read as a bare `140`, it was THIS repo's #140: another ticket,
+ * with a state of its own. A tracker with no other projects never returns
+ * one, and nothing changes for it.
  */
 
 import { spawnSync } from "node:child_process";
@@ -79,6 +90,7 @@ export type TicketInfo = {
   url: string;
 };
 
+/** `id` may name a ticket in another project; see the header. */
 export type Blocker = { id: TicketId; state: TicketState };
 
 export type Tracker = {
@@ -94,9 +106,17 @@ export type Tracker = {
   refTemplate: string;
   /** Ids of every OPEN ticket carrying `label`. */
   listReady(label: string): TicketId[];
-  /** Throws if the ticket cannot be read — an unreadable ticket is not an open one. */
+  /**
+   * Throws if the ticket cannot be read — an unreadable ticket is not an open
+   * one. Reads every id `blockers` returns, another project's included, and
+   * answers with the id it was asked for.
+   */
   get(id: TicketId): TicketInfo;
-  /** Every ticket blocking `id`, closed ones included, each with its state. */
+  /**
+   * Every ticket blocking `id`, closed ones included, each with its state. A
+   * blocker in another project comes back under an id outside `idPattern`
+   * (see the header).
+   */
   blockers(id: TicketId): Blocker[];
   /** The ticket text; empty string when it has none. */
   body(id: TicketId): string;
@@ -236,13 +256,27 @@ function section(body: string, name: string): string {
   return (end < 0 ? rest : rest.slice(0, end)).join("\n");
 }
 
-/** Every id matching `idPattern` in `text`, in order, without duplicates. */
+/**
+ * Every id matching `idPattern` in `text`, in order, without duplicates.
+ *
+ * `owner/repo#140` is a ticket in another repo, and is read whole, in lower
+ * case, the way `github().blockers` names it. Read as `#140`, it was this
+ * repo's #140, and a body naming the other repo's ticket claimed this one.
+ */
 function idsIn(text: string, idPattern: string): TicketId[] {
   // The tracker's refTemplate is `#{n}` on GitHub, so the marker is the `#`.
   // Anchors are stripped: this searches within a line rather than matching one.
   const inner = idPattern.slice(1, -1);
-  const found = text.match(new RegExp(`#(${inner})\\b`, "g")) ?? [];
-  return [...new Set(found.map((s) => s.slice(1)))];
+  const found = text.matchAll(
+    new RegExp(`(?:\\b([\\w.-]+/[\\w.-]+))?#(${inner})\\b`, "g"),
+  );
+  return [
+    ...new Set(
+      [...found].map(([, repo, id]) =>
+        repo ? `${repo.toLowerCase()}#${id}` : (id as string),
+      ),
+    ),
+  ];
 }
 
 /**
@@ -560,6 +594,21 @@ export function github(opts: GithubOptions = {}): Tracker {
     }
   };
 
+  // This repo's `owner/repo`, in lower case, read the first time a blocker
+  // needs it and then kept: one call per process, not one per ticket.
+  let own: string | undefined;
+  const ownRepo = (): string => {
+    if (own === undefined) {
+      own = call<{ nameWithOwner: string }>([
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+      ]).nameWithOwner.toLowerCase();
+    }
+    return own;
+  };
+
   return {
     name: "GitHub",
     idPattern: "^[0-9]+$",
@@ -613,15 +662,23 @@ export function github(opts: GithubOptions = {}): Tracker {
     },
 
     get(id) {
+      // `owner/repo#n` is a ticket in another repo, as `blockers` names it.
+      const other = id.match(/^([^/#\s]+\/[^/#\s]+)#([0-9]+)$/);
       const i = call<{
         number: number;
         title: string;
         state: string;
         url: string;
         labels: { name: string }[];
-      }>(["issue", "view", id, "--json", "number,title,state,url,labels"]);
+      }>([
+        "issue",
+        "view",
+        ...(other ? [other[2] as string, "-R", other[1] as string] : [id]),
+        "--json",
+        "number,title,state,url,labels",
+      ]);
       return {
-        id: String(i.number),
+        id: other ? id : String(i.number),
         title: i.title,
         state: stateOf(i.state),
         labels: i.labels.map((l) => l.name),
@@ -632,12 +689,30 @@ export function github(opts: GithubOptions = {}): Tracker {
     blockers(id) {
       // The dependencies endpoint reads only in the blocked_by direction —
       // `blocks` 404s. See point 1 in the header for what that means.
-      return call<{ number: number; state: string }[]>([
-        "api",
-        `repos/{owner}/{repo}/issues/${id}/dependencies/blocked_by`,
-        "--jq",
-        "[.[] | {number, state}]",
-      ]).map((b) => ({ id: String(b.number), state: stateOf(b.state) }));
+      return call<{ number: number; state: string; repository_url?: string }[]>(
+        [
+          "api",
+          `repos/{owner}/{repo}/issues/${id}/dependencies/blocked_by`,
+          "--jq",
+          "[.[] | {number, state, repository_url}]",
+        ],
+      ).map((b) => {
+        // `https://api.github.com/repos/<owner>/<repo>`, and `…/api/v3/repos/…`
+        // on GitHub Enterprise. A blocker in another repo keeps its repo in
+        // its id; see "A blocker in another project" in the header.
+        const repo = b.repository_url
+          ?.split("/")
+          .slice(-2)
+          .join("/")
+          .toLowerCase();
+        return {
+          id:
+            !repo || repo === ownRepo()
+              ? String(b.number)
+              : `${repo}#${b.number}`,
+          state: stateOf(b.state),
+        };
+      });
     },
 
     body(id) {
@@ -713,6 +788,14 @@ export function github(opts: GithubOptions = {}): Tracker {
       //
       // So the number is resolved through the API first, always. The extra
       // call is the price of the write being the one asked for.
+      //
+      // Under this repo's path, which is the only one it resolves under, a
+      // blocker in another repo would find nothing, or this repo's #n.
+      if (!/^[0-9]+$/.test(blockerId)) {
+        throw new Error(
+          `${blockerId} is in another repo, and --sync-edges does not write an edge across repos yet: set it in GitHub's "Blocked by" on #${id}`,
+        );
+      }
       const internal = call<{ id: number }>([
         "api",
         `repos/{owner}/{repo}/issues/${blockerId}`,

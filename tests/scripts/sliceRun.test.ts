@@ -3478,6 +3478,18 @@ describe("a ticket for a person (humanLabel)", () => {
     await d.until("✓ prepped");
   }, 60_000);
 
+  it("stops the same way when the person's ticket is in another repo", () => {
+    c = makeConsumer({ remote: true, agent: ["true"], configExtra: HUMAN });
+    c.setTicket("acme/web#2", { ready: false, labels: ["human"] });
+    c.setTicket("3", { blockedBy: ["acme/web#2"] });
+    const r = runDispatcher(c, ["-y", "--interval", "1", "3"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "    acme/web#2  human, in another repo — blocks #3\n",
+    );
+  });
+
   it("refuses a humanLabel that is the readyLabel", () => {
     c = makeConsumer({ configExtra: 'humanLabel: "ready",' });
     c.setTicket("2", {});
@@ -3485,6 +3497,45 @@ describe("a ticket for a person (humanLabel)", () => {
       "humanLabel is the same as readyLabel",
     );
   });
+});
+
+/**
+ * A blocker in another repo comes back from the tracker as `acme/web#7`, an id
+ * outside `idPattern`. It is never run here, only waited for, and a ticket in
+ * the set with the same number is another ticket.
+ */
+describe("a blocker in another repo", () => {
+  it("is shown under its own id, as in another repo, and holds only its ticket", () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("3", { blockedBy: ["acme/web#7"] });
+    c.setTicket("7", {});
+    c.setTicket("acme/web#7", { ready: false });
+    const r = runDispatcher(c, ["--plan", "3", "7"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("wave 1  2 tickets");
+    expect(r.out).toContain(
+      "#3  t  ← blocked by acme/web#7 (in another repo)\n",
+    );
+    expect(r.out).not.toContain("← blocked by #7");
+  });
+
+  it("is waited for, and the ticket starts the round after it closes", async () => {
+    c = makeConsumer({ remote: true, agent: ["true"] });
+    c.setTicket("3", { blockedBy: ["acme/web#7"] });
+    // This repo's #7 is closed. It is not the blocker, and releases nothing.
+    c.setTicket("7", { ready: false, state: "closed" });
+    c.setTicket("acme/web#7", { ready: false });
+    d = startDispatcher(c, ["-y", "--interval", "1", "3"]);
+    await d.until(
+      "[round 1] 0 running · 1 blocked · 1 open — waiting on another repo: acme/web#7\n",
+    );
+    expect(d.output()).not.toContain("prepping #3");
+
+    c.setTicket("acme/web#7", { ready: false, state: "closed" });
+    await d.until("prepping #3");
+    await d.until("✓ prepped");
+  }, 60_000);
 });
 
 /**

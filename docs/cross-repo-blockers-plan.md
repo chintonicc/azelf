@@ -1,6 +1,7 @@
 # A blocker in another repo is read as one, and waited on
 
-**Status:** plan, nothing built · **Written:** 2026-10-22
+**Status:** Phase 1 landed, 2026-10-22, with 2a moved into it · Phase 2 (2b, 2c) open
+**Written:** 2026-10-22
 **Companion:** `docs/non-bun-consumer-plan.md`, whose "Not in this plan" listed
 "blockers across two repos". consumer-b has two repos, a backend and a frontend, with
 one dispatcher each. A frontend ticket that needs a backend endpoint is blocked by a
@@ -83,21 +84,21 @@ after the heading. Line numbers are as of `ffca576`.
 
 ## Phase 1 — the edge is read as it is, and waited on
 
-- [ ] 1a. `github()`
+- [x] 1a. `github()`
   - `blockers()` keeps `repository_url` and returns `owner/repo#n` for another repo.
   - `get()` reads both forms.
   - The own repo is read once, lazily, and only when a blocker comes back.
-- [ ] 1b. The `Tracker` contract in `slice-tracker.ts`'s header and on `Blocker`, plus a
+- [x] 1b. The `Tracker` contract in `slice-tracker.ts`'s header and on `Blocker`, plus a
   helper `isOwnId(id, idPattern)` that `ref()` and the round loop share.
-- [ ] 1c. The dispatcher
+- [x] 1c. The dispatcher
   - `ref()` leaves a foreign id alone.
   - The plan line says `(in another repo)`.
   - The round line names the other repo's blockers when nothing else can move.
-- [ ] 1d. README: a subsection under "Tracker" on blockers in another repo.
+- [x] 1d. README: a subsection under "Tracker" on blockers in another repo.
   - What the edge looks like and how to set it in GitHub.
   - That the dispatcher waits and starts the slice after the other land.
   - That a cycle across the two repos waits forever: neither dispatcher can see it.
-- [ ] 1e. Tests
+- [x] 1e. Tests
   - The tracker, with a scripted `gh`:
     - a blocker in the same repo stays `"139"`;
     - one in another repo becomes `owner/repo#n`;
@@ -112,9 +113,39 @@ after the heading. Line numbers are as of `ffca576`.
       number** as the foreign blocker stays unrelated. No wave order and no early start
       come from it.
 
+### What building it found
+
+- **2a had to come with Phase 1.** Today the two misreads cancel out. A body naming
+  `<owner>/<backend>#140` is read as `140`, and so is the edge, so the claim matches
+  it. With the edge read right and the body not, the claim `140` had no edge. When
+  this repo's #140 was open or unreadable, the dispatch was refused. The paragraph
+  under "Order and cost" said Phase 1 alone was consistent; it was not.
+- **No `isOwnId` helper.** `isTicketId` in `slice-config.ts` already tests an id
+  against the tracker's `idPattern`. `ref()`, the plan line, the round line and the
+  human stop use it.
+- **Another repo's name is in lower case.** `blockers()` and `idsIn` both write it so.
+  GitHub's names are case-insensitive, and a body that wrote `Acme/API#140` against
+  an edge read as `acme/api#140` would otherwise be a missing edge that
+  `--sync-edges` could never fix.
+- **`addBlocker` refuses a blocker in another repo** with a message that says to set
+  it in GitHub. Before 2a it wrote the edge to this repo's #n. With 2a and no 2b, the
+  path it resolves under would 404, which says nothing useful. 2b replaces the
+  refusal.
+- **The human stop** names a person's ticket in another repo as `, in another repo`,
+  not `, outside this set`.
+- **Tests:** 10 new, and two updated for the new `--jq`.
+  - Tracker: same repo, another repo, case, the own repo read once and only when a
+    blocker comes back, `get` with `-R`, the `addBlocker` refusal.
+  - Body: the qualified claim, and a claim matched to the qualified edge while a bare
+    `#140` stays this repo's.
+  - Dispatcher: the plan line, the wait and the start after the close (with this
+    repo's #7 closed and irrelevant), the human stop.
+
 ## Phase 2 — body claims and `--sync-edges` across repos
 
-- [ ] 2a. `idsIn` reads `owner/repo#n` as one qualified id, and never as `#n`.
+2a moved into Phase 1 (see above). What is left is 2b and its tests.
+
+- [x] 2a. `idsIn` reads `owner/repo#n` as one qualified id, and never as `#n`.
   `blockersFromBody`, `blockerLine` and `bodyOnlyBlockers` follow.
 - [ ] 2b. The tracker's `addBlocker(id, "owner/repo#n")` resolves the internal id under
   `repos/owner/repo/issues/n`.
@@ -131,9 +162,10 @@ Phase 1 first. It fixes the misread, and the dispatcher then waits correctly; no
 else is needed for consumer-b to use the edge. Expect two files of code
 (`slice-tracker.ts`, `slice-run.ts`), the README subsection and about eight tests.
 
-Phase 2 matters once ticket bodies name blockers in the other repo. A ticket-writing
-skill does that. Until then, Phase 1 alone is consistent: a body that names another
-repo's issue is misread exactly as it is today, and Phase 1 adds no new case of it.
+Phase 2 matters once ticket bodies name blockers in the other repo and the edges are
+to be written by `--sync-edges`. A ticket-writing skill does that. (This paragraph
+first said Phase 1 alone was consistent without 2a. It was not: see "What building it
+found".)
 
 ## Not in this plan
 

@@ -172,12 +172,22 @@ describe("github() — the adapter that ships", () => {
     expect(t.get("4").state).toBe("closed");
   });
 
+  /** The blocked_by answer for `id`, each blocker in the repo its url names. */
+  const BLOCKED_BY = (id: string) =>
+    `api repos/{owner}/{repo}/issues/${id}/dependencies/blocked_by --jq [.[] | {number, state, repository_url}]`;
+  const REPO_VIEW = "repo view --json nameWithOwner";
+  const blocker = (number: number, state: string, repo = "acme/app") => ({
+    number,
+    state,
+    repository_url: `https://api.github.com/repos/${repo}`,
+  });
+
   it("blockers reads the blocked_by direction only, closed ones included", () => {
     const { gh, calls } = fakeGh({
-      "api repos/{owner}/{repo}/issues/7/dependencies/blocked_by --jq [.[] | {number, state}]":
-        {
-          stdout: '[{"number":5,"state":"closed"},{"number":6,"state":"open"}]',
-        },
+      [BLOCKED_BY("7")]: {
+        stdout: JSON.stringify([blocker(5, "closed"), blocker(6, "open")]),
+      },
+      [REPO_VIEW]: { stdout: '{"nameWithOwner":"acme/app"}' },
     });
     const all = github({ gh }).blockers("7");
     expect(all).toEqual([
@@ -185,9 +195,76 @@ describe("github() — the adapter that ships", () => {
       { id: "6", state: "open" },
     ]);
     expect(openBlockers(all)).toEqual([{ id: "6", state: "open" }]);
-    // One call, and it is the forward edge; the reverse is never asked for.
-    expect(calls).toHaveLength(1);
-    expect(calls[0]?.[1]).toMatch(/\/dependencies\/blocked_by$/);
+    // The forward edge, and the reverse is never asked for.
+    const edges = calls.filter((c) => c[0] === "api");
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.[1]).toMatch(/\/dependencies\/blocked_by$/);
+  });
+
+  it("blockers names a blocker in another repo as owner/repo#n", () => {
+    // A frontend ticket blocked by a backend one. Read as a bare 140, it was
+    // this repo's #140: another ticket, with a state of its own.
+    const { gh } = fakeGh({
+      [BLOCKED_BY("7")]: {
+        stdout: JSON.stringify([
+          blocker(139, "closed"),
+          blocker(140, "open", "acme/api"),
+        ]),
+      },
+      [REPO_VIEW]: { stdout: '{"nameWithOwner":"acme/app"}' },
+    });
+    expect(github({ gh }).blockers("7")).toEqual([
+      { id: "139", state: "closed" },
+      { id: "acme/api#140", state: "open" },
+    ]);
+  });
+
+  it("blockers compares repos without case, and writes another repo's in lower case", () => {
+    const { gh } = fakeGh({
+      [BLOCKED_BY("7")]: {
+        stdout: JSON.stringify([
+          blocker(5, "open", "Acme/App"),
+          blocker(140, "open", "Acme/API"),
+        ]),
+      },
+      [REPO_VIEW]: { stdout: '{"nameWithOwner":"acme/app"}' },
+    });
+    expect(
+      github({ gh })
+        .blockers("7")
+        .map((b) => b.id),
+    ).toEqual(["5", "acme/api#140"]);
+  });
+
+  it("blockers reads its own repo once, and only once a blocker comes back", () => {
+    const { gh, calls } = fakeGh({
+      [BLOCKED_BY("1")]: { stdout: "[]" },
+      [BLOCKED_BY("7")]: { stdout: JSON.stringify([blocker(5, "open")]) },
+      [BLOCKED_BY("8")]: { stdout: JSON.stringify([blocker(6, "open")]) },
+      [REPO_VIEW]: { stdout: '{"nameWithOwner":"acme/app"}' },
+    });
+    const t = github({ gh });
+    t.blockers("1");
+    expect(calls.filter((c) => c[0] === "repo")).toHaveLength(0);
+    t.blockers("7");
+    t.blockers("8");
+    expect(calls.filter((c) => c[0] === "repo")).toHaveLength(1);
+  });
+
+  it("get reads a ticket in another repo through -R, and keeps its id", () => {
+    const { gh } = fakeGh({
+      "issue view 140 -R acme/api --json number,title,state,url,labels": {
+        stdout:
+          '{"number":140,"title":"the endpoint","state":"CLOSED","url":"https://github.com/acme/api/issues/140","labels":[]}',
+      },
+    });
+    expect(github({ gh }).get("acme/api#140")).toEqual({
+      id: "acme/api#140",
+      title: "the endpoint",
+      state: "closed",
+      labels: [],
+      url: "https://github.com/acme/api/issues/140",
+    });
   });
 
   it("body returns the text, and an empty string for a ticket with none", () => {
@@ -285,13 +362,23 @@ describe("github() — the adapter that ships", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("addBlocker refuses a blocker in another repo, and asks GitHub nothing", () => {
+    // Resolved under this repo's path, `acme/api#140` would find nothing, or
+    // this repo's #140. Writing the edge across repos is not built yet.
+    const { gh, calls } = fakeGh({});
+    expect(() => github({ gh }).addBlocker?.("20", "acme/api#140")).toThrow(
+      'acme/api#140 is in another repo, and --sync-edges does not write an edge across repos yet: set it in GitHub\'s "Blocked by" on #20',
+    );
+    expect(calls).toHaveLength(0);
+  });
+
   it("a failed gh call throws with gh's output — never an empty list", () => {
     const { gh } = fakeGh({
       "issue view 1 --json body": {
         ok: false,
         stderr: "gh: Not logged in",
       },
-      "api repos/{owner}/{repo}/issues/1/dependencies/blocked_by --jq [.[] | {number, state}]":
+      "api repos/{owner}/{repo}/issues/1/dependencies/blocked_by --jq [.[] | {number, state, repository_url}]":
         { ok: false, stderr: "HTTP 404" },
     });
     const t = github({ gh });
@@ -504,6 +591,16 @@ describe("blockersFromBody — the `## Blocked by` convention", () => {
     ]);
   });
 
+  it("reads owner/repo#n as a ticket in another repo, and never as #n", () => {
+    const body =
+      "## Blocked by\n\n- Acme/API#140 — the endpoint\n- #19\n\nBlocked on acme/api#141.\n";
+    expect(blockersFromBody(body, N)).toEqual([
+      "acme/api#140",
+      "19",
+      "acme/api#141",
+    ]);
+  });
+
   it("reads every line when the section has no list item", () => {
     const body = "## Blocked by\n\n#19, then\n#20 once it lands\n";
     expect(blockersFromBody(body, N)).toEqual(["19", "20"]);
@@ -697,6 +794,12 @@ describe("bodyOnlyBlockers — what the prose claims and the tracker has not got
     expect(B("## Blocked by\n\n#19\n", [{ id: "19", state: "open" }])).toEqual(
       [],
     );
+  });
+
+  it("matches a claim on another repo's ticket to that edge, not to this repo's #n", () => {
+    const edge = [{ id: "acme/api#140", state: "open" as const }];
+    expect(B("## Blocked by\n\n- acme/api#140\n", edge)).toEqual([]);
+    expect(B("## Blocked by\n\n- #140\n", edge)).toEqual(["140"]);
   });
 
   it("counts a CLOSED edge as recorded, not missing", () => {

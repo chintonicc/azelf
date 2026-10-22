@@ -709,12 +709,17 @@ export const agent: Agent = config.agent ?? claude();
 /** The configured disk floor, or 10 GB. */
 export const minFreeDiskGb: number = config.minFreeDiskGb ?? 10;
 
-/** `#42` on GitHub, `ENG-42` on Linear — whatever the tracker says. */
-export const ref = (id: TicketId): string => refFor(tracker.refTemplate, id);
-
 /** Is this argument a ticket id, by the tracker's own definition? */
 export const isTicketId = (s: string): boolean =>
   new RegExp(tracker.idPattern).test(s);
+
+/**
+ * `#42` on GitHub, `ENG-42` on Linear — whatever the tracker says. A blocker
+ * in another project (`owner/repo#42`, see slice-tracker.ts) is not this
+ * tracker's id, is already written for humans, and is left as it is.
+ */
+export const ref = (id: TicketId): string =>
+  isTicketId(id) ? refFor(tracker.refTemplate, id) : id;
 
 /** `.split().join()` rather than `replaceAll`, which needs a newer lib target. */
 const fill = (tpl: string, n: TicketId): string =>

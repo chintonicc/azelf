@@ -734,6 +734,37 @@ cleanly rather than crashing.
 > and never to the ticket you meant. `github()` resolves the number through the API
 > before every write for exactly this reason.
 
+#### A blocker in another repo is waited for
+
+A project in two repos, say a backend and a frontend with a dispatcher each, has
+tickets that cross: a frontend ticket that needs a backend endpoint. GitHub's
+"Blocked by" takes an issue in another repo, and azelf reads it as that issue, under
+GitHub's own name for it:
+
+```
+  wave 1  1 ticket  (runnable now)
+      #3  the settings page  ← blocked by acme/api#140 (in another repo)
+```
+
+- **It is waited for, never run.** `acme/api#140` is not one of this repo's ids, so it
+  is never in the run, never a branch and never closed here. Every round reads its
+  state again. When the backend's dispatcher lands #140 and closes it, the frontend's
+  dispatcher starts #3 in the round after, at most `--interval` later.
+- **The round line says so** when nothing else can move, instead of "land one to
+  advance", which no land here could do:
+
+  ```
+  [round 4] 0 running · 1 blocked · 1 open — waiting on another repo: acme/api#140
+  ```
+
+  The run does not end on its own while it waits. Ctrl-C ends it, as always.
+- **A body names it the same way.** `acme/api#140` under `## Blocked by` is a claim on
+  that issue, never on this repo's #140, and the edge satisfies it. A claim without
+  an edge stops the dispatch, as above. `--sync-edges` does not write an edge across
+  repos yet and says so: set it in GitHub.
+- **A cycle across the two repos waits forever.** Each dispatcher sees only its own
+  graph, so neither can see the cycle.
+
 #### A landed ticket carries its leftover checks
 
 Closing a ticket already posts a comment. It used to be one fixed sentence; it now
