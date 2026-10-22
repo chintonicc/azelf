@@ -3824,6 +3824,20 @@ describe("a blocker only the body names stops the dispatch", () => {
     expect(r.out).toContain("wave 2");
   });
 
+  it("--sync-edges writes a blocker in another repo under its own id", () => {
+    c = claimed();
+    c.setTicket("82", { body: "## Blocked by\n\nacme/web#7\n" });
+    c.setTicket("acme/web#7", { ready: false });
+    const sync = runDispatcher(c, ["--sync-edges", "-y"]);
+
+    expect(sync.code).toBe(0);
+    expect(sync.out).toContain("    #82 blocked by acme/web#7\n");
+    expect(sync.out).toContain("  ✓ #82 blocked by acme/web#7\n");
+    expect(sync.out).not.toContain("#acme/web#7");
+    const tickets = JSON.parse(readFileSync(c.ticketsFile, "utf8"));
+    expect(tickets["82"].blockedBy).toEqual(["acme/web#7"]);
+  });
+
   it("--sync-edges without -y and without a terminal says how to confirm", () => {
     c = claimed();
     const r = runDispatcher(c, ["--sync-edges"]);

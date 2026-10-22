@@ -67,8 +67,9 @@
  * never a branch and never closed here. The dispatcher only waits for it,
  * re-reading it through `get` every round until the other project's own land
  * closes it. Read as a bare `140`, it was THIS repo's #140: another ticket,
- * with a state of its own. A tracker with no other projects never returns
- * one, and nothing changes for it.
+ * with a state of its own. `addBlocker` takes the same id for `--sync-edges`,
+ * and writes the edge on this repo's ticket. A tracker with no other projects
+ * never returns one, and nothing changes for it.
  */
 
 import { spawnSync } from "node:child_process";
@@ -161,6 +162,9 @@ export type Tracker = {
    * Must be idempotent-ish: an edge that already exists is the outcome asked
    * for, so re-recording it succeeds rather than throwing. Throws only when the
    * edge could not be made.
+   *
+   * `blockerId` may be a ticket in another project, under the id `blockers`
+   * gives it. `id` is always this project's.
    */
   addBlocker?(id: TicketId, blockerId: TicketId): void;
   /** Put the ticket in the state `blockers` reports as `closed`. Throws on failure. */
@@ -609,6 +613,13 @@ export function github(opts: GithubOptions = {}): Tracker {
     return own;
   };
 
+  // `owner/repo#n` is a ticket in another repo, as `blockers` names it:
+  // its repo and its number, or nothing for this repo's own id.
+  const inOtherRepo = (id: TicketId): [string, string] | undefined => {
+    const m = id.match(/^([^/#\s]+\/[^/#\s]+)#([0-9]+)$/);
+    return m ? [m[1] as string, m[2] as string] : undefined;
+  };
+
   return {
     name: "GitHub",
     idPattern: "^[0-9]+$",
@@ -662,8 +673,7 @@ export function github(opts: GithubOptions = {}): Tracker {
     },
 
     get(id) {
-      // `owner/repo#n` is a ticket in another repo, as `blockers` names it.
-      const other = id.match(/^([^/#\s]+\/[^/#\s]+)#([0-9]+)$/);
+      const other = inOtherRepo(id);
       const i = call<{
         number: number;
         title: string;
@@ -673,7 +683,7 @@ export function github(opts: GithubOptions = {}): Tracker {
       }>([
         "issue",
         "view",
-        ...(other ? [other[2] as string, "-R", other[1] as string] : [id]),
+        ...(other ? [other[1], "-R", other[0]] : [id]),
         "--json",
         "number,title,state,url,labels",
       ]);
@@ -789,16 +799,15 @@ export function github(opts: GithubOptions = {}): Tracker {
       // So the number is resolved through the API first, always. The extra
       // call is the price of the write being the one asked for.
       //
-      // Under this repo's path, which is the only one it resolves under, a
-      // blocker in another repo would find nothing, or this repo's #n.
-      if (!/^[0-9]+$/.test(blockerId)) {
-        throw new Error(
-          `${blockerId} is in another repo, and --sync-edges does not write an edge across repos yet: set it in GitHub's "Blocked by" on #${id}`,
-        );
-      }
+      // A blocker in another repo is resolved under THAT repo's path: under
+      // this one, `acme/api#140` would find nothing, or this repo's #140. The
+      // edge itself is still posted here, on `id`.
+      const other = inOtherRepo(blockerId);
       const internal = call<{ id: number }>([
         "api",
-        `repos/{owner}/{repo}/issues/${blockerId}`,
+        other
+          ? `repos/${other[0]}/issues/${other[1]}`
+          : `repos/{owner}/{repo}/issues/${blockerId}`,
         "--jq",
         "{id}",
       ]).id;
@@ -817,9 +826,9 @@ export function github(opts: GithubOptions = {}): Tracker {
       // says that is success, so that two runs of --sync-edges do not differ.
       if (/already been taken/i.test(r.stderr || r.stdout)) return;
       throw new Error(
-        `could not record #${id} as blocked by #${blockerId}:\n${(
-          r.stderr || r.stdout
-        ).trim()}`,
+        `could not record #${id} as blocked by ${
+          other ? blockerId : `#${blockerId}`
+        }:\n${(r.stderr || r.stdout).trim()}`,
       );
     },
 

@@ -760,8 +760,8 @@ GitHub's own name for it:
   The run does not end on its own while it waits. Ctrl-C ends it, as always.
 - **A body names it the same way.** `acme/api#140` under `## Blocked by` is a claim on
   that issue, never on this repo's #140, and the edge satisfies it. A claim without
-  an edge stops the dispatch, as above. `--sync-edges` does not write an edge across
-  repos yet and says so: set it in GitHub.
+  an edge stops the dispatch, as above. `--sync-edges` writes that edge too, on this
+  repo's ticket, the same as GitHub's "Blocked by" would.
 - **A cycle across the two repos waits forever.** Each dispatcher sees only its own
   graph, so neither can see the cycle.
 

@@ -362,14 +362,60 @@ describe("github() — the adapter that ships", () => {
     expect(calls).toHaveLength(1);
   });
 
-  it("addBlocker refuses a blocker in another repo, and asks GitHub nothing", () => {
-    // Resolved under this repo's path, `acme/api#140` would find nothing, or
-    // this repo's #140. Writing the edge across repos is not built yet.
-    const { gh, calls } = fakeGh({});
+  it("addBlocker resolves a blocker in another repo under that repo's path", () => {
+    // Under this repo's path, `acme/api#140` would find nothing, or this
+    // repo's #140. The edge itself is still this repo's: it goes on #20.
+    const { gh, calls } = fakeGh({
+      "api repos/acme/api/issues/140 --jq {id}": { stdout: '{"id":777}' },
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=777":
+        { stdout: '{"number":20}' },
+    });
+    expect(() =>
+      github({ gh }).addBlocker?.("20", "acme/api#140"),
+    ).not.toThrow();
+    expect(calls.map((c) => c.join(" "))).toEqual([
+      "api repos/acme/api/issues/140 --jq {id}",
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=777",
+    ]);
+  });
+
+  it("addBlocker treats an edge across repos that already exists as the outcome asked for", () => {
+    const { gh } = fakeGh({
+      "api repos/acme/api/issues/140 --jq {id}": { stdout: '{"id":777}' },
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=777":
+        {
+          ok: false,
+          stderr:
+            "Validation failed: Target issue has already been taken (HTTP 422)",
+        },
+    });
+    expect(() =>
+      github({ gh }).addBlocker?.("20", "acme/api#140"),
+    ).not.toThrow();
+  });
+
+  it("addBlocker writes nothing when a blocker in another repo cannot be resolved", () => {
+    const { gh, calls } = fakeGh({
+      "api repos/acme/api/issues/140 --jq {id}": {
+        ok: false,
+        stderr: "HTTP 404: Not Found",
+      },
+    });
     expect(() => github({ gh }).addBlocker?.("20", "acme/api#140")).toThrow(
-      'acme/api#140 is in another repo, and --sync-edges does not write an edge across repos yet: set it in GitHub\'s "Blocked by" on #20',
+      /404/,
     );
-    expect(calls).toHaveLength(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("addBlocker names a blocker in another repo by its own id when the post fails", () => {
+    const { gh } = fakeGh({
+      "api repos/acme/api/issues/140 --jq {id}": { stdout: '{"id":777}' },
+      "api --method POST repos/{owner}/{repo}/issues/20/dependencies/blocked_by -F issue_id=777":
+        { ok: false, stderr: "HTTP 403: Resource not accessible" },
+    });
+    expect(() => github({ gh }).addBlocker?.("20", "acme/api#140")).toThrow(
+      /could not record #20 as blocked by acme\/api#140:[\s\S]*403/,
+    );
   });
 
   it("a failed gh call throws with gh's output — never an empty list", () => {
