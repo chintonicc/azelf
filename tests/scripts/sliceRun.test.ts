@@ -3606,6 +3606,24 @@ describe("a gate scoped by path", () => {
     expect(r.out).toContain("✓ #40 passes every gate");
   });
 
+  it("prints what a gate says while it runs, under the gate count", () => {
+    c = scoped("a.txt");
+    const config = join(c.main, "slice.config.ts");
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[.*\],/,
+        `gates: [{ name: "slow", run: (ctx) => { ctx.log?.("still waiting"); return { ok: true }; } }],`,
+      ),
+    );
+    const r = runDispatcher(c, ["--gates", "40"]);
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "  running 1 gate(s) for #40 (1 files) …\n    still waiting\n",
+    );
+  });
+
   it("tells the reviews it was skipped, not that it passed", () => {
     c = scoped("a.txt", [
       "bash",

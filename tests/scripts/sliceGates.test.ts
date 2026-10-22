@@ -767,6 +767,60 @@ describe("ciRuns", () => {
     expect(gate().run(ctxWith(exec))).toEqual({ ok: true });
   });
 
+  /** A context whose `log` collects what the gate says while it waits. */
+  const heard = (exec: Exec) => {
+    const said: string[] = [];
+    const ctx = { ...ctxWith(exec), log: (line: string) => said.push(line) };
+    return { ctx, said };
+  };
+
+  it("says the push, then each change in the workflows, and not every look", () => {
+    const w = ciWorld({
+      lists: [
+        [],
+        [],
+        [running(11, "Tests")],
+        [running(11, "Tests")],
+        [running(11, "Tests"), green(12, "Docker-Gate")],
+        [green(11, "Tests"), green(12, "Docker-Gate")],
+      ],
+    });
+    const { ctx, said } = heard(w.exec);
+    expect(gate().run(ctx)).toEqual({ ok: true });
+    expect(said).toEqual([
+      "CI: pushed 0123456 as azelf-ci/ticket-40-0123456789ab — waiting for `Tests`, `Docker-Gate`, at most 45 minutes",
+      "CI: `Tests` running, `Docker-Gate` not started (after 40s)",
+      "CI: `Tests` running, `Docker-Gate` passed (after 1m20s)",
+    ]);
+  });
+
+  it("says a failed look once, and the workflows again when gh answers", () => {
+    const w = ciWorld({
+      lists: [
+        [],
+        { ok: false, out: "HTTP 502: Bad Gateway" },
+        { ok: false, out: "HTTP 502: Bad Gateway" },
+        [running(11, "Tests")],
+        [green(11, "Tests"), green(12, "Docker-Gate")],
+      ],
+    });
+    const { ctx, said } = heard(w.exec);
+    expect(gate().run(ctx)).toEqual({ ok: true });
+    expect(said.slice(1)).toEqual([
+      "CI: gh could not list the runs — looking again (after 20s)",
+      "CI: `Tests` running, `Docker-Gate` not started (after 1m)",
+    ]);
+  });
+
+  it("says nothing when there is nothing to wait for", () => {
+    const w = ciWorld({
+      lists: [[green(5, "Tests"), green(6, "Docker-Gate")]],
+    });
+    const { ctx, said } = heard(w.exec);
+    expect(gate().run(ctx)).toEqual({ ok: true });
+    expect(said).toEqual([]);
+  });
+
   it("is refused when it is built with no workflow, an empty name, or an interval that is not positive", () => {
     expect(() => ciRuns({ workflows: [] })).toThrow(/at least one workflow/);
     expect(() => ciRuns({ workflows: ["Tests", ""] })).toThrow(

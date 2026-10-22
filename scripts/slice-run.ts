@@ -2795,6 +2795,7 @@ function gatesPass(n: TicketId): boolean {
       baselineDir: repoRoot,
       changedFiles: changed,
       exec: (cmd, cwd) => run(cmd, { cwd, allowFail: true }),
+      log: (line) => console.log(`    ${line}`),
     });
   } finally {
     release(gatesLock(), process.pid);

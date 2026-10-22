@@ -223,10 +223,13 @@ other repo wanted a CI gate. Built the same day after all, on the user's go.
     ref included), and that the worktree stays clean.
   - Mutation check: counting the runs from before the push fails the test for the old
     red run.
-- **Not done:** a line in the dispatcher's log while the gate waits. The dispatcher prints
-  `running N gate(s) …` and then nothing until CI answers. consumer-b's script behaves
-  the same way, because its echo goes into the captured output. A `log` in `GateContext`
-  would fix that. No gate needed one before.
+- **Added after the plan:** a line in the dispatcher's log while the gate waits. Before,
+  the dispatcher printed `running N gate(s) …` and then nothing until CI answered.
+  consumer-b's script behaves the same way, because its echo goes into the captured
+  output. `GateContext` has an optional `log` now, which the dispatcher prints indented
+  under the gate count. `ciRuns` says the push, then each change in the workflows (not
+  every look), with the time waited counted in waits like the deadline. A failed look is
+  said once per streak. Four tests: three on the gate, one on the dispatcher's printing.
 
 ## Order and cost
 

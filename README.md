@@ -574,6 +574,17 @@ gates: [
 - **The deadline:** 45 minutes by default (`deadlineMinutes`), with a look every 20
   seconds (`pollSeconds`). Past it, the gate is red. The message says which workflow was
   still running and which never started.
+- **While it waits:** the dispatcher's log says the push, then each change in a
+  workflow's state, not every look:
+
+  ```
+    running 2 gate(s) for #40 (3 files) …
+      CI: pushed a1b2c3d as azelf-ci/ticket-40-a1b2c3d4e5f6 — waiting for `Tests`, `Docker-Gate`, at most 45 minutes
+      CI: `Tests` running, `Docker-Gate` running (after 40s)
+      CI: `Tests` running, `Docker-Gate` passed (after 1m20s)
+  ```
+
+  A gate of your own can say what it waits for the same way, through `ctx.log`.
 
 What it needs:
 

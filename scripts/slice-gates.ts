@@ -70,6 +70,13 @@ export type GateContext = {
   /** Paths changed on the branch relative to the base, as `git diff --name-only` prints them. */
   changedFiles: string[];
   exec: Exec;
+  /**
+   * Where a gate that waits says what it is waiting for, while it waits. The
+   * dispatcher prints each line under "running N gate(s) …". Optional: a gate
+   * works without it, and only `ciRuns` uses it. A gate that runs a command
+   * reports that command's output in `detail` instead.
+   */
+  log?: (line: string) => void;
 };
 
 export type GateResult =
@@ -364,6 +371,9 @@ export function ghRepoOf(url: string): string | null {
  *  - **gh failing before the push fails the gate** (not installed, signed out,
  *    no such repo). During the wait it is one look that found nothing, and the
  *    deadline names the last failure.
+ *  - **It says what it waits for**, through `ctx.log`: the push, then each
+ *    change in the workflows, not every look. Without it the dispatcher's log
+ *    goes quiet for as long as CI takes.
  *
  * The repo is origin's, from its URL, because origin is where the push goes:
  * gh's own guess prefers an `upstream` remote. Read-only like every gate: the
@@ -391,6 +401,23 @@ export function ciRuns(opts: CiRunsOptions): Gate {
   }
   const polls = Math.ceil((deadlineMinutes * 60) / pollSeconds);
   const name = `CI: ${workflows.join(", ")}`;
+  const minutes = `${deadlineMinutes} minute${
+    deadlineMinutes === 1 ? "" : "s"
+  }`;
+  /** Each workflow's state, in the order they were named. */
+  const progress = (running: string[], missing: string[]) =>
+    workflows
+      .map(
+        (w) =>
+          `\`${w}\` ${
+            running.includes(w)
+              ? "running"
+              : missing.includes(w)
+                ? "not started"
+                : "passed"
+          }`,
+      )
+      .join(", ");
 
   return {
     name,
@@ -489,6 +516,22 @@ export function ciRuns(opts: CiRunsOptions): Gate {
           tail(pushed.out),
         );
       }
+      const say = (line: string) => ctx.log?.(`CI: ${line}`);
+      say(
+        `pushed ${short} as ${ciBranch} — waiting for ${workflows
+          .map((w) => `\`${w}\``)
+          .join(", ")}, at most ${minutes}`,
+      );
+      let told = progress([], workflows);
+      /** Says `state` when it is not what was said last. */
+      const tell = (state: string, waits: number) => {
+        if (state === told) return;
+        told = state;
+        const s = Math.round(waits * pollSeconds);
+        const m = Math.floor(s / 60);
+        const elapsed = m ? `${m}m${s % 60 ? `${s % 60}s` : ""}` : `${s}s`;
+        say(`${state} (after ${elapsed})`);
+      };
       try {
         let last: CiVerdict = { kind: "open", running: [], missing: workflows };
         let lastError: string[] | null = null;
@@ -497,6 +540,7 @@ export function ciRuns(opts: CiRunsOptions): Gate {
           const now = look();
           if ("error" in now) {
             lastError = now.error;
+            tell("gh could not list the runs — looking again", i + 1);
             continue;
           }
           lastError = null;
@@ -510,15 +554,13 @@ export function ciRuns(opts: CiRunsOptions): Gate {
               [last.run.url, listCmd],
             );
           }
+          tell(progress(last.running, last.missing), i + 1);
         }
         const open = last.kind === "open" ? last : { running: [], missing: [] };
         const state = [
           ...open.running.map((w) => `\`${w}\` still running`),
           ...open.missing.map((w) => `\`${w}\` never started`),
         ].join(", ");
-        const minutes = `${deadlineMinutes} minute${
-          deadlineMinutes === 1 ? "" : "s"
-        }`;
         return red(`not finished on ${short} after ${minutes} — ${state}`, [
           listCmd,
           ...(lastError
