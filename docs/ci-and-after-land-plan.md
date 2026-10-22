@@ -1,7 +1,7 @@
 # A command runs after every land, and CI on the slice's SHA can gate it
 
-**Status:** Phase 1 landed (`fd0c135`) · Phase 2 deferred until a second repo wants a CI gate
-(decided 2026-10-22) · **Written:** 2026-10-22
+**Status:** complete. Phase 1 landed (`fd0c135`) · Phase 2 landed (`b5da41f`), 2026-10-22,
+after all, on the user's go · **Written:** 2026-10-22
 **Companion:** the analysis consumer-b's session wrote on 2026-10-22, the same one
 behind `docs/non-bun-consumer-plan.md`. Its third tool change was "a CI gate plus a
 post-land check". That plan put both under "Not in this plan".
@@ -152,12 +152,12 @@ after the heading. Line numbers are as of `6f94898`.
   `Timeout calling "onTaskUpdate"`. That is its own worker RPC under load, and it
   appeared once before this phase too.
 
-## Phase 2 — `ciRuns()`, the CI gate as a shape — deferred
+## Phase 2 — `ciRuns()`, the CI gate as a shape — `b5da41f`
 
-Deferred on 2026-10-22: consumer-b's backend has a working script, and no other repo
-wants a CI gate yet. Build it when one does.
+First deferred on 2026-10-22, because consumer-b's backend had a working script and no
+other repo wanted a CI gate. Built the same day after all, on the user's go.
 
-- [ ] 2a. `ciRuns(opts)` in `slice-gates.ts`, exported from `index.ts`, with the
+- [x] 2a. `ciRuns(opts)` in `slice-gates.ts`, exported from `index.ts`, with the
   behaviour of consumer-b's script:
   - It reads the SHA and branch in the worktree. A detached HEAD fails.
   - Already green on every named workflow: pass, no push.
@@ -167,7 +167,7 @@ wants a CI gate yet. Build it when one does.
   - A completed run that is not `success` fails, naming the workflow and the
     `gh run list` command. The deadline fails with "not finished after N minutes".
   - The throwaway branch is deleted in every outcome (`try`/`finally`).
-- [ ] 2b. Tests with a fake `exec`
+- [x] 2b. Tests with a fake `exec`
   - already green, no push;
   - pushed then green;
   - one workflow red;
@@ -176,11 +176,57 @@ wants a CI gate yet. Build it when one does.
   - the push is refused;
   - the branch is deleted on green and on red;
   - detached HEAD.
-- [ ] 2c. README
+- [x] 2c. README
   - "CI as a gate", under Gates: what it pushes and why per SHA, the trigger it needs
     (CI on a push to any branch, or at least `azelf-ci/**`), `gh` signed in, and to put
     it last.
   - The cost: the dispatcher waits inside it and holds the gate lock.
+
+### What building it found
+
+- **The branch is deleted before the push too.**
+  - A dispatcher stopped while the gate waits leaves `azelf-ci/…` on origin at this SHA.
+    Ctrl-C is enough: the dispatcher has no SIGINT handler, so the process ends without
+    running the `finally` that deletes the branch.
+  - Pushing that branch again changes nothing on GitHub and starts no workflow. The
+    retry would wait out its deadline and go red.
+- **The repo is origin's, read from its URL** (`ghRepoOf`).
+  - The push goes to origin. With an `upstream` remote, `gh`'s own guess prefers
+    `upstream`, and the gate would watch a repo nothing was pushed to.
+  - An origin that is not a URL with a host (a local path, `file://`) fails at once.
+    GitHub Enterprise hosts are passed as `host/owner/repo`.
+- **gh failing is handled in two ways.**
+  - Before the push, a failure fails the gate at once: not installed, signed out, or
+    no such repo. consumer-b's script read a failure as "no runs", pushed, and waited
+    the full 45 minutes.
+  - During the wait, a failure counts as one look that found nothing. If the deadline
+    passes, its message names the last failure.
+- **The deadline counts waits.** It allows `ceil(deadlineMinutes × 60 / pollSeconds)`
+  looks. The real wait runs past it by however long the looks themselves take, a second
+  or two each.
+- **The deadline message says what was missing.** It names the workflows still running
+  and those that never started. For one that never started, it adds the likely cause:
+  the workflow's name, or a missing trigger on `azelf-ci/**`.
+- **gh's JSON is read from its own line.** `exec` joins stderr into `out`, so a warning
+  from `gh` would otherwise break the parse.
+- **The constructor refuses bad options at config load.**
+  - `workflows: []` would pass every SHA.
+  - An empty workflow name is refused.
+  - So is a deadline or interval that is not positive.
+- **26 tests.**
+  - 16 against a scripted world: the eight from 2b, the deleted leftover branch, the
+    name, origin not on GitHub, gh failing before the push and during the wait, the
+    stderr warning, the constructor, and `retries`/`when`.
+  - 9 URL forms for `ghRepoOf`.
+  - One against a real bare remote under `runGates`, with only `gh` faked on PATH. It
+    checks that the branch exists while CI is asked, is gone afterwards (remote-tracking
+    ref included), and that the worktree stays clean.
+  - Mutation check: counting the runs from before the push fails the test for the old
+    red run.
+- **Not done:** a line in the dispatcher's log while the gate waits. The dispatcher prints
+  `running N gate(s) …` and then nothing until CI answers. consumer-b's script behaves
+  the same way, because its echo goes into the captured output. A `log` in `GateContext`
+  would fix that. No gate needed one before.
 
 ## Order and cost
 
@@ -205,8 +251,10 @@ it.
 ## What the consumer does itself
 
 consumer-b (the mapping is in `CONSUMERS.local.md`):
-- **Backend:** after Phase 2, it can swap `.azelf/ci-gate.sh` for
-  `ciRuns({ workflows: ["Tests", "Docker-Gate"] })`, or keep its script. Both work.
+- **Backend:** it can swap `.azelf/ci-gate.sh` for
+  `ciRuns({ workflows: ["Tests", "Docker-Gate"] })` once it pulls `b5da41f` or later,
+  or keep its script. Both work. The port fails at once when `gh` cannot list the runs,
+  and a retry after a dispatcher stopped mid-wait still starts CI.
 - **`afterLand`:** a health check against the deployed backend, which bounds itself
   (`curl --max-time`, or a loop with a deadline). It also decides whether a failed
   check needs a revert.
