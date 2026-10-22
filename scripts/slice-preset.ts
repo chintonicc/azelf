@@ -25,6 +25,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { detectInstall } from "./slice-install";
 
 export type Stack = "expo" | "nextjs" | "typescript" | "python";
 export type JsRunner = "bun" | "pnpm" | "yarn" | "npm";
@@ -40,6 +41,12 @@ export type Detected = {
   testScript: string | null;
   /** Which linter/formatter is installed. Decides the third gate's shape. */
   linter: "biome" | "eslint" | "ruff" | null;
+  /**
+   * The install step the lockfile implies (scripts/slice-install.ts), written
+   * into the generated config as the commented-out default so the reader sees
+   * what a prep will run — `[]` for a repo with no package.json.
+   */
+  install: string[];
   /** Notes worth printing — things detected that change what you should check. */
   notes: string[];
 };
@@ -183,7 +190,8 @@ export function detect(root: string): Detected {
   if (!existsSync(pkgPath) && stack !== "python") {
     notes.push("no package.json — falling back to plain TypeScript defaults");
   }
-  return { stack, runner, testScript, linter, notes };
+  const install = detectInstall(root, "prep").argv;
+  return { stack, runner, testScript, linter, install, notes };
 }
 
 const lintCmd = (d: Detected): string[] | null => {
@@ -386,6 +394,18 @@ export default {
 ${p.comment}
    */
   provisionCopy: ${q(p.entries)},
+
+  /**
+   * The command that installs a worktree's dependencies, after a prep and
+   * after a rebase that brought a new manifest or lockfile. Left out, the
+   * lockfile in the checkout decides — here that is ${
+     d.install.length > 0
+       ? `\`${d.install.join(" ")}\``
+       : "nothing, since there is no package.json"
+   }.
+   * \`[]\` installs nothing, said on purpose.
+   */
+  // install: ${q(d.install)},
 
   /**
    * What a finished slice must pass before it lands, in order. The dispatcher

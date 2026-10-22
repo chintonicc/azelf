@@ -360,11 +360,21 @@ if [[ ${#SLICE_PROVISION_COPY[@]} -gt 0 ]]; then
     fi
   done
 fi
-if ! (cd "$worktree_path" && bun install); then
-  echo "error: 'bun install' failed in the new worktree." >&2
-  exit 1
+# The install step comes through the bridge (SLICE_INSTALL, decided in
+# scripts/slice-install.ts: the config's `install`, else the lockfile), not as
+# a `bun install` written here. It was written here, and a Python repo with no
+# package.json lost every session to it, while an npm repo got a bun.lock it
+# did not track. An EMPTY array is "nothing to install", said on purpose, and
+# the reason is printed so a worktree with no node_modules is not a mystery.
+if [[ ${#SLICE_INSTALL[@]} -gt 0 ]]; then
+  if ! (cd "$worktree_path" && "${SLICE_INSTALL[@]}"); then
+    echo "error: '${SLICE_INSTALL[*]}' failed in the new worktree." >&2
+    exit 1
+  fi
+  echo "✓ dependencies installed (${SLICE_INSTALL[*]})"
+else
+  echo "  no install step ($SLICE_INSTALL_WHY)"
 fi
-echo "✓ dependencies installed"
 
 # ─── Ticket brief ────────────────────────────────────────────────────────
 # Fetched out here, before any wrapCommand is entered, and the reason is in the

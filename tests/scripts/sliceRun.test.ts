@@ -87,7 +87,11 @@ describe("the dispatcher", () => {
 
 describe("the round line", () => {
   it("is printed when its counts change, and otherwise once a heartbeat", async () => {
-    c = makeConsumer({ worktrees: [40] });
+    // The stop below is a crash to the dispatcher, which relaunches the slice.
+    // Its prep fails on the install, so the slice drops to queued: that is the
+    // count change. It used to fail by accident, on a `bun install` with no
+    // package.json in the fixture.
+    c = makeConsumer({ worktrees: [40], configExtra: 'install: ["false"],' });
     const session = fakeSession(c, 40);
     sessions.push(session);
     d = startDispatcher(c, ["-y", "--interval", "1", "40"], {
@@ -286,8 +290,13 @@ describe("a tracker that stops answering", () => {
  * one log outside the worktree, so the order is visible.
  */
 describe("a rebase that brings new dependencies", () => {
-  const prep = (postinstall: string) => {
-    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+  const prep = (postinstall: string, configExtra?: string) => {
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      configExtra,
+    });
     const log = join(c.root, "order.log");
     // Written after makeConsumer, because the gate needs the log's path.
     const config = join(c.main, "slice.config.ts");
@@ -328,7 +337,7 @@ describe("a rebase that brings new dependencies", () => {
     ]);
 
     expect(r.out).toContain(
-      "#40: the rebase brought a new package.json — reinstalling in its worktree …",
+      "#40: the rebase brought a new package.json — reinstalling in its worktree (bun install --frozen-lockfile) …",
     );
     expect(read(log)).toBe("install\ngate\n");
     expect(r.code).toBe(0);
@@ -370,14 +379,96 @@ describe("a rebase that brings new dependencies", () => {
       "40",
     ]);
 
+    // The fixture has a package.json and no lockfile, so the install is bun's
+    // frozen form, and the message names the command that ran.
     expect(r.out).toContain(
-      "bun install failed after the rebase (the lockfile may not match package.json) — run bun install in the worktree, commit the lockfile if it changed, and azelf retry 40",
+      "bun install --frozen-lockfile failed after the rebase (the lockfile may not match package.json) — run bun install --frozen-lockfile in the worktree, commit the lockfile if it changed, and azelf retry 40",
     );
     expect(r.out).toContain("broken lockfile");
     expect(read(log)).toBe("");
     expect(git(c!.main, "log", "-1", "--format=%s")).toBe(
       "chore: a dependency",
     );
+  });
+
+  /**
+   * An npm repo: the base moves package-lock.json, and the worktree's lockfile
+   * decides the command. `npm` is a fake on PATH that logs its argv, or fails,
+   * so the test needs neither npm nor a registry.
+   */
+  const npmRepo = (npm: string) => {
+    const { log } = prep("");
+    const bin = join(c!.root, "bin");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "npm"),
+      `#!/usr/bin/env bash\n${npm.replace("LOG", log)}\n`,
+      { mode: 0o755 },
+    );
+    commitIn(c!.main, "package-lock.json", "{}\n", "chore: a lockfile");
+    return { log, env: { PATH: `${bin}:${process.env.PATH}` } };
+  };
+
+  it("runs npm ci where the lockfile is npm's, before the gates", () => {
+    const { log, env } = npmRepo('echo "npm $*" >> LOG');
+
+    const r = runDispatcher(
+      c!,
+      ["--auto", "--once", "-y", "--no-review", "40"],
+      { env },
+    );
+
+    expect(r.out).toContain(
+      "#40: the rebase brought a new package-lock.json — reinstalling in its worktree (npm ci) …",
+    );
+    expect(read(log)).toBe("npm ci\ngate\n");
+    expect(r.code).toBe(0);
+    expect(git(c!.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  });
+
+  it("parks a slice whose npm ci fails, naming npm ci", () => {
+    const { log, env } = npmRepo(
+      "echo 'npm ERR! lockfile out of sync' >&2; exit 1",
+    );
+
+    const r = runDispatcher(
+      c!,
+      ["--auto", "--once", "-y", "--no-review", "40"],
+      { env },
+    );
+
+    expect(r.out).toContain(
+      "npm ci failed after the rebase (the lockfile may not match package.json) — run npm ci in the worktree, commit the lockfile if it changed, and azelf retry 40",
+    );
+    expect(r.out).not.toContain("bun install");
+    expect(r.out).toContain("npm ERR! lockfile out of sync");
+    expect(read(log)).toBe("");
+    expect(git(c!.main, "log", "-1", "--format=%s")).toBe("chore: a lockfile");
+  });
+
+  it("installs nothing when the config says [], and lands", () => {
+    const { log, postinstall } = prep("echo install >> LOG", "install: [],");
+    commitIn(
+      c!.main,
+      "package.json",
+      JSON.stringify({ name: "fx", scripts: { postinstall } }),
+      "chore: a dependency",
+    );
+
+    const r = runDispatcher(c!, [
+      "--auto",
+      "--once",
+      "-y",
+      "--no-review",
+      "40",
+    ]);
+
+    expect(r.out).toContain(
+      "#40: the rebase brought a new package.json — no install step (install: [] in slice.config.ts)",
+    );
+    expect(read(log)).toBe("gate\n");
+    expect(r.code).toBe(0);
+    expect(git(c!.main, "log", "-1", "--format=%s")).toBe("feat: a");
   });
 });
 
@@ -1035,6 +1126,72 @@ describe("slice-session.sh --prep-only by hand", () => {
     const out = sh(c.main, "./scripts/slice-session.sh 40 --prep-only");
     expect(out).toContain("✓ prepped, not launched — worktree ready at");
     expect(out).toContain("launch it with:");
+  });
+});
+
+/**
+ * The prep's install step is the config's `install`, else what the lockfile
+ * says — never a `bun install` written into the script. A repo with no
+ * package.json (a Python service) lost every session to bun's exit 1 before
+ * its ticket was written, and an npm repo got an untracked bun.lock in every
+ * worktree. See scripts/slice-install.ts.
+ */
+describe("the prep's install step", () => {
+  it("installs nothing where there is no package.json, and says why", () => {
+    // `resolve` gives the config a fake agent without `agent`, which is the
+    // option that writes a package.json into the fixture.
+    c = makeConsumer({ worktrees: [40], resolve: ["true"] });
+    const out = sh(c.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(out).toContain(
+      "no install step (no package.json — nothing to install)",
+    );
+    expect(out).not.toContain("bun install");
+    expect(out).toContain("✓ prepped, not launched");
+  });
+
+  it("installs nothing when the config says [], whatever the checkout holds", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      agent: ["true"],
+      configExtra: "install: [],",
+    });
+    const out = sh(c.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(out).toContain("no install step (install: [] in slice.config.ts)");
+    expect(existsSync(join(c.wt(40), "node_modules"))).toBe(false);
+  });
+
+  it("runs the configured command in the worktree, and names it", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      agent: ["true"],
+      configExtra: 'install: ["touch", "../installed-marker"],',
+    });
+    const out = sh(c.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(out).toContain(
+      "✓ dependencies installed (touch ../installed-marker)",
+    );
+    expect(existsSync(join(c.root, "installed-marker"))).toBe(true);
+  });
+
+  it("fails the prep when the configured command fails, naming it", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      agent: ["true"],
+      configExtra: 'install: ["false"],',
+    });
+    const r = shResult(c.main, "./scripts/slice-session.sh 40 --prep-only");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("error: 'false' failed in the new worktree.");
+  });
+
+  it("the config refuses an install that is not a list of words", () => {
+    for (const value of ['"npm ci"', '["npm", ""]']) {
+      c = makeConsumer({ configExtra: `install: ${value},` });
+      const r = runDispatcher(c, ["--plan"]);
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain("install must be an array of non-empty strings");
+      rmSync(c.root, { recursive: true, force: true });
+    }
   });
 });
 

@@ -332,10 +332,11 @@ Brings a worktree back to what a prep leaves, and launches nothing: for one
 re-added by hand with `git worktree add`, which has the branch and nothing else. It
 re-adds the worktree from the branch if git no longer lists it, copies the
 `provisionCopy` files that are missing (and names the ones already there, which it
-never overwrites), runs `bun install`, and rewrites `.slice-ticket.md` and
-`.slice-parent.md`. It skips the ticket checks and writes no `.slice-flags`. It works
-under a hold, and refuses while a session is running in the worktree, or when there
-is neither a worktree nor a branch (`azelf run <ticket>` starts it).
+never overwrites), runs the install step (`install`, or what the lockfile says), and
+rewrites `.slice-ticket.md` and `.slice-parent.md`. It skips the ticket checks and
+writes no `.slice-flags`. It works under a hold, and refuses while a session is
+running in the worktree, or when there is neither a worktree nor a branch (`azelf run
+<ticket>` starts it).
 
 ### `azelf hook`
 
@@ -398,6 +399,7 @@ export default {
 | `exclusiveLockLabel` | `string?` | tracker label on tickets that will touch `exclusiveLockPaths`; they are started one at a time. Needs `exclusiveLockPaths` |
 | `humanLabel` | `string?` | tracker label on tickets only a person can do. They are never dispatched, even when named, and they hold their dependents until closed. `init` writes `ready-for-human` |
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
+| `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, no `package.json` → nothing. `[]` installs nothing |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
 | `numberedIgnore` | `string[]?` | paths whose leading number is not a sequence, so two files under one number there are left alone. Same syntax. See [Two files, one number](#two-files-one-number) |
@@ -1532,7 +1534,10 @@ this and a project that does not already have bun.
 That has one consequence worth stating up front: **a Python project still needs bun
 on PATH**, because the loader reads a TypeScript config and the shell bridge shells
 out to it. The gates themselves are just argv, so pytest and ruff are no harder to
-express than vitest and biome.
+express than vitest and biome. The install step follows the lockfile, not bun: a
+checkout without `package.json` installs nothing, one with `package-lock.json` runs
+`npm ci` (see `install` in the configuration reference), so neither a Python repo
+nor an npm repo meets a `bun install` it never asked for.
 
 Known gaps, stated plainly:
 

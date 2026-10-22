@@ -50,6 +50,7 @@ import { existsSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { type Agent, claude } from "./slice-agent";
 import type { Gate } from "./slice-gates";
+import { installFor } from "./slice-install";
 import { type Launcher, manual } from "./slice-launcher";
 import {
   type TicketId,
@@ -97,6 +98,17 @@ export type SliceConfig = {
   humanLabel?: string;
   /** Gitignored files copied into each new worktree. */
   provisionCopy: string[];
+  /**
+   * The command that installs a worktree's dependencies: after a prep, and
+   * again after a rebase that brought a new manifest or lockfile from the base.
+   * Optional; left out, the lockfile in the checkout decides (bun.lock → `bun
+   * install`, pnpm-lock.yaml → `pnpm install --frozen-lockfile`, yarn.lock →
+   * `yarn install --frozen-lockfile`, package-lock.json → `npm ci`, no
+   * package.json → nothing). `[]` installs nothing, said on purpose — a Python
+   * repo whose virtualenv is per machine, say. See scripts/slice-install.ts
+   * for the two repos that made `bun install` the wrong default.
+   */
+  install?: string[];
   /**
    * Free space, in GB, the dispatcher keeps where the worktrees go. Optional;
    * 10 when left out. Below it, nothing new is prepped: landing carries on,
@@ -555,6 +567,18 @@ function validate(c: SliceConfig): SliceConfig {
       bad("wrapCommand must be an array of strings, or left out entirely");
     }
   }
+  // `[]` is a real answer ("install nothing"); a bare string would be run
+  // character by character, and an empty word is a command that cannot exist.
+  if (c.install !== undefined) {
+    if (
+      !Array.isArray(c.install) ||
+      c.install.some((w) => typeof w !== "string" || w === "")
+    ) {
+      bad(
+        'install must be an array of non-empty strings, like ["npm", "ci"] — [] installs nothing, and left out the lockfile decides',
+      );
+    }
+  }
   return c;
 }
 
@@ -654,6 +678,11 @@ const shArray = (name: string, items: string[]): string =>
   `${name}=(${items.map(shq).join(" ")})`;
 
 export function shellAssignments(): string {
+  // The prep's install step, decided here (the config, else the lockfile in
+  // the MAIN checkout — a fresh worktree has the same one) so the shell and
+  // the dispatcher's reinstall after a rebase read one rule. The `why` is
+  // what slice-session.sh prints beside the command, or in place of it.
+  const install = installFor(config.install, repoRoot, "prep");
   return [
     `SLICE_REPO_ROOT=${shq(repoRoot)}`,
     `SLICE_REPO_NAME=${shq(repoName)}`,
@@ -684,6 +713,8 @@ export function shellAssignments(): string {
     `SLICE_EXCLUSIVE_LOCK_LABEL=${shq(config.exclusiveLockLabel ?? "")}`,
     `SLICE_HUMAN_LABEL=${shq(config.humanLabel ?? "")}`,
     shArray("SLICE_PROVISION_COPY", config.provisionCopy),
+    shArray("SLICE_INSTALL", install.argv),
+    `SLICE_INSTALL_WHY=${shq(install.why)}`,
   ].join("\n");
 }
 

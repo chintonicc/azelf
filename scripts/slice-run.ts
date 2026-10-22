@@ -105,6 +105,7 @@ import {
   locks,
   releaseCommand,
 } from "./slice-hold";
+import { INSTALL_MANIFESTS, installFor, installName } from "./slice-install";
 // The launcher is picked below, in the launching section; `manual` is
 // imported here because it is the fallback as well as the default.
 import { type Launcher, type Session, manual } from "./slice-launcher";
@@ -4054,9 +4055,6 @@ const RESOLVE_PASSES = 2;
 /** Slices whose install after a rebase failed, and the manifests that moved. */
 const reinstallOwed = new Map<TicketId, string[]>();
 
-/** The files whose change on the base means the worktree's install is stale. */
-const INSTALL_MANIFESTS = new Set(["package.json", "bun.lock", "bun.lockb"]);
-
 /**
  * Install again when the rebase brought the base's dependency changes. The
  * worktree was installed when it was prepped, against the base as it was then;
@@ -4086,14 +4084,26 @@ function reinstallAfterRebase(id: TicketId, before: string | null): boolean {
     }
   }
   if (!names) return true;
+  // The config, else the lockfile in the worktree as the rebase left it. Frozen
+  // where the manager has a frozen form: the lockfile on the base is what was
+  // reviewed, and an install that rewrote it would dirty the worktree the gates
+  // are about to judge. `[]` is "nothing to install", and nothing is owed.
+  const install = installFor(config.install, worktreeFor(id), "reinstall");
+  if (install.argv.length === 0) {
+    console.log(
+      `  ${ref(id)}: the rebase brought a new ${names.join(
+        ", ",
+      )} — no install step (${install.why})`,
+    );
+    reinstallOwed.delete(id);
+    return true;
+  }
   console.log(
     `  ${ref(id)}: the rebase brought a new ${names.join(
       ", ",
-    )} — reinstalling in its worktree …`,
+    )} — reinstalling in its worktree (${installName(install.argv)}) …`,
   );
-  // Frozen: the lockfile on the base is what was reviewed, and an install that
-  // rewrote it would dirty the worktree the gates are about to judge.
-  const { ok, out } = run(["bun", "install", "--frozen-lockfile"], {
+  const { ok, out } = run(install.argv, {
     cwd: worktreeFor(id),
     allowFail: true,
   });
@@ -4190,10 +4200,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       resolved = true;
     }
     if (!reinstallAfterRebase(t.id, baseBefore)) {
+      const failed = installName(
+        installFor(config.install, worktreeFor(t.id), "reinstall").argv,
+      );
       return park(
         t,
         "gates",
-        `bun install failed after the rebase (the lockfile may not match package.json) — run bun install in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
+        `${failed} failed after the rebase (the lockfile may not match package.json) — run ${failed} in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
       );
     }
     if (!gatesPass(t.id)) {

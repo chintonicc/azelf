@@ -122,6 +122,26 @@ describe("the generated config", () => {
     expect(c).toContain('["uv", "run", "ruff", "check"]');
   });
 
+  /**
+   * The install step is the lockfile's choice, written in commented out so
+   * the reader sees what a prep will run before the first one runs it. An
+   * npm repo must not read `bun install` here: that is the line that wrote
+   * an untracked bun.lock into every worktree of one.
+   */
+  it("shows the install step the lockfile implies, commented out", () => {
+    pkg({});
+    touch("package-lock.json");
+    expect(gen()).toContain('// install: ["npm", "ci"],');
+    expect(gen()).toContain("here that is `npm ci`");
+  });
+
+  it("shows no install step for a python project, and says why", () => {
+    touch("requirements.txt");
+    const c = gen();
+    expect(c).toContain("// install: [],");
+    expect(c).toContain("nothing, since there is no package.json");
+  });
+
   /** A gate for a tool that is not installed fails every slice for no reason. */
   it("comments out gates whose tool was not found", () => {
     pkg({});
