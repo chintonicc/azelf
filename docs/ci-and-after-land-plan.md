@@ -1,7 +1,7 @@
 # A command runs after every land, and CI on the slice's SHA can gate it
 
-**Status:** Phase 1 next · Phase 2 deferred until a second repo wants a CI gate (decided
-2026-10-22) · **Written:** 2026-10-22
+**Status:** Phase 1 landed (`fd0c135`) · Phase 2 deferred until a second repo wants a CI gate
+(decided 2026-10-22) · **Written:** 2026-10-22
 **Companion:** the analysis consumer-b's session wrote on 2026-10-22, the same one
 behind `docs/non-bun-consumer-plan.md`. Its third tool change was "a CI gate plus a
 post-land check". That plan put both under "Not in this plan".
@@ -93,31 +93,31 @@ after the heading. Line numbers are as of `6f94898`.
   - Without it, the next repo that wants a CI gate (consumer-b's frontend, or
     consumer-a) copies 120 lines of bash.
 
-## Phase 1 — `afterLand`
+## Phase 1 — `afterLand` — `fd0c135`
 
-- [ ] 1a. Config and bridge
+- [x] 1a. Config and bridge
   - `afterLand?: string[]` in `SliceConfig`. It is validated like `install`: an array
     of non-empty strings, and `[]` means off.
   - `shArray("SLICE_AFTER_LAND", config.afterLand ?? [])` in `shellAssignments`, and
     the name in `slice-config.sh`'s header list.
-- [ ] 1b. `slice-land.sh`
+- [x] 1b. `slice-land.sh`
   - The step after the cleanup, under the lock that is still held. The `EXIT` trap
     releases it afterwards.
   - It prints `── after the land: <cmd> ──`, then the command's output, then
     `✓ afterLand passed` or `✗ afterLand failed (exit N) — #n is landed and closed;
     the base needs a look before anything else lands`.
   - The new exit code goes in the header next to 75.
-- [ ] 1c. The dispatcher
+- [x] 1c. The dispatcher
   - Handle the new status in the land loop (`slice-run.ts:4258`).
   - Record the slice as landed (the block after `if (!ok)`), print the summary and
     exit as described above.
   - `--gates`/the run header gains a line `afterLand: <cmd>` when one is set.
-- [ ] 1d. README
+- [x] 1d. README
   - A config table row.
   - A section "After a land" under "When a slice will not land" or next to "Gates":
     when it runs, the lock, the exit, what a failure does, no timeout, and an example
     health check.
-- [ ] 1e. Tests
+- [x] 1e. Tests
   - slice-land: it runs after the push with both variables set. It does not run when
     the land is refused. A failure exits with the new code and leaves the land pushed
     and the ticket closed. A second land waits on the lock while it runs.
@@ -125,6 +125,32 @@ after the heading. Line numbers are as of `6f94898`.
     nothing after it, says how to resume and exits with the stop code. A passing one
     changes nothing in the run.
   - Config: rejects `afterLand: "x"` and `[""]`.
+
+### What building it found
+
+- **The exit code is 3.** 1 is every refusal and 75 is "diverged". 3 is a code of its
+  own and is documented in the script's header.
+- **The finish at startup needed it too.** A dispatcher finishes an interrupted land
+  before its first round (`slice-run.ts`, "Lands an earlier process pushed"), and that
+  land ends at the same last step. Exit 3 there counts as finished. The round loop asks
+  `stopForAfterLand()` before its land as well as after it, so round 1 lands nothing on
+  top. A test covers it. With the check before the land removed, that test fails,
+  because round 1 lands #41.
+- **The header line, not `--gates`.** The run header says
+  `afterLand: <cmd> — after every land, under the land lock; a failure stops the
+  landing.`
+- Nine tests:
+  - four for `slice-land.sh`: environment and order, exit 3 with the land kept, not
+    run on a refusal, the lock held while it runs;
+  - two for the dispatcher;
+  - one for the finish at startup;
+  - one for the config refusing a bad `afterLand`;
+  - one already true before this phase: a refused land does not run it.
+
+  Three of the slice-land tests and both dispatcher tests failed before the change.
+- Full suite: 564/564. vitest also reported one unhandled
+  `Timeout calling "onTaskUpdate"`. That is its own worker RPC under load, and it
+  appeared once before this phase too.
 
 ## Phase 2 — `ciRuns()`, the CI gate as a shape — deferred
 
