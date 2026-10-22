@@ -1,6 +1,6 @@
 # A blocker in another repo is read as one, and waited on
 
-**Status:** Phase 1 landed, 2026-10-22, with 2a moved into it · Phase 2 (2b, 2c) open
+**Status:** complete. Phase 1 landed 2026-10-22, with 2a moved into it · Phase 2 (2b, 2c) landed 2026-10-22
 **Written:** 2026-10-22
 **Companion:** `docs/non-bun-consumer-plan.md`, whose "Not in this plan" listed
 "blockers across two repos". consumer-b has two repos, a backend and a frontend, with
@@ -82,7 +82,7 @@ after the heading. Line numbers are as of `ffca576`.
     internal id under that repo's path (`repos/owner/repo/issues/n`), never under this
     one's. The comment at `slice-tracker.ts:699` explains what goes wrong otherwise.
 
-## Phase 1 — the edge is read as it is, and waited on
+## Phase 1 — the edge is read as it is, and waited on — `ae982c8`
 
 - [x] 1a. `github()`
   - `blockers()` keeps `repository_url` and returns `owner/repo#n` for another repo.
@@ -127,9 +127,9 @@ after the heading. Line numbers are as of `ffca576`.
   GitHub's names are case-insensitive, and a body that wrote `Acme/API#140` against
   an edge read as `acme/api#140` would otherwise be a missing edge that
   `--sync-edges` could never fix.
-- **`addBlocker` refuses a blocker in another repo** with a message that says to set
+- **`addBlocker` refused a blocker in another repo** with a message that said to set
   it in GitHub. Before 2a it wrote the edge to this repo's #n. With 2a and no 2b, the
-  path it resolves under would 404, which says nothing useful. 2b replaces the
+  path it resolves under would 404, which says nothing useful. 2b replaced the
   refusal.
 - **The human stop** names a person's ticket in another repo as `, in another repo`,
   not `, outside this set`.
@@ -141,13 +141,13 @@ after the heading. Line numbers are as of `ffca576`.
   - Dispatcher: the plan line, the wait and the start after the close (with this
     repo's #7 closed and irrelevant), the human stop.
 
-## Phase 2 — body claims and `--sync-edges` across repos
+## Phase 2 — body claims and `--sync-edges` across repos — `7a30780`
 
-2a moved into Phase 1 (see above). What is left is 2b and its tests.
+2a moved into Phase 1 (see above). 2b and the rest of 2c landed together.
 
 - [x] 2a. `idsIn` reads `owner/repo#n` as one qualified id, and never as `#n`.
   `blockersFromBody`, `blockerLine` and `bodyOnlyBlockers` follow.
-- [ ] 2b. The tracker's `addBlocker(id, "owner/repo#n")` resolves the internal id under
+- [x] 2b. The tracker's `addBlocker(id, "owner/repo#n")` resolves the internal id under
   `repos/owner/repo/issues/n`, and posts it to this repo's
   `repos/{owner}/{repo}/issues/<id>/dependencies/blocked_by` as today.
   - It replaces the refusal Phase 1 put in `addBlocker`. That `throw` for an id that
@@ -155,7 +155,7 @@ after the heading. Line numbers are as of `ffca576`.
     repo") becomes the test that it resolves under the other repo's path.
   - The README line under "A blocker in another repo is waited for" that says
     `--sync-edges` does not write across repos yet changes to say it does.
-- [ ] 2c. Tests
+- [x] 2c. Tests
   - Done in Phase 1, with 2a: the qualified claim, a claim matched to the qualified
     edge, and a bare `#140` that stays this repo's.
   - Left: `addBlocker("20", "acme/api#140")` resolves `repos/acme/api/issues/140`
@@ -163,6 +163,20 @@ after the heading. Line numbers are as of `ffca576`.
     failed lookup still posts nothing.
   - Left: `--sync-edges` in the dispatcher with the fixture tracker writes
     `acme/web#7` as the blocker, and prints it as `acme/web#7`, not `#acme/web#7`.
+
+### What building it found
+
+- **The dispatcher needed no change.** Since Phase 1, `ref()` prints a qualified id as
+  it is, and `syncEdges` passes the blocker to `addBlocker` as the body names it. The
+  dispatcher test passed before the tracker changed. It stays, as the guard on the
+  printed line.
+- **One parse for both.** `get()` and `addBlocker` read `owner/repo#n` through the same
+  `inOtherRepo` helper in `github()`.
+- **The error names the other repo's ticket by its own id**: `could not record #20 as
+  blocked by acme/api#140`, not `#acme/api#140`.
+- **Tests:** the refusal test became the resolve test; three new: an edge that
+  already exists, a failed lookup that posts nothing, the failed post's message. One
+  new in the dispatcher.
 
 ## Order and cost
 
