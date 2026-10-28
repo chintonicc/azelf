@@ -25,8 +25,8 @@ as every other slice running right now.
 
 ## 3. Claim the DB lock before you touch the database
 
-**Before creating or applying anything under `exclusiveLockPaths`** (see
-`slice.config.ts`; migrations, typically), run:
+**Before creating or applying anything under `exclusiveLockPaths`** (migrations,
+typically; the lock names the paths when it answers), run:
 
 ```sh
 ./scripts/db-lock.sh claim
@@ -57,7 +57,14 @@ your message.
 
 ## 5. Run the gates yourself before declaring done
 
-The dispatcher will re-run them, so the only thing you gain by guessing is a failed
+```sh
+./scripts/slice-gates.sh
+```
+
+That runs this project's landing gates on this worktree, as the dispatcher will at
+the land, and exits non-zero when one fails. It needs a clean tree: commit first. A
+gate that waits for CI on the pushed commit is skipped here and runs at the land.
+The dispatcher re-runs them all, so the only thing you gain by guessing is a failed
 land. Run them, read the output, fix what you broke.
 
 A gate must never write to the tree. If formatting is a gate here, it runs in check

@@ -8,7 +8,8 @@
 #                                                # sitting in the removed worktree
 #
 # Exits 75 when the base branch has moved and the slice needs a rebase before
-# it can land, and 1 for every other refusal. Exits 3 when it LANDED and the
+# it can land — found before anything moves, or when origin refuses the push
+# because it moved meanwhile — and 1 for every other refusal. Exits 3 when it LANDED and the
 # config's afterLand then failed: the land stands, the base needs a look.
 #
 # WHY THIS EXISTS
@@ -188,8 +189,13 @@ fi
 # held until this script exits, cleanup and ticket close included. The holder
 # is this shell: a land that died holding it is taken over by the next one,
 # which says so. See scripts/slice-lock.ts.
+#
+# Keyed by origin's URL and kept under ~/.azelf/locks, not in this checkout's
+# git dir: what it serialises is pushes to one remote, and the clone a merge
+# is made in by hand (`azelf push-main`) is not this one. Without an origin it
+# is `azelf-land.lock` in the common git dir, as it was.
 LAND_LOCK_WAIT=300
-land_lock="$_slice_common/azelf-land.lock"
+land_lock="$(bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" land-dir "$_slice_common")"
 bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" acquire "$land_lock" \
   --pid $$ --label "$branch" --what land --wait "$LAND_LOCK_WAIT" || exit 1
 trap 'bun "$SLICE_AZELF_DIR/scripts/slice-lock.ts" release "$land_lock" --pid $$ || true' EXIT
@@ -209,6 +215,41 @@ elif [[ -f "$worktree_path/.slice-live" ]]; then
   session_pid="$(head -n 1 "$worktree_path/.slice-live" | tr -d '[:space:]')"
   session_declared_done=false
 fi
+
+# The local base brought level with origin's. Fetched; fast-forwarded onto
+# `origin/<base>` when it is strictly behind; left alone when it is level or
+# ahead (slices are cut from a local base that is ahead, and this land pushes
+# what it has). Diverged — local commits origin lacks AND origin commits the
+# local base lacks — is refused with 1: no fast-forward can push that, and a
+# rebase of the slice changes nothing about it. An origin that has no such
+# branch yet is fine: the first push creates it.
+#
+# The one `fetch` here is what makes the dispatcher's clone current without a
+# pull by hand — slice-run.ts does the same at the start of every round, and
+# this covers a hand land and the window between the round's sync and the push.
+sync_base_with_origin() {
+  local fetch_err remote behind
+  fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
+    echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH:" >&2
+    echo "$fetch_err" >&2
+    exit 1
+  }
+  remote="refs/remotes/origin/$SLICE_BASE_BRANCH"
+  git rev-parse --verify -q "$remote" >/dev/null || return 0
+  git merge-base --is-ancestor "$remote" HEAD && return 0
+  if ! git merge-base --is-ancestor HEAD "$remote"; then
+    echo "error: $SLICE_BASE_BRANCH and origin/$SLICE_BASE_BRANCH have diverged ($(git rev-list --count "$remote..HEAD") and $(git rev-list --count "HEAD..$remote") commits), so no land could push." >&2
+    echo "       Pull or rebase $SLICE_BASE_BRANCH first. Nothing was changed." >&2
+    exit 1
+  fi
+  behind="$(git rev-list --count "HEAD..$remote")"
+  if ! git merge -q --ff-only "$remote"; then
+    echo "error: $SLICE_BASE_BRANCH is $behind commit(s) behind origin/$SLICE_BASE_BRANCH and couldn't fast-forward onto it — see git's message above." >&2
+    echo "       (uncommitted changes in the main checkout, on a file those commits touch?)" >&2
+    exit 1
+  fi
+  echo "✓ $SLICE_BASE_BRANCH fast-forwarded onto origin/$SLICE_BASE_BRANCH — it was $behind commit(s) behind"
+}
 
 if $finishing; then
   landed_short="$(git rev-parse --short "$landed_head" 2>/dev/null || echo "$landed_head")"
@@ -231,8 +272,25 @@ if $finishing; then
   base_before="$(git rev-parse "$landed_head~$landed_count" 2>/dev/null || true)"
 else
   declared_head="$marker_declared"
-  # Taken before the fast-forward, for the "landed as" line below: afterwards
-  # `base..HEAD` is empty by definition.
+
+  # ─── The base is origin's first ─────────────────────────────────────────
+  #
+  # Fetched BEFORE anything moves, and the local base fast-forwarded onto
+  # origin's when it is behind. This used to fast-forward onto the slice
+  # first and fetch afterwards, and on consumer-b that was the defect: a push
+  # origin refused left the local base sitting on the slice, every later
+  # rebase, diff and overlap check was made against that base, and the next
+  # land refused as "pull/rebase before landing" with nothing to rebase. A
+  # dispatcher clone that nobody pulls by hand went stale the same way.
+  #
+  # With the sync first, the local base is what origin has, so the ancestry
+  # check below asks the one question that matters — does the slice contain
+  # what origin has — and a slice that does not gets 75, which a dispatcher
+  # answers by rebasing onto the base this just moved.
+  sync_base_with_origin
+  # Taken AFTER the sync, for the "landed as" line below: `base..HEAD` is
+  # then exactly the slice's commits. It is also where a rejected push resets
+  # to — a commit origin had.
   base_before="$(git rev-parse HEAD)"
 
   echo "── fast-forwarding $SLICE_BASE_BRANCH onto $branch ──────────────"
@@ -241,7 +299,8 @@ else
   # while the slice was gated and reviewed, or while this script waited for
   # the land lock above, and a dispatcher rebases again on 75 instead of
   # parking. Asked of ancestry rather than read from a failed merge, which also
-  # fails on a dirty main checkout, and a rebase fixes nothing there.
+  # fails on a dirty main checkout, and a rebase fixes nothing there. HEAD
+  # contains origin's head after the sync, so this covers both.
   if ! git merge-base --is-ancestor HEAD "$branch"; then
     echo "error: $SLICE_BASE_BRANCH can't fast-forward onto $branch — it has diverged." >&2
     echo "       rebase $branch onto $SLICE_BASE_BRANCH from its worktree first, then retry." >&2
@@ -254,16 +313,35 @@ else
   echo "✓ $SLICE_BASE_BRANCH now includes $branch"
 
   echo "── pushing $SLICE_BASE_BRANCH ────────────────────────"
-  fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
-    echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH:" >&2
-    echo "$fetch_err" >&2
-    exit 1
-  }
-  if git rev-parse --verify -q "origin/$SLICE_BASE_BRANCH" >/dev/null && ! git merge-base --is-ancestor "origin/$SLICE_BASE_BRANCH" HEAD; then
-    echo "error: origin/$SLICE_BASE_BRANCH has commits this fast-forward doesn't have — pull/rebase before landing." >&2
+  # A push origin refuses is UNDONE. The fast-forward above moved the local
+  # base onto the slice; left there, the base is ahead of origin by commits
+  # that did not land, and everything after this works from it. `--keep`, not
+  # `--hard`: it refuses rather than overwrite uncommitted changes in the main
+  # checkout, and the fast-forward only moved files the two commits differ in.
+  #
+  # Then why it was refused. Origin moved since the sync — another land, a
+  # hand merge from another checkout — is the ordinary case, and the one a
+  # rebase fixes: the base is brought onto origin's new head and this exits
+  # 75. Anything else (a hook, credentials) is 1; a rebase would change nothing.
+  if ! push_out=$(git push origin "$SLICE_BASE_BRANCH" 2>&1); then
+    [[ -n "$push_out" ]] && echo "$push_out" >&2
+    echo "✗ origin refused the push — undoing the fast-forward: $SLICE_BASE_BRANCH back to $(git rev-parse --short "$base_before")" >&2
+    if ! git reset -q --keep "$base_before"; then
+      echo "error: couldn't move $SLICE_BASE_BRANCH back — it is still on $branch, and nothing was pushed." >&2
+      echo "       Move it by hand from the main checkout: git reset --keep $base_before" >&2
+      exit 1
+    fi
+    if git fetch -q origin "$SLICE_BASE_BRANCH" 2>/dev/null \
+        && ! git merge-base --is-ancestor "origin/$SLICE_BASE_BRANCH" "$base_before"; then
+      sync_base_with_origin
+      echo "error: origin/$SLICE_BASE_BRANCH moved while $ticket_ref was landing — $SLICE_BASE_BRANCH is now at its head, $(git rev-parse --short HEAD)." >&2
+      echo "       rebase $branch onto $SLICE_BASE_BRANCH from its worktree, then retry." >&2
+      exit 75
+    fi
+    echo "error: the push was refused for a reason a rebase would not change — see git's message above. Nothing landed." >&2
     exit 1
   fi
-  git push origin "$SLICE_BASE_BRANCH"
+  [[ -n "$push_out" ]] && echo "$push_out"
   echo "✓ pushed"
 
   # The close comment also records WHAT landed, as SHAs. The landed head is the

@@ -242,7 +242,16 @@ export type SliceConfig = {
    * machine, which is precisely the thing the deleted profile got wrong.
    */
   wrapCommand?: string[];
-  /** Opening instruction for a slice's session. `{n}` is the ticket. */
+  /**
+   * Opening instruction for a slice's session. `{n}` is the ticket.
+   *
+   * `{parent}` is where the parent spec is mentioned: it becomes a sentence
+   * naming `.slice-parent.md` when the worktree has one, and nothing when the
+   * ticket hangs under no spec. A prompt without it is told the no-spec case
+   * anyway: slice-session.sh appends a sentence saying there is no
+   * `.slice-parent.md`, because a prompt written for the usual case ("read
+   * the parent spec") sent sessions looking for a file that was not there.
+   */
   startPrompt: string;
   /**
    * What a slice's terminal tab is called, or `false` to leave it alone.

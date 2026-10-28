@@ -7,8 +7,10 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { landLockDir } from "@/scripts/slice-lock";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  AZELF,
   type Consumer,
   git,
   makeConsumer,
@@ -255,7 +257,7 @@ describe("slice-land.sh and the land lock", () => {
   };
   beforeEach(() => {
     c = makeConsumer({ worktrees: [40, 41], remote: true });
-    lock = join(c.main, ".git", "azelf-land.lock");
+    lock = landLockDir(c.main);
     commitIn(40);
     commitIn(41);
   });
@@ -403,7 +405,7 @@ describe("slice-land.sh and afterLand", () => {
 
   it("exits 3 when it fails, and leaves the land pushed and the ticket closed", () => {
     consumer("echo the health check is red; exit 7");
-    const lock = join(c.main, ".git", "azelf-land.lock");
+    const lock = landLockDir(c.main);
 
     const r = shResult(c.main, "./scripts/slice-land.sh 40");
 
@@ -589,4 +591,441 @@ describe("finishing a land that was interrupted after the push", () => {
     expect(closes()).toBe("");
     expect(existsSync(record())).toBe(true);
   });
+});
+
+/**
+ * The base the land works from is origin's. On consumer-b the land
+ * fast-forwarded onto the slice first and fetched afterwards: a push origin
+ * refused left the local base on the slice, and a dispatcher clone nobody
+ * pulled by hand was rebased onto for a day. Now the local base is brought
+ * onto origin's head before anything moves, and a refused push is undone.
+ */
+describe("slice-land.sh and origin's base", () => {
+  let c: Consumer;
+  let other: string;
+  /** A commit pushed to origin from another checkout. */
+  const theirs = (msg: string, file = "theirs.txt") => {
+    writeFileSync(join(other, file), `${msg}\n`);
+    git(other, "add", file);
+    git(other, "commit", "-qm", msg);
+    git(other, "push", "-q", "origin", "main");
+  };
+  const commitIn = (wt: string, file: string, msg: string) => {
+    writeFileSync(join(wt, file), `${file}\n`);
+    git(wt, "add", file);
+    git(wt, "commit", "-qm", msg);
+  };
+  beforeEach(() => {
+    c = makeConsumer({ remote: true });
+    other = join(c.root, "other");
+    git(c.root, "clone", "-q", join(c.root, "remote"), other);
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("fast-forwards a local base that is behind, then lands a slice cut from origin onto it", () => {
+    theirs("feat: theirs");
+    git(c.main, "fetch", "-q", "origin");
+    git(
+      c.main,
+      "worktree",
+      "add",
+      "-q",
+      c.wt(40),
+      "-b",
+      "ticket/40",
+      "origin/main",
+    );
+    commitIn(c.wt(40), "a.txt", "feat: a");
+
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+
+    expect(land).toContain(
+      "✓ main fast-forwarded onto origin/main — it was 1 commit(s) behind",
+    );
+    expect(land.indexOf("fast-forwarded onto origin/main")).toBeLessThan(
+      land.indexOf("── fast-forwarding main onto ticket/40"),
+    );
+    // The slice's own commit, not origin's as well.
+    expect(land).toMatch(/landed on main as [0-9a-f]{7} \(1 commit\(s\)\)/);
+    expect(land).toContain("✓ closed #40");
+    expect(git(c.main, "log", "--format=%s")).toBe(
+      "feat: a\nfeat: theirs\ninit",
+    );
+    expect(git(c.main, "rev-parse", "main")).toBe(
+      git(c.main, "rev-parse", "origin/main"),
+    );
+  });
+
+  it("refuses with 75 before moving anything when the slice lacks origin's head, and lands once rebased", () => {
+    git(c.main, "worktree", "add", "-q", c.wt(40), "-b", "ticket/40");
+    commitIn(c.wt(40), "a.txt", "feat: a");
+    theirs("feat: theirs");
+
+    const r = shResult(c.main, "./scripts/slice-land.sh 40");
+
+    expect(r.code).toBe(75);
+    expect(r.out).toContain(
+      "✓ main fast-forwarded onto origin/main — it was 1 commit(s) behind",
+    );
+    expect(r.out).toContain(
+      "main can't fast-forward onto ticket/40 — it has diverged",
+    );
+    expect(r.out).not.toContain("pushing main");
+    // The base is origin's now, which is what the rebase it asks for needs.
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: theirs");
+    expect(git(c.main, "rev-parse", "main")).toBe(
+      git(c.main, "rev-parse", "origin/main"),
+    );
+    expect(git(c.wt(40), "log", "-1", "--format=%s")).toBe("feat: a");
+    expect(existsSync(landLockDir(c.main))).toBe(false);
+
+    git(c.wt(40), "rebase", "-q", "main");
+    const land = sh(c.main, "./scripts/slice-land.sh 40");
+    expect(land).toContain("✓ closed #40");
+    expect(git(c.main, "log", "--format=%s")).toBe(
+      "feat: a\nfeat: theirs\ninit",
+    );
+  });
+
+  it("undoes the fast-forward when origin moved between the fetch and the push, and exits 75 on origin's new head", () => {
+    git(c.main, "worktree", "add", "-q", c.wt(40), "-b", "ticket/40");
+    commitIn(c.wt(40), "a.txt", "feat: a");
+    const branchHead = git(c.wt(40), "rev-parse", "HEAD");
+    const baseBefore = git(c.main, "rev-parse", "main");
+    // Another checkout pushes while this land is pushing: the window a
+    // rejected push used to leave the local base sitting on the slice.
+    writeFileSync(
+      join(c.main, ".git", "hooks", "pre-push"),
+      `#!/usr/bin/env bash
+set -e
+cd ${JSON.stringify(other)}
+echo theirs > theirs.txt
+git add theirs.txt
+git -c user.email=t@t -c user.name=t commit -qm "feat: theirs"
+git push -q origin main
+`,
+      { mode: 0o755 },
+    );
+
+    const r = shResult(c.main, "./scripts/slice-land.sh 40");
+
+    expect(r.code).toBe(75);
+    expect(r.out).toContain("── pushing main");
+    expect(r.out).toContain(
+      `✗ origin refused the push — undoing the fast-forward: main back to ${baseBefore.slice(
+        0,
+        7,
+      )}`,
+    );
+    expect(r.out).toContain(
+      "✓ main fast-forwarded onto origin/main — it was 1 commit(s) behind",
+    );
+    expect(r.out).toMatch(
+      /error: origin\/main moved while #40 was landing — main is now at its head, [0-9a-f]{7}\./,
+    );
+    expect(r.out).not.toContain("✓ pushed");
+    expect(r.out).not.toContain("closed #40");
+    // The base is origin's, not the slice's; the branch and its worktree are
+    // as they were; nothing says a land happened.
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: theirs");
+    expect(git(c.main, "rev-parse", "main")).toBe(
+      git(c.main, "rev-parse", "origin/main"),
+    );
+    expect(git(c.main, "rev-parse", "ticket/40")).toBe(branchHead);
+    expect(existsSync(c.wt(40))).toBe(true);
+    expect(existsSync(c.closeFile)).toBe(false);
+    expect(existsSync(join(c.main, ".git", "azelf-landed-40.txt"))).toBe(false);
+    expect(existsSync(landLockDir(c.main))).toBe(false);
+  });
+
+  it("exits 1 after the undo when the push was refused for another reason", () => {
+    git(c.main, "worktree", "add", "-q", c.wt(40), "-b", "ticket/40");
+    commitIn(c.wt(40), "a.txt", "feat: a");
+    const baseBefore = git(c.main, "rev-parse", "main");
+    writeFileSync(
+      join(c.main, ".git", "hooks", "pre-push"),
+      "#!/usr/bin/env bash\necho 'not today' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+
+    const r = shResult(c.main, "./scripts/slice-land.sh 40");
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("not today");
+    expect(r.out).toContain("undoing the fast-forward");
+    expect(r.out).toContain(
+      "the push was refused for a reason a rebase would not change",
+    );
+    expect(git(c.main, "rev-parse", "main")).toBe(baseBefore);
+    expect(existsSync(c.closeFile)).toBe(false);
+  });
+});
+
+/**
+ * What slice-done.sh counts. A slice cut from origin, in a checkout whose
+ * local base is behind it, has origin's commits in `base..HEAD`; on
+ * consumer-b that read as seven commits to land for one commit of work.
+ */
+describe("slice-done.sh counts against origin's base", () => {
+  let c: Consumer;
+  beforeEach(() => {
+    c = makeConsumer({ remote: true });
+    const other = join(c.root, "other");
+    git(c.root, "clone", "-q", join(c.root, "remote"), other);
+    for (let i = 1; i <= 6; i += 1) {
+      writeFileSync(join(other, `t${i}.txt`), `${i}\n`);
+      git(other, "add", `t${i}.txt`);
+      git(other, "commit", "-qm", `feat: theirs ${i}`);
+    }
+    git(other, "push", "-q", "origin", "main");
+    git(c.main, "fetch", "-q", "origin");
+    git(
+      c.main,
+      "worktree",
+      "add",
+      "-q",
+      c.wt(40),
+      "-b",
+      "ticket/40",
+      "origin/main",
+    );
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("counts the slice's own commit, and says which base it counted against", () => {
+    const wt = c.wt(40);
+    writeFileSync(join(wt, "a.txt"), "a\n");
+    git(wt, "add", "a.txt");
+    git(wt, "commit", "-qm", "feat: a");
+    expect(git(wt, "rev-list", "--count", "main..HEAD")).toBe("7");
+
+    const done = sh(wt, "./scripts/slice-done.sh");
+
+    expect(done).toContain(
+      "✓ #40 marked done (1 commit(s) to land) — counted against origin/main; the local main is 6 commit(s) behind it, so git log main..HEAD shows more",
+    );
+  });
+
+  it("refuses a slice with nothing of its own, whatever the local base lacks", () => {
+    const r = shResult(c.wt(40), "./scripts/slice-done.sh");
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "error: ticket/40 has no commits that aren't already on main origin/main — nothing to land.",
+    );
+    expect(existsSync(join(c.wt(40), ".slice-ready-to-land"))).toBe(false);
+  });
+});
+
+/**
+ * Phase 3 of the stale-base plan: the land lock is keyed by the remote and
+ * kept under ~/.azelf/locks (AZELF_LOCKS_DIR in the tests), so a push by hand
+ * from another clone of the same origin — `azelf push-main` — and a land
+ * queue behind each other instead of racing for origin.
+ */
+describe("the land lock across clones of one remote, and azelf push-main", () => {
+  let c: Consumer;
+  let other: string;
+  const commitIn = (cwd: string, file: string, msg: string) => {
+    writeFileSync(join(cwd, file), `${file}\n`);
+    git(cwd, "add", file);
+    git(cwd, "commit", "-qm", msg);
+  };
+  /** A pre-push hook in `repo` that holds its push until `go` exists. */
+  const holdPushes = (repo: string) => {
+    const go = join(c.root, `go-${Math.random().toString(36).slice(2)}`);
+    mkdirSync(join(repo, ".git", "hooks"), { recursive: true });
+    writeFileSync(
+      join(repo, ".git", "hooks", "pre-push"),
+      `#!/usr/bin/env bash\nwhile [ ! -f ${go} ]; do sleep 0.1; done\n`,
+      { mode: 0o755 },
+    );
+    return () => writeFileSync(go, "");
+  };
+  beforeEach(() => {
+    c = makeConsumer({ worktrees: [40], remote: true });
+    commitIn(c.wt(40), "a.txt", "feat: a");
+    other = join(c.root, "other");
+    git(c.root, "clone", "-q", join(c.root, "remote"), other);
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("is one directory for every clone of the remote, outside both git dirs, and the git dir without a remote", () => {
+    const lock = landLockDir(c.main);
+    expect(landLockDir(other)).toBe(lock);
+    expect(landLockDir(c.wt(40))).toBe(lock);
+    expect(lock.startsWith(process.env.AZELF_LOCKS_DIR as string)).toBe(true);
+    expect(lock.endsWith("/land")).toBe(true);
+    expect(lock.startsWith(c.main)).toBe(false);
+    // The shell half asks the same function.
+    expect(
+      sh(other, `bun ${AZELF}/scripts/slice-lock.ts land-dir .`).trim(),
+    ).toBe(lock);
+
+    const alone = makeConsumer({});
+    try {
+      expect(landLockDir(alone.main)).toBe(
+        join(alone.main, ".git", "azelf-land.lock"),
+      );
+    } finally {
+      rmSync(alone.root, { recursive: true, force: true });
+    }
+  });
+
+  it("pushes a fast-forward from another clone, and says when there is nothing to push", () => {
+    commitIn(other, "theirs.txt", "feat: theirs");
+    const first = sh(other, "./scripts/slice-push-main.sh");
+    expect(first).toContain("── pushing main");
+    expect(first).toMatch(
+      /✓ pushed main — origin\/main is now [0-9a-f]{7} \(1 commit\(s\)\)/,
+    );
+    expect(
+      git(c.root, "--git-dir=remote", "log", "-1", "--format=%s", "main"),
+    ).toBe("feat: theirs");
+
+    const again = shResult(other, "./scripts/slice-push-main.sh");
+    expect(again.code).toBe(0);
+    expect(again.out).toMatch(
+      /✓ origin\/main already has main \([0-9a-f]{7}\) — nothing to push/,
+    );
+    expect(again.out).not.toContain("── pushing");
+    expect(existsSync(landLockDir(other))).toBe(false);
+  });
+
+  it("refuses a base that is behind, one that has diverged, a checkout off the base, and an argument, and pushes nothing", () => {
+    commitIn(other, "theirs.txt", "feat: theirs");
+    sh(other, "./scripts/slice-push-main.sh");
+
+    const behind = shResult(c.main, "./scripts/slice-push-main.sh");
+    expect(behind.code).toBe(1);
+    expect(behind.out).toContain(
+      "main is 1 commit(s) behind origin/main and has nothing of its own — nothing to push.",
+    );
+    expect(behind.out).toContain(
+      "git merge --ff-only origin/main brings it level",
+    );
+
+    commitIn(c.main, "mine.txt", "feat: mine");
+    const diverged = shResult(c.main, "./scripts/slice-push-main.sh");
+    expect(diverged.code).toBe(1);
+    expect(diverged.out).toContain(
+      "main and origin/main have diverged (1 and 1 commits) — only a fast-forward is pushed.",
+    );
+    expect(diverged.out).toContain("Nothing was pushed.");
+    expect(git(c.main, "log", "-1", "--format=%s", "main")).toBe("feat: mine");
+
+    // From a slice worktree it acts on the main checkout, as slice-land.sh
+    // does: the same refusal. A main checkout on another branch is refused.
+    const worktree = shResult(c.wt(40), "./scripts/slice-push-main.sh");
+    expect(worktree.code).toBe(1);
+    expect(worktree.out).toContain("main and origin/main have diverged");
+    git(other, "checkout", "-q", "-b", "side");
+    const side = shResult(other, "./scripts/slice-push-main.sh");
+    expect(side.code).toBe(1);
+    expect(side.out).toContain(
+      "run this from the main worktree, on main — currently on 'side'",
+    );
+    git(other, "checkout", "-q", "main");
+
+    const arg = shResult(other, "./scripts/slice-push-main.sh main");
+    expect(arg.code).toBe(64);
+    expect(arg.out).toContain("usage:");
+
+    expect(
+      git(c.root, "--git-dir=remote", "log", "-1", "--format=%s", "main"),
+    ).toBe("feat: theirs");
+    expect(existsSync(landLockDir(c.main))).toBe(false);
+  });
+
+  it("is azelf push-main, which takes no argument", () => {
+    const run = (...args: string[]) =>
+      spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), "push-main", ...args], {
+        cwd: other,
+        encoding: "utf8",
+      });
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("nothing to push");
+    const bad = run("main");
+    expect(bad.status).toBe(2);
+    expect(bad.stderr).toContain("usage:");
+    expect(bad.stderr).toContain("azelf push-main");
+  });
+
+  it("makes a hand push from another clone wait for a running land, which it then sees", async () => {
+    const go = holdPushes(c.main);
+    const land = startScript(c.main, "./scripts/slice-land.sh 40");
+    try {
+      await land.until("pushing main");
+      commitIn(other, "theirs.txt", "feat: theirs");
+      const push = startScript(other, "./scripts/slice-push-main.sh");
+      try {
+        await push.until(/waiting for ticket\/40's land \(pid \d+, since /);
+        expect(push.output()).not.toContain("── pushing");
+
+        go();
+        expect(await land.exited).toBe(0);
+        // It fetched under the lock, so it saw the land and refused as
+        // diverged — never a push origin rejected.
+        expect(await push.exited).toBe(1);
+      } finally {
+        await push.stop();
+      }
+      expect(push.output()).toContain(
+        "main and origin/main have diverged (1 and 1 commits)",
+      );
+      expect(push.output()).not.toMatch(/rejected|── pushing/);
+    } finally {
+      go();
+      await land.stop();
+    }
+    expect(land.output()).toContain("✓ closed #40");
+    expect(
+      git(c.root, "--git-dir=remote", "log", "-1", "--format=%s", "main"),
+    ).toBe("feat: a");
+    expect(existsSync(landLockDir(c.main))).toBe(false);
+  });
+
+  it("makes a land wait for a hand push from another clone, and work from what it pushed", async () => {
+    const go = holdPushes(other);
+    commitIn(other, "theirs.txt", "feat: theirs");
+    const push = startScript(other, "./scripts/slice-push-main.sh");
+    try {
+      await push.until("── pushing main");
+      const land = startScript(c.main, "./scripts/slice-land.sh 40");
+      try {
+        await land.until(/waiting for push-main's land \(pid \d+, since /);
+        expect(land.output()).not.toContain("fast-forwarding");
+
+        go();
+        expect(await push.exited).toBe(0);
+        // The land fetched after the push: its base is origin's new head,
+        // the slice lacks it, and the answer is 75 before anything moved —
+        // not a push origin refused and undid.
+        expect(await land.exited).toBe(75);
+      } finally {
+        await land.stop();
+      }
+      expect(land.output()).toContain(
+        "✓ main fast-forwarded onto origin/main — it was 1 commit(s) behind",
+      );
+      expect(land.output()).toContain(
+        "can't fast-forward onto ticket/40 — it has diverged",
+      );
+      expect(land.output()).not.toContain("origin refused the push");
+    } finally {
+      go();
+      await push.stop();
+    }
+    expect(git(c.main, "rev-parse", "main")).toBe(
+      git(c.main, "rev-parse", "origin/main"),
+    );
+    expect(git(c.wt(40), "log", "-1", "--format=%s")).toBe("feat: a");
+
+    git(c.wt(40), "rebase", "-q", "main");
+    expect(sh(c.main, "./scripts/slice-land.sh 40")).toContain("✓ closed #40");
+    expect(git(c.root, "--git-dir=remote", "log", "--format=%s", "main")).toBe(
+      "feat: a\nfeat: theirs\ninit",
+    );
+  }, 60_000);
 });

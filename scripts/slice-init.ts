@@ -165,6 +165,8 @@ export const SHIMS: { name: string; how: "source" | "exec" }[] = [
   { name: "slice-done.sh", how: "exec" },
   { name: "session-commit.sh", how: "exec" },
   { name: "format.sh", how: "exec" },
+  { name: "slice-gates.sh", how: "exec" },
+  { name: "slice-push-main.sh", how: "exec" },
 ];
 
 /**

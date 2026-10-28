@@ -144,6 +144,8 @@ export function makeConsumer(opts: {
   body?: string;
   /** Raw lines added to the config object, e.g. `tabTitle: false,`. */
   configExtra?: string;
+  /** The config's `startPrompt`; `"x"` when absent. */
+  startPrompt?: string;
   /**
    * Start sessions for real: a launcher that spawns each session's command
    * in its worktree, detached, where `manual()` only prints it. For the
@@ -154,6 +156,10 @@ export function makeConsumer(opts: {
   // Resolved, because git prints worktree paths canonicalized and macOS's
   // tmpdir is a symlink.
   const root = realpathSync(mkdtempSync(join(tmpdir(), "azelf-fx-")));
+  // The land lock is keyed by the remote under ~/.azelf/locks; under the
+  // fixture's root instead, so a test leaves nothing in the real home and
+  // every process the test starts (they inherit this environment) agrees.
+  process.env.AZELF_LOCKS_DIR = join(root, "locks");
   const main = join(root, "repo");
   const closeFile = join(root, "closes.txt");
   const ticketsFile = join(root, "tickets.json");
@@ -188,6 +194,8 @@ export function makeConsumer(opts: {
     "session-commit.sh",
     "db-lock.sh",
     "slice-session.sh",
+    "slice-gates.sh",
+    "slice-push-main.sh",
   ]) {
     writeFileSync(
       join(main, "scripts", s),
@@ -310,7 +318,7 @@ export default {
         })})]`
       : "[]"
   },
-  startPrompt: "x",${agent}${launcher}${
+  startPrompt: ${JSON.stringify(opts.startPrompt ?? "x")},${agent}${launcher}${
     // The disk floor is off unless a test sets it: with the default 10 GB, a
     // machine short of space failed every test that preps a worktree.
     /\bminFreeDiskGb\b/.test(opts.configExtra ?? "")

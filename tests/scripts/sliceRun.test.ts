@@ -3981,3 +3981,262 @@ describe("a file added under a number the base took meanwhile", () => {
     }
   });
 });
+
+/**
+ * The local base is origin's at the start of every round. Before this the
+ * dispatcher fetched once, at the start, and said nothing when the base was
+ * merely behind; every rebase, diff and overlap check then used a base origin
+ * had left behind. On consumer-b that was a dispatcher clone nobody pulled by
+ * hand, stale for a day of hand merges from another checkout.
+ */
+describe("the base branch behind origin", () => {
+  /** A commit pushed to origin from another checkout. */
+  const theirs = (fx: Consumer) => {
+    const other = join(fx.root, "other");
+    git(fx.root, "clone", "-q", join(fx.root, "remote"), other);
+    commitIn(other, "theirs.txt", "x\n", "feat: theirs");
+    git(other, "push", "-q", "origin", "main");
+  };
+
+  it("is fast-forwarded at the start, before the rebase, and the slice's files are only its own", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: ["true"],
+    });
+    theirs(c);
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toMatch(
+      /main was 1 commit behind origin\/main — fast-forwarded onto it \(now [0-9a-f]{7}\)/,
+    );
+    expect(r.out.indexOf("fast-forwarded onto it")).toBeLessThan(
+      r.out.indexOf("#40 is behind main — rebasing before the gates"),
+    );
+    expect(r.out).toContain("running 1 gate(s) for #40 (1 files)");
+    expect(r.code).toBe(0);
+    expect(git(c.main, "log", "--format=%s")).toBe(
+      "feat: a\nfeat: theirs\ninit",
+    );
+    expect(git(c.main, "rev-parse", "main")).toBe(
+      git(c.main, "rev-parse", "origin/main"),
+    );
+  });
+
+  it("is fast-forwarded at the start of a later round, before that round's land", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    sessions.push(fakeSession(c, 40));
+
+    d = startDispatcher(c, ["-y", "--no-review", "--interval", "1", "40"]);
+    await d.until("[round 1] 1 running");
+    theirs(c);
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    await d.until("plan complete");
+
+    expect(await d.exited).toBe(0);
+    const out = d.output();
+    expect(out).toMatch(
+      /main was 1 commit behind origin\/main — fast-forwarded onto it/,
+    );
+    expect(out.indexOf("fast-forwarded onto it")).toBeLessThan(
+      out.indexOf("#40 is behind main — rebasing before the gates"),
+    );
+    expect(git(c.main, "log", "--format=%s")).toBe(
+      "feat: a\nfeat: theirs\ninit",
+    );
+  });
+
+  it("parks a branch the base already contains as a land, not as red gates, and runs no gate", () => {
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: ["bash", "-c", "touch ../gate-ran"],
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    // Moved past it by hand, and pushed.
+    git(c.main, "merge", "-q", "--ff-only", "ticket/40");
+    git(c.main, "push", "-q", "origin", "main");
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain(
+      "ticket/40 adds nothing to main — every commit on it is already there. Did it land already, or was main moved past it by hand? If its work is on main, ./scripts/slice-land.sh 40 from the main checkout closes the ticket and removes the worktree",
+    );
+    expect(r.out).not.toContain("the gates are red");
+    expect(r.out).not.toContain("nothing to land");
+    expect(r.out).not.toContain("running 1 gate(s)");
+    expect(existsSync(join(c.root, "gate-ran"))).toBe(false);
+    expect(r.code).toBe(1);
+  });
+});
+
+/**
+ * `azelf gates`, and its shim `./scripts/slice-gates.sh`: the landing gates on
+ * the worktree a session is in, before it declares itself done. No land, no
+ * lock, and a gate that judges the pushed commit is skipped and said to be.
+ */
+describe("azelf gates — the gates from inside the worktree", () => {
+  /** #40 with one change, a local gate, and a land-only gate that is always red. */
+  const withGates = (local: string[]): Consumer => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: local,
+    });
+    const config = join(fx.main, "slice.config.ts");
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[(.*)\],/,
+        `gates: [$1, { name: "CI: Tests", landOnly: true, run: () => ({ ok: false, why: "CI ran where nothing was pushed" }) }],`,
+      ),
+    );
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    return fx;
+  };
+
+  it("runs the local gates on the worktree it is in, skips the land-only one, and exits 0", () => {
+    c = withGates(["bash", "-c", "touch ../gate-ran"]);
+    const r = shResult(c.wt(40), "./scripts/slice-gates.sh");
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(
+      "  skipped `CI: Tests` — it judges the pushed commit, and runs at the land\n  running 1 gate(s) for #40 (1 files) …\n",
+    );
+    expect(r.out).toContain("✓ #40 passes every gate");
+    expect(r.out).not.toContain("CI ran");
+    expect(existsSync(join(c.root, "gate-ran"))).toBe(true);
+    // Nothing landed, nothing closed.
+    expect(git(c.main, "log", "--format=%s", "-1")).toBe("init");
+    expect(existsSync(c.closeFile)).toBe(false);
+  });
+
+  it("exits 1 when a local gate is red, naming it", () => {
+    c = withGates(["bash", "-c", "echo boom >&2; exit 1"]);
+    const r = shResult(c.wt(40), "./scripts/slice-gates.sh");
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(
+      "✗ #40 not landed — `bash -c echo boom >&2; exit 1` failed",
+    );
+    expect(r.out).not.toContain("passes every gate");
+  });
+
+  it("does not wait for the gate lock another run holds", async () => {
+    c = withGates(["true"]);
+    const lock = join(c.main, ".git", "azelf-gates.lock");
+    const go = join(c.root, "go");
+    const other = startScript(
+      c.main,
+      `bun ${join(AZELF, "scripts", "slice-lock.ts")} acquire ${lock} --pid $$ --label '#31'
+echo held
+while [ ! -f ${go} ]; do sleep 0.1; done
+bun ${join(AZELF, "scripts", "slice-lock.ts")} release ${lock} --pid $$`,
+    );
+    try {
+      await other.until("held");
+      const r = shResult(c.wt(40), "./scripts/slice-gates.sh");
+      expect(r.code, r.out).toBe(0);
+      expect(r.out).not.toContain("waiting for");
+      expect(r.out).toContain("✓ #40 passes every gate");
+      // The holder's lock is still its own.
+      expect(existsSync(lock)).toBe(true);
+    } finally {
+      writeFileSync(go, "");
+      await other.stop();
+    }
+  }, 60_000);
+
+  it("needs a ticket from the main checkout, and says why", () => {
+    c = withGates(["true"]);
+    const r = shResult(c.main, "./scripts/slice-gates.sh");
+
+    expect(r.code).toBe(64);
+    expect(r.out).toContain(
+      "--gates needs a ticket id, or a slice worktree to run from — `main` is not a slice branch (branchPattern is ticket/{n})",
+    );
+  });
+
+  it("takes one ticket through the binary, and no flags", () => {
+    c = withGates(["true"]);
+    const azelf = (...args: string[]) =>
+      spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), "gates", ...args], {
+        cwd: c?.main,
+        encoding: "utf8",
+      });
+
+    const ok = azelf("40");
+    expect(ok.status, ok.stdout + ok.stderr).toBe(0);
+    expect(ok.stdout).toContain("✓ #40 passes every gate");
+
+    const flag = azelf("40", "--no-review");
+    expect(flag.status).toBe(2);
+    expect(flag.stderr).toContain("azelf gates [<ticket>]");
+
+    const missing = azelf("41");
+    expect(missing.status).toBe(1);
+    expect(missing.stdout).toContain("✗ #41: no worktree at");
+  });
+});
+
+/**
+ * Phase 3 of the stale-base plan: among the slices ready in one round, one
+ * retried only because the base moved goes after the rest.
+ */
+describe("the land order after a park", () => {
+  it("lands a branch that moved before a slice retried only because the base moved", async () => {
+    // Both park on the same red gate. Then, in one round, #41 gets the fix
+    // on its branch and the base moves for an unrelated reason: #40 is due
+    // because the base moved, #41 because its branch did. Ticket order would
+    // try #40 first, fail the same gate again and spend an automatic retry;
+    // #41 goes first, and #40 passes once it is rebased onto #41's fix. #42
+    // keeps running so the run does not stop with everything parked.
+    c = makeConsumer({
+      worktrees: [40, 41, 42],
+      remote: true,
+      gate: ["test", "-f", "fixed.txt"],
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    commitIn(c.wt(41), "b.txt", "b\n", "feat: b");
+    sh(c.wt(41), "./scripts/slice-done.sh");
+    sessions.push(fakeSession(c, 42));
+    d = startDispatcher(c, ["-y", "--interval", "1", "40", "41", "42"]);
+    await d.until("✗ #40 did not land — the gates are red");
+    await d.until("✗ #41 did not land — the gates are red");
+
+    commitIn(c.wt(41), "fixed.txt", "fixed\n", "fix: fixed.txt");
+    commitIn(c.main, "unrelated.txt", "x\n", "chore: unrelated");
+
+    await d.until("#41 first — #40 is retried only because main moved");
+    await d.until("✓ closed #41");
+    await d.until("✓ closed #40", 40_000);
+
+    const out = d.output();
+    expect(out).toContain(
+      "main moved since #40 was parked — retrying (automatic retry 1 of 2).",
+    );
+    expect(out).toContain(
+      "#41 has moved since it was parked — retrying the land.",
+    );
+    expect(out.indexOf("landing #41 …")).toBeLessThan(
+      out.indexOf("landing #40 …"),
+    );
+    // #40 was not tried first and parked again: one red park, no second retry.
+    expect(out.split("✗ #40 did not land — the gates are red").length - 1).toBe(
+      1,
+    );
+    expect(out).not.toContain("automatic retry 2 of 2");
+    expect(git(c.main, "log", "--format=%s", "main")).toBe(
+      "feat: a\nfix: fixed.txt\nfeat: b\nchore: unrelated\ninit",
+    );
+  }, 90_000);
+});

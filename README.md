@@ -241,7 +241,8 @@ Installs into the repo you are standing in.
 | `--plan` | print the wave tree and exit — reads only, opens nothing |
 | `--auto` | dispatch, wait, land, release the next wave, repeat until done |
 | `--once` | one round only: land what is ready, then stop |
-| `--gates <ids…>` | run only the landing gates against existing worktrees, and exit |
+| `--gates [ids…]` | run only the landing gates against existing worktrees, and exit; without ids, the worktree you are in |
+| `--no-lock` | with `--gates`: do not wait for the gate lock (what `azelf gates` passes) |
 | `--sync-edges [-y]` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
 | `--ignore-body-blockers` | dispatch although a body names an open blocker the tracker has no edge for |
 | `--max <n>` | cap concurrent slices (default: the widest wave in the plan) |
@@ -256,7 +257,9 @@ Installs into the repo you are standing in.
 | `-h`, `--help` | print every flag and exit |
 
 `--gates` is how you check a slice by hand — no tracker call, no rebase, no land.
-The worktree is judged exactly as it sits.
+The worktree is judged exactly as it sits. A gate that judges the pushed commit
+(`ciRuns`) is skipped, and said to run at the land. `azelf gates` is the same thing
+from inside a worktree; see below.
 
 A flag it does not know exits 64 (`unknown flag --hepl — azelf run --help lists them`)
 instead of being ignored, which is how `--help` once turned into a full plan and a
@@ -350,6 +353,43 @@ writes no `.slice-flags`. It works under a hold, and refuses while a session is
 running in the worktree, or when there is neither a worktree nor a branch (`azelf run
 <ticket>` starts it).
 
+### `azelf gates [<ticket>]`
+
+Runs the landing gates on a slice's worktree as it sits, and exits with their
+verdict: 0 when every gate that applies passes, 1 otherwise. From inside a worktree
+the ticket is the branch's own; from the main checkout, name one. It is what a
+session runs before it declares itself done, so the dispatcher's re-run at the land
+finds nothing new. A worktree has it as `./scripts/slice-gates.sh`, which is the
+same command for a session without the binary on PATH.
+
+No land, no rebase, no tracker call. A gate that waits for CI on the pushed commit
+(`ciRuns`) is skipped with a line saying it runs at the land, and a `when`-scoped
+gate the diff does not reach is skipped as at a land. It does not wait for the
+[gate lock](#two-dispatchers-on-one-repo): a session's own check would otherwise sit
+behind a land's gates, CI included, for nothing it needs. `azelf run --gates <ids…>`
+is the by-hand form from the main checkout, and that one does wait.
+
+### `azelf push-main`
+
+Pushes the base branch from the main checkout, under the
+[land lock](#two-dispatchers-on-one-repo), once it is a fast-forward of origin's. It
+is for what lands by hand: a merge made in the main checkout of the dispatcher's clone,
+or of any other clone of the same remote. It waits for a land that is pushing, and a
+land waits for it, so the two queue instead of racing for origin with one of them
+refused. It fetches under the lock, pushes a local base that is ahead of origin's, says
+`nothing to push` for one that is level (exit 0), and refuses one that is behind or has
+diverged (exit 1) without moving, merging or rebasing anything: the local base is left
+exactly as it was, pushed or not. The verb takes no argument; the branch is the config's
+`baseBranch`. A checkout set up with `azelf init` has it as
+`./scripts/slice-push-main.sh`, and from a slice worktree it acts on the main checkout,
+as `slice-land.sh` does.
+
+```
+  waiting for ticket/41's land (pid 48213, since 14:02:11) …
+── pushing main ────────────────────────
+✓ pushed main — origin/main is now 7a1b2c3 (2 commit(s))
+```
+
 ### `azelf hook`
 
 Prints the shell autostart block for pasting by hand. Useful if you would rather
@@ -365,6 +405,7 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
 ./scripts/slice-done.sh                                    # mark ready to land (you, or the session under --auto)
 ./scripts/slice-done.sh --hand-over "<what to do>"         # not done: hold it for a person, with the reason
+./scripts/slice-gates.sh                                   # the landing gates on this worktree, as the land will run them
 ./scripts/format.sh                                        # the write half, by hand
 ./scripts/format.sh --check path/to/file                   # the same, writing nothing
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths
@@ -410,7 +451,7 @@ export default {
 | `exclusiveLockPaths` | `string[]` | paths only one worktree may hold changes to; `[]` disables |
 | `exclusiveLockLabel` | `string?` | tracker label on tickets that will touch `exclusiveLockPaths`; they are started one at a time. Needs `exclusiveLockPaths` |
 | `humanLabel` | `string?` | tracker label on tickets only a person can do. They are never dispatched, even when named, and they hold their dependents until closed. `init` writes `ready-for-human` |
-| `provisionCopy` | `string[]` | gitignored files copied into each new worktree |
+| `provisionCopy` | `string[]` | gitignored files copied into each new worktree. An untracked `slice.config.ts` belongs here only if sessions are to read it; the shims read it from the main checkout, so `./scripts/slice-gates.sh` and the DB lock work without |
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
@@ -422,7 +463,7 @@ export default {
 | `launcher` | `Launcher?` | how a prepped worktree becomes an open session (default `manual()`) |
 | `agent` | `Agent?` | which agent runs sessions and reviews diffs (default `claude()`) |
 | `wrapCommand` | `string[]?` | command the agent runs inside; `[]` by default |
-| `startPrompt` | `string` | opening instruction for a session; `{n}` is the ticket |
+| `startPrompt` | `string` | opening instruction for a session; `{n}` is the ticket, `{parent}` the sentence naming `.slice-parent.md` when the worktree has one and nothing otherwise. A prompt without `{parent}` is told the no-spec case: see [Where tickets come from](#where-tickets-come-from) |
 | `tabTitle` | `function \| false?` | a slice tab's title; `#17 › #42 <title>` by default |
 
 **`testOnBase`** is for tickets that ask for a failing test first. The reviewer has
@@ -542,9 +583,9 @@ counts as changed. A slice that touches none of them skips the gate, and says so
   running 2 gate(s) for #142 (3 files) …
 ```
 
-`azelf run --gates` prints the same line. The reviews are told which gates ran and
-passed and, separately, which were skipped, so a skipped build is never read as a
-passed one. A scoped gate that does run holds the
+`azelf run --gates` and `azelf gates` print the same line. The reviews are told
+which gates ran and passed and, separately, which were skipped, so a skipped build
+is never read as a passed one. A scoped gate that does run holds the
 [gate lock](#two-dispatchers-on-one-repo) while it runs, like any gate. The config
 refuses `when: []` and a bare string: both would skip the gate for every slice.
 
@@ -596,6 +637,10 @@ What it needs:
 What it costs: the dispatcher waits inside the gate for as long as CI takes, and holds
 the [gate lock](#two-dispatchers-on-one-repo) while it waits. It preps nothing and lands
 nothing in that time. Put `ciRuns` last, so a red local suite never pushes.
+
+It runs only at a land. `azelf gates` and `azelf run --gates` judge a worktree with
+nothing pushed, so they skip it with a line saying so (``skipped `CI: Tests` — it
+judges the pushed commit, and runs at the land``) and run the rest.
 
 ### Tracker
 
@@ -1002,6 +1047,17 @@ known to the review when this run's plan found it as a parent, and to the worktr
 file not at all. `.slice-parent.md` is written only where git ignores it: re-run
 `azelf init` once after upgrading, which adds the pattern to `.git/info/exclude`.
 
+**The prompt says whether there is one.** A `startPrompt` written for the usual case
+("read the parent spec") sent sessions in a worktree with no `.slice-parent.md`
+looking for the spec, and they stopped there. So `slice-session.sh` tells a session
+which case it is in. `{parent}` in the prompt is where that goes: it becomes a
+sentence naming `.slice-parent.md` when the worktree has one, and nothing (with the
+space before it) when the ticket hangs under no spec. A prompt without `{parent}` is
+left as written when there is a parent, and gets one sentence appended when there
+is none: "This ticket hangs under no spec: there is no .slice-parent.md in this
+worktree, and nothing takes precedence over .slice-ticket.md." The relaunch and
+self-land sentences come after it either way.
+
 ## The exclusive lock
 
 Some paths cannot safely be edited by two slices at once — database migrations
@@ -1390,6 +1446,17 @@ the other triggers. The ticket trigger covers a BLOCK against a stale ticket, wh
 fixed on the tracker, not in the branch. It costs one tracker call per review-parked
 slice per round.
 
+**Among the slices ready in one round, one retried only because the base moved goes
+last.** The round lands one slice, in ticket order, except that a slice un-parked by
+the base-branch trigger alone waits behind everything else that is ready: a branch that
+moved, a requested retry, an edited ticket and a slice that was never parked all carry
+something new, and the base-moved one does not. What it is about to be rebased onto may
+well be the slice behind it in line — three slices parked by one shared-budget guard,
+one of them fixed, and the fixed one landed last after each of the others had spent an
+automatic retry failing the same guard. The deferral holds until the slice lands, parks
+again or its branch moves; the round says `#41 first — #40 is retried only because main
+moved`. Across a restart there is no park state, and the order is ticket order.
+
 `azelf retry <ticket>` is for everything else — you know the answer changed and azelf
 cannot see why. It drops a `.slice-retry` marker into the slice's worktree, and the
 running dispatcher consumes it next round. It is not how to skip the review: to land
@@ -1566,13 +1633,13 @@ them over with a line (`took over #102 from a dispatcher that is no longer runni
 (pid 30498)`).
 
 Each run lands one slice per round, which keeps its own lands apart and nobody
-else's, so locks in the common git dir keep the runs off each other:
+else's, so locks keep the runs off each other:
 
 | lock | taken by | held for | when it is taken |
 | --- | --- | --- | --- |
 | `azelf-run-<ticket>.lock` | a dispatcher, for each ticket in its plan | the whole run | never waits: a live holder stops the run before `proceed?` |
-| `azelf-land.lock` | `slice-land.sh`, whoever runs it | the whole land: fast-forward, push, cleanup, ticket close | waits up to five minutes, then refuses |
-| `azelf-gates.lock` | a dispatcher's gate run, and `azelf run --gates` | one slice's gates | waits as long as the holder is running |
+| `~/.azelf/locks/<remote>/land` | `slice-land.sh` and `azelf push-main`, whoever runs them, from any clone of the remote | the whole land: fast-forward, push, cleanup, ticket close; the whole hand push | waits up to five minutes, then refuses |
+| `azelf-gates.lock` | a dispatcher's gate run, and `azelf run --gates`; not `azelf gates`, a session's own check | one slice's gates | waits as long as the holder is running |
 
 ```
   waiting for ticket/41's land (pid 48213, since 14:02:11) …
@@ -1583,6 +1650,18 @@ The land lock is in the script and not in the dispatcher, because a land by hand
 races a running wave just as much. With it, the second of two lands waits. Then it
 either lands or refuses as "diverged". Without it, two `git merge`s fail on git's
 `index.lock`, and that reads as a broken land.
+
+**The land lock is keyed by the remote, not by the checkout.** What a land serialises
+is pushes to one origin, and the clones of that origin on one machine do not share a
+git dir: the dispatcher's clone and the clone a merge is made in by hand did not see
+each other's lock, and the loser's push was refused. So it lives under
+`~/.azelf/locks/<key>/land`, where the key is a hash of origin's URL as `git remote
+get-url origin` prints it, less a trailing `.git`. Every clone of the remote takes the
+same one, which is what lets `azelf push-main` and a land queue behind each other.
+The ssh and https spellings of one remote are two keys; give the checkouts one
+spelling. `AZELF_LOCKS_DIR` moves the root (the tests set it). A repo without an
+origin keeps `azelf-land.lock` in its common git dir. The gate lock stays in the
+common git dir: it is about load on one machine's checkout, which its worktrees share.
 
 **A land the base moved under is rebased again.** The lock covers the land, not the
 gates and the review before it, or every other run's lands would wait behind a
@@ -1605,6 +1684,39 @@ touching it. After two such races in one try it parks as a land, to be retried w
 the base moves again. `slice-land.sh` exits 1 for every other refusal, and those park
 at once.
 
+**The base the land works from is origin's.** `slice-land.sh` fetches before it moves
+anything and fast-forwards the local base onto `origin/<base>` when it is behind. The
+dispatcher does the same at the start and at the start of every round, before its
+lands, so its clone stays current without a pull by hand. Everything downstream reads
+the local base — the rebase target, the changed-file list, the overlap report, a gate
+of your own that diffs against it — and all of it is wrong on a stale one: a slice cut
+from origin reads as having written origin's commits. The local base may be ahead of
+origin (slices are cut from it, and the next land pushes it) but not diverged from it;
+that stops the run at the start, and mid-run it is said once and the next land refuses.
+
+```
+  main was 6 commits behind origin/main — fast-forwarded onto it (now 7a1b2c3)
+```
+
+A push origin refuses because it moved in the meantime is undone: the local base goes
+back to where it was (`git reset --keep`, which refuses rather than overwrite uncommitted
+changes in the main checkout), is fast-forwarded onto origin's new head, and the land
+exits 75, which the dispatcher answers by rebasing. Before this, a refused push left the
+local base sitting on the slice that had not landed, and every later rebase was made
+onto it. A push refused for any other reason — a hook, credentials — is exit 1 after the
+same undo. Land by hand only through `slice-land.sh`, and merge anything else into the
+main checkout only as a fast-forward you then push with
+[`azelf push-main`](#azelf-push-main), which takes the land lock first; a merge left
+unpushed is the "ahead" case above, and a merge commit made elsewhere and pulled by
+hand is what the sync does for you.
+
+A slice whose branch the base already contains — it landed already, or the base was
+moved past it by hand — parks as a land, not as red gates: `ticket/40 adds nothing to
+main — every commit on it is already there`. If its work is on the base,
+`./scripts/slice-land.sh 40` from the main checkout closes the ticket and removes the
+worktree. `slice-done.sh` counts a slice's commits against `origin/<base>` as well as the
+local base, and says so when the two differ.
+
 The gate lock is about load. A single dispatcher already runs one slice's gates at a
 time; without the lock, a second dispatcher's gates run on top of them. It does not
 cover the test runs the sessions start themselves, which is what a gate's
@@ -1625,8 +1737,8 @@ gets the same contract:
   before you use `--auto`.
 - **`.claude/skills/slice/SKILL.md`** → the `slice` skill. The session side, for an
   agent working inside a slice worktree: read `.slice-ticket.md`, build only that,
-  commit with explicit paths, run the gates, and run `slice-done.sh` **only** if they
-  are green and the start instruction said to. Without `--auto` it says not to, and
+  commit with explicit paths, run the gates (`./scripts/slice-gates.sh`), and run
+  `slice-done.sh` **only** if they are green and the start instruction said to. Without `--auto` it says not to, and
   the session stops and reports instead. `startPrompt` names this skill.
 
 `azelf init --codex` also writes `/azelf` to `~/.codex/prompts/azelf.md`, frontmatter
@@ -1746,13 +1858,13 @@ by a fresh clone. Re-run `azelf init` there.
 ## Repository layout
 
 ```
-bin/azelf.ts            the CLI: init, run, retry, hold, release, provision, hook
+bin/azelf.ts            the CLI: init, run, retry, hold, release, provision, gates, push-main, hook
 index.ts                the public surface a slice.config.ts imports
 scripts/
   slice-run.ts          the dispatcher — waves, launching, landing, escalation
   slice-config.ts       the loader: finds and validates slice.config.ts
   slice-gates.ts        the gate contract and its three shapes
-  slice-lock.ts         the land and gate locks: taken whole, taken over from the dead
+  slice-lock.ts         the land and gate locks: taken whole, taken over from the dead, the land's keyed by the remote
   slice-hold.ts         holds: git's worktree lock on a worktree in use by hand
   slice-tracker.ts      the tracker contract and github()
   slice-overlap.ts      which live slices are editing the same files
@@ -1760,7 +1872,7 @@ scripts/
   slice-agent.ts        the agent contract, claude/codex/custom
   slice-preset.ts       stack detection for init
   slice-init.ts         markers, shims, generated files, the rc hook
-  *.sh                  the shell half: session, land, done, commit, lock, format
+  *.sh                  the shell half: session, land, push-main, done, commit, lock, format, gates
 tests/scripts/          178 unit tests across the seam modules
 docs/extraction-plan.md how this became a package, and what each seam cost
 ```

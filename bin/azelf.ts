@@ -8,9 +8,11 @@
  *   azelf hold <id> [--by <who>] [--why <text>]   hold a worktree for work by hand
  *   azelf release <id>    give the hold back
  *   azelf provision <id>  re-provision a worktree, launching nothing
+ *   azelf gates [<id>]    run the landing gates on a worktree, land nothing
+ *   azelf push-main       push the base branch from the main checkout, under the land lock
  *   azelf hook            print the shell block, for pasting by hand
  *
- * `run`, `retry`, `hold` and `release` SPAWN the dispatcher rather than importing it. slice-run.ts is a
+ * `run`, `retry`, `hold`, `release` and `gates` SPAWN the dispatcher rather than importing it. slice-run.ts is a
  * script, not a library: it reads `process.argv` and does its work at import
  * time under a top-level await. Importing it here would mean rewriting argv
  * underneath it and inheriting its exit path; a spawn keeps both files honest
@@ -59,6 +61,13 @@ const usage = (asked = false): never => {
       "  azelf provision <ticket>",
       "        copy what a worktree is missing, install, rewrite the ticket brief;",
       "        launches nothing (for a worktree re-added by hand)",
+      "  azelf gates [<ticket>]",
+      "        run the landing gates on a slice's worktree as it sits, and exit",
+      "        with their verdict; from inside a worktree the ticket is its own.",
+      "        No land, no rebase; a gate that waits for CI runs at the land",
+      "  azelf push-main",
+      "        push the base branch from the main checkout, under the land lock,",
+      "        once it is a fast-forward of origin's: for merges made by hand",
       "  azelf hook",
       "        print the shell autostart block, for pasting by hand",
     ].join("\n"),
@@ -93,14 +102,24 @@ if (verb === "init") {
   verb === "run" ||
   verb === "retry" ||
   verb === "hold" ||
-  verb === "release"
+  verb === "release" ||
+  verb === "gates"
 ) {
   const [, id, ...rest] = argv;
-  if (verb !== "run" && (!id || id.startsWith("-"))) usage();
+  if (verb !== "run" && verb !== "gates" && (!id || id.startsWith("-"))) {
+    usage();
+  }
   if ((verb === "retry" || verb === "release") && rest.length > 0) usage();
   if (verb === "hold" && !holdFlags(rest)) usage();
+  // At most one ticket, and no flags: the verb is the whole instruction. The
+  // session's own check does not wait for the gate lock; see gatesPass.
+  if (verb === "gates" && (rest.length > 0 || id?.startsWith("-"))) usage();
   const args =
-    verb === "run" ? argv.slice(1) : [`--${verb}`, id as string, ...rest];
+    verb === "run"
+      ? argv.slice(1)
+      : verb === "gates"
+        ? ["--gates", "--no-lock", ...(id ? [id] : [])]
+        : [`--${verb}`, id as string, ...rest];
   const proc = spawnSync(
     "bun",
     [`${packageRoot}/scripts/slice-run.ts`, ...args],
@@ -119,6 +138,18 @@ if (verb === "init") {
     {
       stdio: "inherit",
       env: { ...process.env, AZELF_INVOKED_AS: "./scripts/slice-session.sh" },
+    },
+  );
+  process.exit(proc.status ?? 1);
+} else if (verb === "push-main") {
+  // The verb is the whole instruction: the base branch is the config's.
+  if (argv.length !== 1) usage();
+  const proc = spawnSync(
+    "bash",
+    [`${packageRoot}/scripts/slice-push-main.sh`],
+    {
+      stdio: "inherit",
+      env: { ...process.env, AZELF_INVOKED_AS: "azelf push-main" },
     },
   );
   process.exit(proc.status ?? 1);

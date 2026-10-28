@@ -541,6 +541,32 @@ rm -f "$worktree_path/.slice-interrupted"
 # tool mechanics rather than project preference, so it stays here.
 start_prompt="${SLICE_START_PROMPT//\{n\}/$ticket}"
 
+# The parent spec, said in the prompt and not only by the file. `{parent}` in
+# startPrompt is where the sentence goes, and it goes there only when the file
+# exists. A prompt without the placeholder is written for the usual case —
+# consumer-b's said "read the parent spec" — and a session given that in a
+# worktree with no .slice-parent.md went looking for the spec and stopped. So
+# that prompt is told the no-spec case in so many words; with a parent it says
+# nothing more, because it already says what it wants to. Before the relaunch
+# and self-land sentences: those are about this session, this is about the
+# ticket.
+if [[ -f "$worktree_path/.slice-parent.md" ]]; then
+  parent_sentence="The spec this ticket hangs under is in .slice-parent.md in this worktree — read the ticket first; where the two disagree, the parent decides."
+else
+  parent_sentence=""
+fi
+if [[ "$SLICE_START_PROMPT" == *"{parent}"* ]]; then
+  if [[ -n "$parent_sentence" ]]; then
+    start_prompt="${start_prompt//\{parent\}/$parent_sentence}"
+  else
+    # The placeholder and the space before it, so no double space is left.
+    start_prompt="${start_prompt// \{parent\}/}"
+    start_prompt="${start_prompt//\{parent\}/}"
+  fi
+elif [[ -z "$parent_sentence" ]]; then
+  start_prompt="$start_prompt This ticket hangs under no spec: there is no .slice-parent.md in this worktree, and nothing takes precedence over .slice-ticket.md."
+fi
+
 # A worktree with commits of its own, or uncommitted changes, is a relaunch:
 # a crash, a restart, a session that exited on a refused DB-lock claim. The
 # start prompt alone reads as "begin the ticket", and an agent told that in a

@@ -121,9 +121,28 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 1
 fi
 
-if [[ -z "$(git log --oneline "$SLICE_BASE_BRANCH..HEAD")" ]]; then
-  echo "error: $branch has no commits $SLICE_BASE_BRANCH doesn't already have — nothing to land." >&2
+# Counted against origin's base as well as the local one, as slice-session.sh
+# counts a relaunch: a new worktree is cut from origin when the local base is
+# behind it, and against the local base alone origin's commits read as this
+# slice's own. On consumer-b that was "7 commit(s) to land" for one commit of
+# work, and a session that then went looking for the six it had not written.
+bases=("$SLICE_BASE_BRANCH")
+if git show-ref --verify --quiet "refs/remotes/origin/$SLICE_BASE_BRANCH"; then
+  bases+=("origin/$SLICE_BASE_BRANCH")
+fi
+to_land="$(git rev-list --count HEAD --not "${bases[@]}")"
+if [[ "$to_land" == "0" ]]; then
+  echo "error: $branch has no commits that aren't already on ${bases[*]} — nothing to land." >&2
   exit 1
+fi
+# Said when the two bases differ, because `git log $SLICE_BASE_BRANCH..HEAD`,
+# which the start prompt points at, then shows more than this counted.
+counted=""
+if [[ ${#bases[@]} -eq 2 ]]; then
+  behind="$(git rev-list --count "$SLICE_BASE_BRANCH..origin/$SLICE_BASE_BRANCH")"
+  if [[ "$behind" != "0" ]]; then
+    counted=" — counted against origin/$SLICE_BASE_BRANCH; the local $SLICE_BASE_BRANCH is $behind commit(s) behind it, so git log $SLICE_BASE_BRANCH..HEAD shows more"
+  fi
 fi
 
 # ─── Handing the worktree back ─────────────────────────────────────────────
@@ -172,7 +191,7 @@ fi
 printf '%s\n%s\n' "$session_pid" "$(git rev-parse HEAD)" >"$worktree_root/.slice-ready-to-land"
 rm -f "$live_marker"
 
-echo "✓ $(slice_ref "$ticket") marked done ($(git log --oneline "$SLICE_BASE_BRANCH..HEAD" | wc -l | tr -d ' ') commit(s) to land)"
+echo "✓ $(slice_ref "$ticket") marked done ($to_land commit(s) to land)$counted"
 echo
 echo "  slice-run.ts will re-run the gates, land it, and close the ticket."
 echo "  not running slice-run.ts? land it by hand from the main worktree:"

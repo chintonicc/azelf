@@ -85,6 +85,7 @@ import {
   minFreeDiskGb,
   ref,
   repoRoot,
+  ticketFromBranch,
   tracker,
   worktreeFor,
 } from "./slice-config";
@@ -678,27 +679,9 @@ function refuseOverBodyBlockers(dispatching: boolean): void {
  * push to.
  */
 function noteBaseAgainstOrigin(dispatching: boolean): void {
-  if (!run(["git", "remote", "get-url", "origin"], { allowFail: true }).ok) {
-    return;
-  }
-  const fetched = run(["git", "fetch", "-q", "origin", baseBranch], {
-    allowFail: true,
-  });
-  if (!fetched.ok) {
-    console.log(
-      `\n  couldn't fetch origin/${baseBranch} — comparing against the last fetch: ${errorLine(
-        fetched.out,
-      )}`,
-    );
-  }
-  const local = `refs/heads/${baseBranch}`;
-  const remote = `refs/remotes/origin/${baseBranch}`;
-  const count = (range: string) => {
-    const r = run(["git", "rev-list", "--count", range], { allowFail: true });
-    return r.ok ? Number(r.out) : 0;
-  };
-  const ahead = count(`${remote}..${local}`);
-  const behind = count(`${local}..${remote}`);
+  if (!hasOrigin()) return;
+  fetchOriginBase("comparing against the last fetch");
+  const { ahead, behind } = baseAgainstOrigin();
   if (ahead === 0) return;
   if (behind > 0) {
     console.log(
@@ -713,7 +696,14 @@ function noteBaseAgainstOrigin(dispatching: boolean): void {
     return;
   }
   const subjects = run(
-    ["git", "log", "--format=%h %s", "-n", "5", `${remote}..${local}`],
+    [
+      "git",
+      "log",
+      "--format=%h %s",
+      "-n",
+      "5",
+      `refs/remotes/origin/${baseBranch}..refs/heads/${baseBranch}`,
+    ],
     { allowFail: true },
   ).out;
   console.log(
@@ -727,6 +717,131 @@ function noteBaseAgainstOrigin(dispatching: boolean): void {
     console.log(`      ${line}`);
   }
   if (ahead > 5) console.log(`      … and ${ahead - 5} more`);
+}
+
+function hasOrigin(): boolean {
+  return run(["git", "remote", "get-url", "origin"], { allowFail: true }).ok;
+}
+
+/** A fetch of `origin/<base>` that failed has been said once this run. */
+let fetchFailureNoted = false;
+
+/**
+ * Fetches `origin/<base>`. A fetch that fails leaves the last fetch in place
+ * and is said once per run, not once per round: a run that has lost its
+ * network for an hour says so once and goes on with what it has.
+ */
+function fetchOriginBase(then: string): boolean {
+  const fetched = run(["git", "fetch", "-q", "origin", baseBranch], {
+    allowFail: true,
+  });
+  if (fetched.ok) return true;
+  if (!fetchFailureNoted) {
+    console.log(
+      `\n  couldn't fetch origin/${baseBranch} — ${then}: ${errorLine(
+        fetched.out,
+      )}`,
+    );
+    fetchFailureNoted = true;
+  }
+  return false;
+}
+
+/** The local base against the last fetch of origin's, as commit counts. */
+function baseAgainstOrigin(): { ahead: number; behind: number } {
+  const local = `refs/heads/${baseBranch}`;
+  const remote = `refs/remotes/origin/${baseBranch}`;
+  const count = (range: string) => {
+    const r = run(["git", "rev-list", "--count", range], { allowFail: true });
+    return r.ok ? Number(r.out) : 0;
+  };
+  return {
+    ahead: count(`${remote}..${local}`),
+    behind: count(`${local}..${remote}`),
+  };
+}
+
+/** A sync that could not fast-forward has been said once this run. */
+let syncRefusedNoted = false;
+
+/**
+ * The local base brought level with origin's: fetched, and fast-forwarded
+ * onto `origin/<base>` when it is strictly behind. Called at the start and at
+ * the start of every round, before the lands.
+ *
+ * This is the invariant everything after it leans on. The rebase target, the
+ * changed-file list, the overlap report and the consumer's own gates all
+ * read the LOCAL base, and before this nothing in a run ever moved it: the
+ * start compared it against origin once and said nothing when it was merely
+ * behind. On consumer-b a dispatcher clone nobody pulled by hand went stale
+ * over a day of hand merges from another checkout — every slice was rebased
+ * onto a base origin had left behind, every diff counted origin's commits as
+ * the slice's own, and the land then refused all of them.
+ *
+ * Ahead or level is left alone: slices are cut from a local base that is
+ * ahead, and the first land pushes it. Diverged is refused at the start
+ * (`noteBaseAgainstOrigin`) and said once mid-run; nothing is parked for it,
+ * because the next land says the same and parks the slice as a land.
+ * Returns whether the base moved.
+ */
+function syncBaseWithOrigin(opts: { fetch?: boolean } = {}): boolean {
+  if (!hasOrigin()) return false;
+  if (opts.fetch !== false && !fetchOriginBase("working from the last fetch")) {
+    return false;
+  }
+  const remote = `refs/remotes/origin/${baseBranch}`;
+  if (
+    !run(["git", "rev-parse", "--verify", "-q", remote], { allowFail: true }).ok
+  ) {
+    return false;
+  }
+  const { ahead, behind } = baseAgainstOrigin();
+  if (behind === 0) return false;
+  const say = (line: string) => {
+    if (!syncRefusedNoted) console.log(`\n  ${line}`);
+    syncRefusedNoted = true;
+  };
+  if (ahead > 0) {
+    say(
+      `✗ ${baseBranch} and origin/${baseBranch} have diverged (${ahead} and ${behind} commits) — no land can push until ${baseBranch} is pulled or rebased.`,
+    );
+    return false;
+  }
+  // The main checkout has the base checked out (slice-land.sh needs that
+  // too), so the fast-forward moves the working tree with the ref.
+  const on = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], {
+    allowFail: true,
+  }).out.trim();
+  if (on !== baseBranch) {
+    say(
+      `${baseBranch} is ${behind} commit${
+        behind === 1 ? "" : "s"
+      } behind origin/${baseBranch} and not checked out in ${repoRoot} (${on} is) — not fast-forwarded. Check out ${baseBranch} there.`,
+    );
+    return false;
+  }
+  const ff = run(["git", "merge", "-q", "--ff-only", remote], {
+    allowFail: true,
+  });
+  if (!ff.ok) {
+    say(
+      `couldn't fast-forward ${baseBranch} onto origin/${baseBranch} (${behind} commit${
+        behind === 1 ? "" : "s"
+      } behind) — uncommitted changes in the main checkout?: ${errorLine(
+        ff.out,
+      )}`,
+    );
+    return false;
+  }
+  const now = baseHead();
+  console.log(
+    `  ${baseBranch} was ${behind} commit${
+      behind === 1 ? "" : "s"
+    } behind origin/${baseBranch} — fast-forwarded onto it${
+      now ? ` (now ${now.slice(0, 7)})` : ""
+    }`,
+  );
+  return true;
 }
 
 /**
@@ -2708,6 +2823,12 @@ const landedOnRetry = new Map<TicketId, Flaky[]>();
 
 /** The gates that ran on a slice and passed, and those its diff did not reach. */
 type GateRun = { ran: string[]; skipped: Gate[] };
+/**
+ * How `--gates` differs from a land's gate run: no land follows, so a gate
+ * that judges the pushed commit (`landOnly`) is skipped; and a session
+ * checking itself (`azelf gates`, `--no-lock`) does not wait for the gate lock.
+ */
+type GatesByHand = { byHand?: boolean; lock?: boolean };
 /** Set by `gatesPass` when it passes; read by the reviews through `alreadyRan`. */
 const gateRuns = new Map<TicketId, GateRun>();
 
@@ -2728,7 +2849,11 @@ const gateRuns = new Map<TicketId, GateRun>();
  * something to land, and that a gate which writes to the tree is a failed
  * gate whatever it reported (enforced in runGates).
  */
-function gatesPass(n: TicketId): boolean {
+function gatesPass(
+  n: TicketId,
+  changed: string[],
+  opts: GatesByHand = {},
+): boolean {
   flakyGates.delete(n);
   gateRuns.delete(n);
   const wt = worktreeFor(n);
@@ -2737,31 +2862,39 @@ function gatesPass(n: TicketId): boolean {
     return false;
   };
 
-  if (
-    run(["git", "status", "--porcelain"], {
-      cwd: wt,
-      allowFail: true,
-    }).out.trim()
-  ) {
+  if (worktreeDirty(n)) {
     return fail(
       "worktree is dirty (someone kept working after marking it done)",
     );
   }
+  // `tryLand` parks that case before it gets here, as a land and not as red
+  // gates; this is for `--gates`, which judges the worktree as it sits.
+  if (changed.length === 0) {
+    return fail(
+      `nothing to check — ${branchFor(n)} adds nothing to ${baseBranch}`,
+    );
+  }
 
-  const changed = run(["git", "diff", "--name-only", `${baseBranch}...HEAD`], {
-    cwd: wt,
-    allowFail: true,
-  })
-    .out.split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  if (changed.length === 0) return fail("nothing to land");
+  // By hand there is no land, so a gate that judges the pushed commit (CI)
+  // has nothing to judge: it would wait its whole deadline for a run that
+  // never starts. Skipped, and said to be, so "passes every gate" is read
+  // as what it is — the local gates.
+  const gates = opts.byHand
+    ? config.gates.filter((g) => !g.landOnly)
+    : config.gates;
+  for (const g of config.gates) {
+    if (!gates.includes(g)) {
+      console.log(
+        `  skipped \`${g.name}\` — it judges the pushed commit, and runs at the land`,
+      );
+    }
+  }
 
   // A gate scoped by `when` to paths this slice does not touch is skipped,
   // and said to be, so a green land is never read as "the native build ran".
   // runGates makes the same decision; it is printed here, before the wait for
   // the gate lock, so the count below is the gates that will run.
-  const skipped = config.gates.filter((g) => !gateApplies(g, changed));
+  const skipped = gates.filter((g) => !gateApplies(g, changed));
   for (const g of skipped) {
     console.log(
       `  skipped \`${g.name}\` — ${ref(n)} touches none of ${(
@@ -2770,7 +2903,7 @@ function gatesPass(n: TicketId): boolean {
     );
   }
   console.log(
-    `  running ${config.gates.length - skipped.length} gate(s) for ${ref(n)} (${
+    `  running ${gates.length - skipped.length} gate(s) for ${ref(n)} (${
       changed.length
     } files) …`,
   );
@@ -2781,26 +2914,31 @@ function gatesPass(n: TicketId): boolean {
   // parked on test timeouts. Waits for as long as the holder is running: this
   // round has nothing to do until its gates have run, and a holder that dies
   // is taken over. The sessions' own test runs are not covered; that is what
-  // a gate's `retries` is for.
-  acquire(gatesLock(), {
-    pid: process.pid,
-    label: ref(n),
-    onWait: (h) =>
-      console.log(
-        h
-          ? `  waiting for ${h.label}'s gates (another dispatcher, pid ${h.pid}) …`
-          : "  waiting for the gate lock …",
-      ),
-    onTakeover: (h) =>
-      console.log(
-        `  took over the gate lock${
-          h ? ` from ${h.label} (pid ${h.pid})` : ""
-        } — that process is no longer running`,
-      ),
-  });
+  // a gate's `retries` is for — and a session checking itself with
+  // `azelf gates` is one of those runs, so it does not take the lock either:
+  // it would wait behind a land's gates, CI included, for nothing it needs.
+  const lock = opts.lock ?? true;
+  if (lock) {
+    acquire(gatesLock(), {
+      pid: process.pid,
+      label: ref(n),
+      onWait: (h) =>
+        console.log(
+          h
+            ? `  waiting for ${h.label}'s gates (another dispatcher, pid ${h.pid}) …`
+            : "  waiting for the gate lock …",
+        ),
+      onTakeover: (h) =>
+        console.log(
+          `  took over the gate lock${
+            h ? ` from ${h.label} (pid ${h.pid})` : ""
+          } — that process is no longer running`,
+        ),
+    });
+  }
   let result: ReturnType<typeof runGates>;
   try {
-    result = runGates(config.gates, {
+    result = runGates(gates, {
       worktree: wt,
       // The main checkout is the baseline: it sits on the base branch the slice
       // was just rebased onto, so its errors are exactly the standing debt.
@@ -2810,7 +2948,7 @@ function gatesPass(n: TicketId): boolean {
       log: (line) => console.log(`    ${line}`),
     });
   } finally {
-    release(gatesLock(), process.pid);
+    if (lock) release(gatesLock(), process.pid);
   }
   for (const f of result.flaky) {
     console.log(
@@ -2820,7 +2958,7 @@ function gatesPass(n: TicketId): boolean {
   if (result.ok) {
     if (result.flaky.length) flakyGates.set(n, result.flaky);
     gateRuns.set(n, {
-      ran: config.gates.filter((g) => !skipped.includes(g)).map((g) => g.name),
+      ran: gates.filter((g) => !skipped.includes(g)).map((g) => g.name),
       skipped,
     });
     return true;
@@ -3873,6 +4011,9 @@ function bodyHash(id: TicketId): string | null {
 /** Written by `azelf retry <id>` into the slice's worktree; consumed by `isParked`. */
 const RETRY_MARKER = ".slice-retry";
 
+/** What un-parked a ticket; `base` is the one trigger that changed nothing in the slice. */
+type RetryWhy = "requested" | "moved" | "edited" | "base";
+
 /**
  * Why a parked ticket should be retried now, with the automatic retries it
  * will have spent, or null if nothing it waits on has changed. Reads only:
@@ -3881,11 +4022,12 @@ const RETRY_MARKER = ".slice-retry";
 function retryDue(
   id: TicketId,
   p: Parked,
-): { line: string; spent: number } | null {
+): { line: string; spent: number; why: RetryWhy } | null {
   if (existsSync(join(worktreeFor(id), RETRY_MARKER))) {
     return {
       line: `${ref(id)}: retry requested — retrying the land.`,
       spent: p.autoRetries,
+      why: "requested",
     };
   }
   const head = branchHead(id);
@@ -3893,6 +4035,7 @@ function retryDue(
     return {
       line: `${ref(id)} has moved since it was parked — retrying the land.`,
       spent: 0,
+      why: "moved",
     };
   }
   if (p.kind === "review" && p.body !== undefined) {
@@ -3901,6 +4044,7 @@ function retryDue(
       return {
         line: `${ref(id)}: the ticket was edited since the BLOCK — retrying.`,
         spent: p.autoRetries,
+        why: "edited",
       };
     }
   }
@@ -3917,10 +4061,53 @@ function retryDue(
           p.autoRetries + 1
         } of ${AUTO_RETRIES}).`,
         spent: p.autoRetries + 1,
+        why: "base",
       };
     }
   }
   return null;
+}
+
+/**
+ * Why each un-parked ticket was un-parked, and the branch head it had then,
+ * for the land order. Kept until the ticket is tried again, which lands it or
+ * parks it afresh: a ticket deferred one round is still the same retry the
+ * next, until its branch moves.
+ */
+const retriedFor = new Map<TicketId, { why: RetryWhy; head: string }>();
+
+/**
+ * The order the round's lands go in, one per round. Ticket order, except
+ * that a slice retried ONLY because the base moved goes after everything
+ * else that is ready: nothing in it changed, and what it is about to be
+ * rebased onto may well be the slice behind it in line.
+ *
+ * On consumer-b a shared-budget guard parked three slices on one afternoon;
+ * one author fixed theirs, the base moved, and the fixed one landed last,
+ * after each of the others had spent an automatic retry failing the same
+ * guard on the same budget — once with the fixed one's commits in it, which
+ * would have passed. A branch that moved, a requested retry, an edited
+ * ticket and a slice that was never parked all carry something new; only the
+ * base-moved retry does not, so only it waits. Across a restart there is no
+ * park state, and the order is ticket order.
+ */
+function landOrder(ready: Ticket[]): Ticket[] {
+  const deferred = (t: Ticket) => {
+    const r = retriedFor.get(t.id);
+    return r?.why === "base" && branchHead(t.id) === r.head;
+  };
+  const first = ready.filter((t) => !deferred(t));
+  const last = ready.filter(deferred);
+  if (first.length && last.length) {
+    console.log(
+      `  ${ref((first[0] as Ticket).id)} first — ${last
+        .map((t) => ref(t.id))
+        .join(", ")} ${
+        last.length === 1 ? "is" : "are"
+      } retried only because ${baseBranch} moved`,
+    );
+  }
+  return [...first, ...last];
 }
 
 /**
@@ -3939,6 +4126,7 @@ function isParked(id: TicketId): boolean {
     console.log(`  ${due.line}`);
     parked.delete(id);
     retriesSpent.set(id, due.spent);
+    retriedFor.set(id, { why: due.why, head: branchHead(id) ?? "" });
     return false;
   }
   const base = baseHead();
@@ -4147,6 +4335,31 @@ const LAND_DIVERGED = 75;
 /** `slice-land.sh`'s exit for a land that went through and whose `afterLand` failed. */
 const LAND_AFTER_FAILED = 3;
 
+/** Uncommitted changes in the slice's worktree, tracked or not. */
+function worktreeDirty(n: TicketId): boolean {
+  return (
+    run(["git", "status", "--porcelain"], {
+      cwd: worktreeFor(n),
+      allowFail: true,
+    }).out.trim() !== ""
+  );
+}
+
+/**
+ * The files the slice's worktree changes against the base, from the merge
+ * base, as the gates see them. Not `changedFiles`: that one is cached by
+ * branch head for the poll loop, and this is asked right after a rebase.
+ */
+function worktreeChanges(n: TicketId): string[] {
+  return run(["git", "diff", "--name-only", `${baseBranch}...HEAD`], {
+    cwd: worktreeFor(n),
+    allowFail: true,
+  })
+    .out.split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
 /**
  * The files the base changed between two of its commits that this slice
  * changes too. None means the slice's diff is the same on both, byte for
@@ -4232,7 +4445,25 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
         `${failed} failed after the rebase (the lockfile may not match package.json) — run ${failed} in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
       );
     }
-    if (!gatesPass(t.id)) {
+    // A branch the base already contains did not fail a gate: it landed
+    // already, or the base was moved past it by hand. Parked as a land, with
+    // the question, where it used to read "the gates are red" — which on
+    // consumer-b sent people to the gates for a slice whose commits were on
+    // the base all along. A dirty worktree is still the gates' refusal: the
+    // uncommitted work is what there is to look at.
+    const changed = worktreeChanges(t.id);
+    if (changed.length === 0 && !worktreeDirty(t.id)) {
+      return park(
+        t,
+        "land",
+        `${branchFor(
+          t.id,
+        )} adds nothing to ${baseBranch} — every commit on it is already there. Did it land already, or was ${baseBranch} moved past it by hand? If its work is on ${baseBranch}, ./scripts/slice-land.sh ${
+          t.id
+        } from the main checkout closes the ticket and removes the worktree`,
+      );
+    }
+    if (!gatesPass(t.id, changed)) {
       return park(t, "gates", "the gates are red");
     }
     // After the gates, not before: no point paying for a review of something
@@ -5083,23 +5314,57 @@ if (flag("--hold") || flag("--release")) {
   process.exit(0);
 }
 
-// `--gates <n…>`: the landing gates, and nothing else — no GitHub, no rebase,
-// no land. The worktree is judged exactly as it sits. This is how to check a
-// slice by hand, and how the gate shapes were proven against real worktrees.
-if (flag("--gates")) {
-  if (explicit.length === 0) {
-    console.error("--gates needs at least one ticket id");
+/**
+ * The ticket whose worktree the current directory is, read from its branch
+ * through `branchPattern`. Exits 64 when the directory is on no slice branch —
+ * the main checkout, a detached HEAD — because then nothing says which slice.
+ */
+function sliceHere(): TicketId {
+  const branch = run(["git", "branch", "--show-current"], {
+    allowFail: true,
+    cwd: process.cwd(),
+  }).out.trim();
+  const id = branch ? ticketFromBranch(branch) : null;
+  if (id === null) {
+    console.error(
+      `--gates needs a ticket id, or a slice worktree to run from — ${
+        branch
+          ? `\`${branch}\` is not a slice branch`
+          : "this is a detached HEAD"
+      } (branchPattern is ${config.branchPattern})`,
+    );
     process.exit(64);
   }
+  return id;
+}
+
+// `--gates [n…]`: the landing gates, and nothing else — no tracker, no
+// rebase, no land. The worktree is judged exactly as it sits. This is how to
+// check a slice by hand, and how the gate shapes were proven against real
+// worktrees. A gate that judges the pushed commit (`ciRuns`) is skipped and
+// said to run at the land.
+//
+// Without an id, the slice is the one the current directory is the worktree
+// of: that is `azelf gates` from inside a session, whose branch names its
+// ticket. `--no-lock` is what that verb passes: a session's own check does
+// not wait behind a land's gate run (see gatesPass).
+if (flag("--gates")) {
+  const ids = explicit.length ? explicit : [sliceHere()];
   let allOk = true;
-  for (const n of explicit) {
+  for (const n of ids) {
     if (!hasWorktree(n)) {
       console.log(`  ✗ ${ref(n)}: no worktree at ${worktreeFor(n)}`);
       allOk = false;
       continue;
     }
-    if (gatesPass(n)) console.log(`  ✓ ${ref(n)} passes every gate`);
-    else allOk = false;
+    if (
+      gatesPass(n, worktreeChanges(n), {
+        byHand: true,
+        lock: !flag("--no-lock"),
+      })
+    ) {
+      console.log(`  ✓ ${ref(n)} passes every gate`);
+    } else allOk = false;
   }
   process.exit(allOk ? 0 : 1);
 }
@@ -5134,6 +5399,8 @@ const ignoreBodyBlockers = flag("--ignore-body-blockers");
 printMissingEdges(missingEdges, tickets, ignoreBodyBlockers);
 printNamed(namedEpics, unlabelled, tickets);
 noteBaseAgainstOrigin(!planOnly);
+// Not under --plan: a plan reads, and moving the checkout is not reading.
+if (!planOnly) syncBaseWithOrigin({ fetch: false });
 if (missingEdges.length > 0 && !ignoreBodyBlockers) {
   refuseOverBodyBlockers(!planOnly);
 }
@@ -5438,6 +5705,9 @@ try {
       break;
     }
 
+    // Before the overlap report and the lands, so both work from what origin
+    // has. Round 1 was synced at the start.
+    if (round > 1) syncBaseWithOrigin();
     reportOverlaps(tickets);
     noteHolds(tickets);
     noteHandWork(tickets);
@@ -5453,7 +5723,9 @@ try {
       console.log(
         `\n[round ${round}] ${finished.length} marked done — landing one`,
       );
-      tryLand(finished[0] as Ticket);
+      const next = landOrder(finished)[0] as Ticket;
+      retriedFor.delete(next.id);
+      tryLand(next);
     }
     if (stopForAfterLand()) break;
 

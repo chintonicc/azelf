@@ -1,9 +1,11 @@
 /**
  * A lock that every process working on one repo can see: the land lock
- * (`slice-land.sh`) and the gate lock (`gatesPass` in slice-run.ts).
+ * (`slice-land.sh`, `slice-push-main.sh`) and the gate lock (`gatesPass` in
+ * slice-run.ts).
  *
  *   bun slice-lock.ts acquire <dir> --pid <n> --label <who> --what <land> [--wait <seconds>]
  *   bun slice-lock.ts release <dir> --pid <n>
+ *   bun slice-lock.ts land-dir <checkout>     where the land lock of that checkout's remote lives
  *
  * WHY THIS EXISTS
  * ---------------
@@ -17,10 +19,12 @@
  *
  * THE SHAPE
  * ---------
- * The DB lock's (db-lock.sh): a directory in the common git dir, which every
- * worktree of the repo can already see, with an owner file inside. Three
- * differences, each because these locks are held by processes rather than by
- * branches:
+ * The DB lock's (db-lock.sh): a directory with an owner file inside, in a
+ * place every contender can already see — the common git dir for the gate
+ * lock, which every worktree of the repo shares; a directory under the home
+ * directory keyed by the remote for the land lock, which every clone of the
+ * remote shares (see `landLockDir`). Three differences, each because these
+ * locks are held by processes rather than by branches:
  *
  *  - It is taken WHOLE. The owner file is written into a private directory
  *    first and the directory is renamed into place, so a lock never exists
@@ -42,6 +46,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -50,7 +55,58 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+
+/**
+ * Origin's URL as a key: the spelling `git remote get-url origin` prints,
+ * less a trailing slash and `.git`, which two clones of one remote differ in
+ * for no reason. The ssh and https spellings of one remote are two keys;
+ * that is said in the README rather than guessed at here.
+ */
+export const remoteKey = (url: string) =>
+  url
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\.git$/, "");
+
+/**
+ * Where the land lock lives, for the repo `checkout` is in (any directory
+ * git resolves: the main checkout, a worktree, the common git dir).
+ *
+ * Under the home directory and keyed by origin's URL, not in the common git
+ * dir: what a land serialises is PUSHES to one remote, and the clones of that
+ * remote on one machine do not share a git dir. The dispatcher's clone and a
+ * clone someone merges in by hand did not see each other's lock, and a push
+ * from the second while the first was landing was the race Phase 1 of the
+ * stale-base plan undid after the fact. One directory per remote, which both
+ * see, makes the second wait instead. `AZELF_LOCKS_DIR` moves the root (the
+ * tests set it); a repo without an origin keeps the lock in its common git
+ * dir, where there is nothing else to share it with.
+ */
+export function landLockDir(checkout: string): string {
+  const common = spawnSync(
+    "git",
+    ["-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    { encoding: "utf8" },
+  );
+  const commonDir =
+    common.status === 0 && common.stdout.trim()
+      ? common.stdout.trim()
+      : checkout;
+  const r = spawnSync("git", ["-C", checkout, "remote", "get-url", "origin"], {
+    encoding: "utf8",
+  });
+  const url = r.status === 0 ? remoteKey(r.stdout) : "";
+  if (!url) return join(commonDir, "azelf-land.lock");
+  const key = createHash("sha256").update(url).digest("hex").slice(0, 12);
+  const dir = join(
+    process.env.AZELF_LOCKS_DIR || join(homedir(), ".azelf", "locks"),
+    key,
+  );
+  mkdirSync(dir, { recursive: true });
+  return join(dir, "land");
+}
 
 export type Owner = {
   pid: number;
@@ -260,6 +316,11 @@ const clock = (iso: string) => {
 
 function cli(argv: string[]): number {
   const [verb, dir] = argv;
+  if (verb === "land-dir") {
+    if (!dir || argv.length !== 2) return usage();
+    console.log(landLockDir(dir));
+    return 0;
+  }
   const value = (flag: string) => {
     const i = argv.indexOf(flag);
     return i === -1 ? undefined : argv[i + 1];
@@ -305,6 +366,7 @@ function usage(): number {
     "usage: slice-lock.ts acquire <dir> --pid <n> --label <who> --what <what> [--wait <seconds>]",
   );
   console.error("       slice-lock.ts release <dir> --pid <n>");
+  console.error("       slice-lock.ts land-dir <checkout>");
   return 64;
 }
 

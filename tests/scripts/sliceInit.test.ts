@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   EXCLUDE_BLOCK,
   GENERATED,
+  SHIMS,
   agentFiles,
   hookBlock,
   hookVersion,
@@ -502,6 +503,30 @@ describe("the agent-facing files", () => {
     expect(skill).toContain("It told you to run `./scripts/slice-done.sh`.");
     expect(skill).toContain("It did not, or there was no start instruction.");
     expect(skill).toContain("Do **not** run it yourself");
+  });
+
+  // A session has the shims and not the binary, and it has no slice.config.ts
+  // to read when that file is untracked: the skill names the one command and
+  // points at no file.
+  it("the skill names ./scripts/slice-gates.sh for the gates, and not slice.config.ts", () => {
+    agentFiles(dir);
+    const skill = readFileSync(
+      join(dir, ".claude", "skills", "slice", "SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toContain("./scripts/slice-gates.sh");
+    expect(skill).not.toContain("slice.config.ts");
+    expect(
+      SHIMS.some((s) => s.name === "slice-gates.sh" && s.how === "exec"),
+    ).toBe(true);
+  });
+
+  // The hand push under the land lock is reached the same way from a checkout
+  // without the binary on PATH.
+  it("writes a shim for slice-push-main.sh", () => {
+    expect(
+      SHIMS.some((s) => s.name === "slice-push-main.sh" && s.how === "exec"),
+    ).toBe(true);
   });
 
   it("changes nothing on a second run", () => {

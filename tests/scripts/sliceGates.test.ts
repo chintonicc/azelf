@@ -504,6 +504,17 @@ describe("runGates with retries", () => {
  * like any other, so a 45-minute wait is a count of calls and no clock.
  */
 describe("ciRuns", () => {
+  /** What `--gates` reads to skip it: a worktree with nothing pushed has no CI. */
+  it("is a land-only gate, and the local shapes are not", () => {
+    expect(ciRuns({ workflows: ["Tests"] }).landOnly).toBe(true);
+    expect(exitCode(["true"]).landOnly).toBeUndefined();
+    expect(exitCodeOverFiles(["true"]).landOnly).toBeUndefined();
+    expect(
+      baselineDiff({ cmd: ["true"], errorMatch: /x/, normalize: (l) => l })
+        .landOnly,
+    ).toBeUndefined();
+  });
+
   const SHA = "0123456789abcdef0123456789abcdef01234567";
   const CI_REF = "refs/heads/azelf-ci/ticket-40-0123456789ab";
   const LIST = `gh run list -R acme/app --commit ${SHA} --limit 30 --json databaseId,name,status,conclusion,url`;

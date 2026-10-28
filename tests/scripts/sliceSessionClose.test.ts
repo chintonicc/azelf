@@ -242,6 +242,90 @@ describe("the start prompt says who declares the slice done", () => {
 });
 
 /**
+ * A prompt written for the usual case ("read the parent spec") sent a session
+ * in a worktree with no .slice-parent.md looking for the spec, and it stopped
+ * there. The prompt says which case it is in: through `{parent}` where the
+ * prompt has it, and by one appended sentence where it has not and there is
+ * no parent.
+ */
+describe("the start prompt and the parent spec", () => {
+  const NO_SPEC =
+    "This ticket hangs under no spec: there is no .slice-parent.md in this worktree, and nothing takes precedence over .slice-ticket.md.";
+  const SPEC =
+    "The spec this ticket hangs under is in .slice-parent.md in this worktree — read the ticket first; where the two disagree, the parent decides.";
+
+  /** The prompt a session of #40 is given, with or without a parent. */
+  function promptOf(opts: {
+    parent: boolean;
+    startPrompt?: string;
+    relaunch?: boolean;
+  }): string {
+    fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["bash", "-c", 'printf "%s" "$0" > ../prompt.txt'],
+      startPrompt: opts.startPrompt,
+    });
+    fx.setTicket("40", {
+      body: opts.parent ? "Build.\n\n## Parent\n\n#17\n" : "Build.",
+    });
+    fx.setTicket("17", { title: "Spec: the feed", body: "PARENT-BODY" });
+    if (opts.relaunch) {
+      writeFileSync(join(fx.wt(40), "a.txt"), "a\n");
+      git(fx.wt(40), "add", "a.txt");
+      git(fx.wt(40), "commit", "-qm", "feat: a");
+    }
+    const r = spawnSync("./scripts/slice-session.sh", ["40"], {
+      cwd: fx.main,
+      encoding: "utf8",
+    });
+    const file = join(fx.root, "prompt.txt");
+    expect(existsSync(file), `${r.stdout}${r.stderr}`).toBe(true);
+    return readFileSync(file, "utf8");
+  }
+
+  it("appends the no-spec sentence to a prompt without {parent}, before the rest", () => {
+    const prompt = promptOf({ parent: false });
+    expect(prompt.startsWith(`x ${NO_SPEC} When it is finished`)).toBe(true);
+  }, 60_000);
+
+  it("leaves a prompt without {parent} alone when there is a parent", () => {
+    const prompt = promptOf({ parent: true });
+    expect(prompt.startsWith("x When it is finished")).toBe(true);
+    expect(prompt).not.toContain("hangs under no spec");
+    expect(prompt).not.toContain(".slice-parent.md");
+  }, 60_000);
+
+  it("expands {parent} to the sentence naming the file, and appends nothing", () => {
+    const prompt = promptOf({
+      parent: true,
+      startPrompt: "Ticket #{n}. {parent} Go.",
+    });
+    expect(
+      prompt.startsWith(`Ticket #40. ${SPEC} Go. When it is finished`),
+    ).toBe(true);
+    expect(prompt).not.toContain("hangs under no spec");
+  }, 60_000);
+
+  it("expands {parent} to nothing without a parent, space included, and appends nothing", () => {
+    const prompt = promptOf({
+      parent: false,
+      startPrompt: "Ticket #{n}. {parent} Go.",
+    });
+    expect(prompt.startsWith("Ticket #40. Go. When it is finished")).toBe(true);
+    expect(prompt).not.toContain("hangs under no spec");
+    expect(prompt).not.toContain("{parent}");
+  }, 60_000);
+
+  it("keeps the relaunch sentence after it", () => {
+    const prompt = promptOf({ parent: false, relaunch: true });
+    expect(prompt).toContain(
+      `${NO_SPEC} This worktree already has work from an earlier session`,
+    );
+  }, 60_000);
+});
+
+/**
  * The ticket checks a prep runs before anything is cut. A ticket named on the
  * dispatcher's command line without the ready label comes with `--named`, and
  * is prepped; a person's ticket (`humanLabel`) is refused either way.

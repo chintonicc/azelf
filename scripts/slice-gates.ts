@@ -100,6 +100,12 @@ export type Gate = {
   retries?: number;
   /** The paths it judges; it runs only when the diff touches one. See `gateApplies`. */
   when?: string[];
+  /**
+   * It judges a commit origin has (`ciRuns` waits for CI on the pushed SHA),
+   * so it can only run at the land. A gate run by hand or by the session —
+   * `azelf gates`, `azelf run --gates` — skips it and says it runs at the land.
+   */
+  landOnly?: true;
 };
 
 /** What every gate shape takes besides its command. */
@@ -423,6 +429,7 @@ export function ciRuns(opts: CiRunsOptions): Gate {
     name,
     retries: opts.retries,
     when: opts.when,
+    landOnly: true,
     run(ctx) {
       const red = (why: string, detail?: string[]): GateResult => ({
         ok: false,

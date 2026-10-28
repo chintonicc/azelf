@@ -24,6 +24,8 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
                              asking (implied by --auto)
   azelf run --no-auto-resolve    never let an agent resolve a rebase conflict
   azelf run --gates 12       run the landing gates on slice 12, land nothing
+  azelf run --gates          the same for the slice whose worktree you are in
+  azelf run --gates --no-lock    without waiting for the gate lock (azelf gates)
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
   azelf run --hold 12 [--by <who>] [--why <text>]
                              hold slice 12's worktree for work by hand: nothing
@@ -64,6 +66,7 @@ const FLAGS = new Set([
   "--auto-resolve",
   "--no-auto-resolve",
   "--gates",
+  "--no-lock",
   "--sync-edges",
   "--ignore-body-blockers",
 ]);
