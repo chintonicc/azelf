@@ -432,6 +432,72 @@ else
   rm -f "$parent_file"
 fi
 
+# ─── Ports ───────────────────────────────────────────────────────────────
+# A block of ports per slice, when slice.config.ts has `ports`. Parallel
+# sessions told only "take your own ports" took the same ones on consumer-b:
+# one tested against another slice's server and got a wrong answer with no
+# error. The block is picked here, because the prep is what sees the other
+# worktrees, and kept in .slice-ports so a relaunch has the same one.
+#
+# Taken: a block another worktree of this repo holds, or one with any port in
+# it that something is listening on now (a server left over, another repo's
+# slice — lsof, when there is one). The slice's own kept block is exempt from
+# the listening check: those are most likely its own servers.
+#
+# Only written where git ignores it, like .slice-parent.md: elsewhere it would
+# be an untracked change, and a slice with one does not land. Without the
+# file the block still holds for this session; a relaunch picks again.
+port_base=""
+port_size="${SLICE_PORTS_SIZE:-10}"
+if [[ -n "${SLICE_PORTS_FROM:-}" ]]; then
+  ports_file="$worktree_path/.slice-ports"
+  taken=" "
+  while IFS= read -r line; do
+    other="${line#worktree }"
+    [[ "$line" == "worktree "* && "$other" != "$worktree_path" ]] || continue
+    if [[ -f "$other/.slice-ports" ]]; then
+      taken+="$(head -n 1 "$other/.slice-ports" | tr -dc '0-9') "
+    fi
+  done < <(git -C "$repo_root" worktree list --porcelain)
+  listening=" "
+  if command -v lsof >/dev/null 2>&1; then
+    # lsof exits 1 when nothing listens, and under pipefail that would end
+    # the prep.
+    listening+="$({ lsof -nP -iTCP -sTCP:LISTEN -Fn 2>/dev/null || true; } |
+      sed -n 's/^n.*:\([0-9][0-9]*\)$/\1/p' | sort -u | tr '\n' ' ')"
+  fi
+  kept=""
+  if [[ -f "$ports_file" ]]; then
+    kept=$(head -n 1 "$ports_file" | tr -dc '0-9')
+  fi
+  if [[ -n "$kept" && "$taken" != *" $kept "* ]]; then
+    port_base="$kept"
+  else
+    candidate="$SLICE_PORTS_FROM"
+    while ((candidate + port_size - 1 <= 65535)); do
+      free=true
+      if [[ "$taken" == *" $candidate "* ]]; then free=false; fi
+      for ((p = candidate; p < candidate + port_size; p++)); do
+        if [[ "$listening" == *" $p "* ]]; then free=false; break; fi
+      done
+      if $free; then port_base="$candidate"; break; fi
+      candidate=$((candidate + port_size))
+    done
+  fi
+  if [[ -z "$port_base" ]]; then
+    rm -f "$ports_file"
+    echo "warning: no free block of $port_size ports from $SLICE_PORTS_FROM up — this session gets none" >&2
+  else
+    if git -C "$worktree_path" check-ignore -q .slice-ports; then
+      printf '%s\n' "$port_base" >"$ports_file"
+    else
+      echo "  (.slice-ports not kept: git does not ignore it here yet — run \`azelf init\` once so a relaunch keeps the block)"
+    fi
+    export SLICE_PORT_BASE="$port_base" SLICE_PORT_COUNT="$port_size"
+    echo "✓ ports ${port_base}–$((port_base + port_size - 1)) are this slice's (SLICE_PORT_BASE, SLICE_PORT_COUNT)"
+  fi
+fi
+
 if $provision; then
   echo "✓ provisioned — nothing launched. The dispatcher relaunches it when it has to; by hand: ${AZELF_INVOKED_AS:-$0} $ticket"
   exit 0
@@ -606,6 +672,14 @@ if [[ "$ahead" != "0" || -n "$(git status --porcelain 2>/dev/null)" ]]; then
   start_prompt="$start_prompt This worktree already has work from an earlier session of this ticket that ended before it finished — see \`git log $SLICE_BASE_BRANCH..HEAD\` and \`git status\`. Continue from it; don't start over."
 fi
 
+# The slice's ports, in the prompt as well as the environment: the prompt is
+# what a session reads, and "never pkill -f" is the half the environment
+# cannot say. On consumer-b a `pkill -f scripts/mock/mock_api.mjs` killed a
+# parallel slice's mock, twice.
+if [[ -n "$port_base" ]]; then
+  start_prompt="$start_prompt Ports ${port_base}–$((port_base + port_size - 1)) are this slice's alone (\$SLICE_PORT_BASE and \$SLICE_PORT_COUNT in your environment): start every server you need on one of them, and stop only processes you started, by their PID — never pkill -f, which reaches other slices' servers."
+fi
+
 # Under --self-land the slice closes itself out. Both halves matter: the marker
 # is what the dispatcher lands on, and the exit is what clears .slice-live so
 # the slot frees. Told to stop rather than mark done if the gates are red,
@@ -624,7 +698,7 @@ fi
 if $self_land; then
   start_prompt="$start_prompt When it is finished and the gates are green, run ./scripts/slice-done.sh and then exit — nobody is watching this tab. If the gates will not go green, leave the worktree as it is, do NOT run slice-done.sh, and exit. If only a person can get you further (a sign-in, a prompt nobody will answer in this tab, a device, a secret), do what the slice skill's \"If only a person can get you further\" says: commit what you have, run ./scripts/slice-done.sh --hand-over \"<what the person has to do, and where your work is>\", and end your turn."
 else
-  start_prompt="$start_prompt When it is finished and the gates are green, stop and say it is ready. Do NOT run ./scripts/slice-done.sh: a human releases this slice."
+  start_prompt="$start_prompt When it is finished and the gates are green, write your report with ./scripts/slice-finished.sh (the slice skill says how) and stop. Do NOT run ./scripts/slice-done.sh: a human releases this slice."
 fi
 
 # The configured agent's argv prefix, from slice.config.ts through the bridge.

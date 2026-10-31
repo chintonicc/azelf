@@ -1,6 +1,6 @@
 # A stopped run says its last word, the Mac stays awake, a quiet session is seen, and each slice has its own ports
 
-**Status:** in progress
+**Status:** complete · Phase 1 landed 2026-10-30 (9793135), Phase 2 (cde06cc), Phase 3 built 2026-10-30
 **Written:** 2026-10-30
 **Companion:** the "Still open" list of `docs/findable-and-finished-plan.md`, and the
 consumer-b friction entries it pointed at: 2026-10-25 Frontend #95 (a session that died
@@ -118,16 +118,31 @@ after the heading. Line numbers are as of `dbc5238`.
 
 ## Phase 3 — each slice has its own ports
 
-- [ ] 3a. `ports?: { from: number; size?: number }` (size 10), validated, bridged as
-  `SLICE_PORTS_FROM` / `SLICE_PORTS_SIZE`.
-- [ ] 3b. `slice-session.sh`: allocate or reuse `.slice-ports`, export the two vars,
-  add the sentence to the start prompt (own ports, stop only your own PIDs, never
-  `pkill -f`). Only where git ignores the marker; otherwise env and prompt without it.
-- [ ] 3c. `.slice-ports` in `EXCLUDE_BLOCK`; the skill and README.
-- [ ] 3d. The non-auto start prompt names `slice-finished.sh` (it said only "stop and
-  say it is ready", and the skill is the copy a consumer may have edited).
-- [ ] 3e. Tests: two worktrees get different blocks; a relaunch keeps its block; a
-  listening port is skipped; no `ports` → no var, no sentence.
+- [x] 3a. `ports?: { from: number; size?: number }` (size 10), validated (whole numbers,
+  `from` ≥ 1024, the first block ending by 65535), bridged as `SLICE_PORTS_FROM` /
+  `SLICE_PORTS_SIZE`.
+- [x] 3b. `slice-session.sh`: reuse `.slice-ports` unless another worktree holds it,
+  else the lowest block no other worktree holds and no port of which is listening
+  (`lsof -iTCP -sTCP:LISTEN`); export the two vars; add the sentence to the start prompt
+  (own ports, stop only your own PIDs, never `pkill -f`). The file only where git
+  ignores it; otherwise the vars and the sentence without it.
+- [x] 3c. `.slice-ports` in `EXCLUDE_BLOCK` (fourteen patterns); a paragraph in the
+  skill's "Build it"; README "Ports per slice" and the config table.
+- [x] 3d. The non-auto start prompt names `slice-finished.sh`.
+- [x] 3e. Tests (`slicePorts.test.ts`): two worktrees get two blocks and the prompt
+  says the range; a relaunch keeps its block with its own server listening in it,
+  another slice skips held and listening blocks; no `ports` → no var, no sentence, no
+  file; a block past 65535 is refused by the config.
+
+### What building it found
+
+- **bash 3.2 reads `$port_base–` as a longer name.** The en dash is UTF-8, and its first
+  byte was taken into the identifier: "port_base\xe2: unbound variable" under `set -u`.
+  `${port_base}–`.
+- **`lsof` exits 1 when nothing listens**, which under `pipefail` ends the prep. `||
+  true` inside the pipe.
+- **A kept block is exempt from the listening check**: the servers in it are most
+  likely the slice's own, from before the relaunch.
 
 ## Order and cost
 

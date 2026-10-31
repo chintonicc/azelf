@@ -162,6 +162,25 @@ export type SliceConfig = {
    */
   quietAfterMinutes?: number;
   /**
+   * A block of TCP ports for each slice. Optional; without it no slice is
+   * given ports. `size` is 10 when left out.
+   *
+   * The prep gives a slice the lowest block from `from` on that no other
+   * worktree of this repo holds and no process is listening in, keeps it in
+   * `.slice-ports` for as long as the worktree lives, and hands it to the
+   * session as `SLICE_PORT_BASE` / `SLICE_PORT_COUNT` and in one sentence of
+   * its start prompt. What starts a server on it is your repo's business:
+   * read `SLICE_PORT_BASE` where a port is chosen.
+   *
+   * On consumer-b the prompt said "take your own ports", and two parallel
+   * sessions took 8846/8847 at once: one tested against the other's server
+   * and got a wrong answer with no error, and a `pkill -f` killed the other's
+   * mock. Two repos on one machine each want their own `from`.
+   *
+   *   ports: { from: 20000 }            // 20000–20009, 20010–20019, …
+   */
+  ports?: { from: number; size?: number };
+  /**
    * Paths the overlap report leaves out. Optional; `[]` and omitted are the
    * same. `*` stays inside one path segment, `**` crosses them, a trailing
    * `/` means everything beneath a directory.
@@ -487,6 +506,22 @@ function validate(c: SliceConfig): SliceConfig {
     bad(
       "minFreeDiskGb must be a number of GB, 0 or more — 0 turns the disk check off",
     );
+  }
+  if (c.ports !== undefined) {
+    const p = c.ports as { from?: unknown; size?: unknown } | null;
+    const from = p?.from;
+    const size = p?.size ?? 10;
+    if (
+      !Number.isInteger(from) ||
+      !Number.isInteger(size) ||
+      (from as number) < 1024 ||
+      (size as number) < 1 ||
+      (from as number) + (size as number) - 1 > 65535
+    ) {
+      bad(
+        "ports must be { from, size? }: whole numbers, from 1024 on, size 1 or more (10 when left out), the first block ending by 65535",
+      );
+    }
   }
   if (c.keepAwake !== undefined && typeof c.keepAwake !== "boolean") {
     bad(
@@ -845,6 +880,10 @@ export function shellAssignments(): string {
     shArray("SLICE_INSTALL", install.argv),
     `SLICE_INSTALL_WHY=${shq(install.why)}`,
     shArray("SLICE_AFTER_LAND", config.afterLand ?? []),
+    // A slice's ports (`ports`): empty `from` is none. The prep picks the
+    // block, because it is the prep that knows the other worktrees.
+    `SLICE_PORTS_FROM=${shq(String(config.ports?.from ?? ""))}`,
+    `SLICE_PORTS_SIZE=${shq(String(config.ports?.size ?? 10))}`,
   ].join("\n");
 }
 

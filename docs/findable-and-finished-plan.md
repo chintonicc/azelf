@@ -260,9 +260,10 @@ about eight tests.
 
 - **`caffeinate -is -w $$` on macOS while slices run, and a stall detector by mtime**
   (2026-10-25). Still not in azelf. The finished marker covers the ordinary case of a
-  session at its prompt; the crashed case stays unseen. Cheap, worth its own short plan.
+  session at its prompt; the crashed case stays unseen. Done in `docs/awake-and-apart-plan.md` (Phase 2).
 - **A port block per slice** (Frontend #66, and 2026-10-22). An env per session with a
   slot number is small; what the consumer's mock scripts do with it is the larger half.
+  Done in `docs/awake-and-apart-plan.md` (Phase 3).
 - **`landRequiresApproval`**: see the decisions.
 - **Reserving the npm name `azelf`**: outside this repo.
 - **Still open from 2026-10-22:** a command allowlist for the resolver; `reviewReadDirs`;

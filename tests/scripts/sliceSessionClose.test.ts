@@ -225,6 +225,10 @@ describe("the start prompt says who declares the slice done", () => {
 
   it("without --self-land: stop, say it is ready, do NOT run slice-done.sh", () => {
     const prompt = promptOf();
+    // The turn-is-over marker, named here too: the skill may be an edited copy.
+    expect(prompt).toContain(
+      "write your report with ./scripts/slice-finished.sh (the slice skill says how) and stop",
+    );
     expect(prompt).toContain("Do NOT run ./scripts/slice-done.sh");
     expect(prompt).toContain("a human releases this slice");
     expect(prompt).not.toContain("and then exit");

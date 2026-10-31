@@ -23,6 +23,12 @@ Only what the ticket asks. A slice that also fixes an unrelated thing it noticed
 a slice that cannot be reviewed as one change, and it lands into the same base branch
 as every other slice running right now.
 
+Other slices run beside you on the same machine. If `$SLICE_PORT_BASE` is set, ports
+`$SLICE_PORT_BASE` to `$SLICE_PORT_BASE + $SLICE_PORT_COUNT - 1` are yours alone:
+start every server there. Without it, ask the OS for a free port rather than picking a
+familiar one. Stop only processes you started, by their PID — never `pkill -f`, which
+kills other slices' servers too.
+
 ## 3. Claim the DB lock before you touch the database
 
 **Before creating or applying anything under `exclusiveLockPaths`** (migrations,

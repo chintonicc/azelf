@@ -136,7 +136,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes thirteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes fourteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -169,7 +169,7 @@ saying so.
 | `scripts/azelf` | the launcher — `./scripts/azelf run --plan` and every other verb |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | thirteen marker patterns, in a delimited block |
+| `.git/info/exclude` | fourteen marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -322,6 +322,22 @@ running again. `--stuck` is the same marker for "the gates will not go green" or
 DB lock is held": the line says `#89 is stuck: <the report's first line>`. A run that
 exits with such slices open lists them under `waiting for you` at the end.
 
+`N quiet` appears when a live session has shown no sign of work for
+`quietAfterMinutes` (30 by default): no changed file in its worktree, no commit, and no
+write to its Claude Code transcript when one is found under `~/.claude/projects/`. On
+consumer-b a session died when the Mac slept, with 30 files uncommitted, and the run
+said `1 running` for an hour and a half. The run says it once per stretch of quiet,
+and lists quiet sessions at the end. It types nothing into the tab; a session that is
+thinking is quiet too.
+
+```
+[round 31] #95 has been quiet for 34 min — no changed file, no commit, nothing in its transcript since 21:13
+  its session may have stopped (the Mac slept, an API error), be waiting at its prompt, or still be thinking: look at its tab
+```
+
+On macOS the run keeps the machine awake while it lasts (`caffeinate -is -w <its pid>`,
+which ends with it); `keepAwake: false` turns that off. Not for `--once`.
+
 A tracker read that fails mid-run (a `gh` call that times out, an `EOF`, a VPN
 reconnecting) does not end the run. The ticket keeps its last state, the run says so
 once, and once more when the tracker answers again:
@@ -341,6 +357,12 @@ A run that stops with work left (everything parked, the disk below `minFreeDiskG
 the tracker gone, or an error in a round) ends with the command that picks it up
 again: the same flags minus `--once`, and the tickets it left open. A restart adopts
 the sessions that are still running.
+
+Ctrl-C, or a `kill`, stops a run the same way. The first signal ends the round and
+prints that ending, then exits 130 (SIGINT) or 143 (SIGTERM); a second one quits at
+once. Either way the run's ticket claims are released. Ctrl-C reaches a gate or
+resolver in progress too, and it stops; a `kill` sent to the dispatcher alone waits for
+it. At a question (`proceed? [y/N]`) Ctrl-C quits at once, as it always did.
 
 ```
   To pick the run up again:
@@ -491,6 +513,9 @@ export default {
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
+| `keepAwake` | `boolean?` | on macOS, `caffeinate -is` for the life of a run. Default on; `false` lets the Mac sleep. `-s` holds only on mains power, and a closed lid sleeps anyway |
+| `quietAfterMinutes` | `number?` | minutes a running session may show no sign of work (a changed file, a commit, a write to its Claude Code transcript) before the run counts it as quiet. Default 30, `0` is off |
+| `ports` | `{ from, size? }?` | a block of TCP ports per slice, from `from` on, `size` (10) wide. See [Ports per slice](#ports-per-slice). Left out, no slice is given ports |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |
 | `numberedIgnore` | `string[]?` | paths whose leading number is not a sequence, so two files under one number there are left alone. Same syntax. See [Two files, one number](#two-files-one-number) |
 | `testOnBase` | `{ command, files? }?` | run a slice's new test files against the base before its review; off when left out. See below |
@@ -838,7 +863,7 @@ GitHub's own name for it:
   [round 4] 0 running · 1 blocked · 1 open — waiting on another repo: acme/api#140
   ```
 
-  The run does not end on its own while it waits. Ctrl-C ends it, as always.
+  The run does not end on its own while it waits. Ctrl-C ends it, with the usual ending.
 - **A body names it the same way.** `acme/api#140` under `## Blocked by` is a claim on
   that issue, never on this repo's #140, and the edge satisfies it. A claim without
   an edge stops the dispatch, as above. `--sync-edges` writes that edge too, on this
@@ -1222,6 +1247,25 @@ Three properties worth knowing:
 It never blocks a land. Two slices touching one file is often correct — a barrel
 file, a lockfile, the same test helper — and the dispatcher cannot tell which of
 those it is looking at. Deciding is yours; noticing is its job.
+
+### Ports per slice
+
+Slices that start servers (a mock API, a static server, a debugger port) collide when
+they pick ports themselves. On consumer-b two sessions told "take your own ports" took
+the same two at once, and one tested against the other's server and got a wrong answer
+with no error. With `ports` in the config the prep gives each slice a block:
+
+```ts
+ports: { from: 20000 },           // 20000–20009, 20010–20019, … (size 10)
+```
+
+A slice gets the lowest block that no other worktree of this repo holds and that has
+no port something is listening on, and keeps it in `.slice-ports` for as long as its
+worktree lives. The session finds it as `SLICE_PORT_BASE` and `SLICE_PORT_COUNT` in
+its environment, and its start prompt says the range, to start servers only there,
+and to stop only processes it started, by PID — never `pkill -f`, which reaches other
+slices' servers. Making your scripts read `SLICE_PORT_BASE` is your part. Two repos on
+one machine should each have their own `from`.
 
 ### Quieting the paths that never matter
 
