@@ -143,6 +143,18 @@ describe("afterLand in the dispatcher", () => {
     expect(r.code).toBe(0);
   });
 
+  it("the config refuses resolverCommands that are not a list of prefixes", () => {
+    for (const value of ['"pytest"', '["pytest", " "]']) {
+      c = makeConsumer({ configExtra: `resolverCommands: ${value},` });
+      const r = runDispatcher(c, ["--plan"]);
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain(
+        "resolverCommands must be an array of non-empty command prefixes",
+      );
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
+
   it("the config refuses an afterLand that is not a list of words", () => {
     for (const value of ['"./health.sh"', '["./health.sh", ""]']) {
       c = makeConsumer({ configExtra: `afterLand: ${value},` });
@@ -2277,6 +2289,147 @@ ${RESOLVE_BOTH}`,
     expect(git(c.main, "log", "--format=%s", "-2")).toBe(
       "feat: b.txt\nfeat: a.txt",
     );
+  });
+
+  /**
+   * The resolver may run what the config names, and is told so; without a
+   * list it is told it can run nothing. The fake resolver gets the allowed
+   * prefixes after the prompt (fixture.ts) and logs them.
+   */
+  it("tells the resolver what it may run, and allows exactly that", () => {
+    c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$@"', ["a.txt"], {
+      configExtra: 'resolverCommands: ["npm run test", "pytest"],',
+    });
+    writeFileSync(
+      join(c.root, "resolver.sh"),
+      `${logged(c.root, RESOLVE_BOTH)}
+shift; printf '%s\n' "$@" > ../allowed`,
+    );
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(c.root, "prompts"), "utf8")).toContain(
+      "The checks you may run, and the only commands you may run: `npm run test`, `pytest`. Run them before you finish.",
+    );
+    expect(readFileSync(join(c.root, "allowed"), "utf8")).toBe(
+      "npm run test\npytest\n",
+    );
+  });
+
+  it("tells a resolver with no commands that the gates run after it", () => {
+    c = conflicting('bash "$(dirname "$PWD")/resolver.sh" "$1"');
+    writeFileSync(join(c.root, "resolver.sh"), logged(c.root, RESOLVE_BOTH));
+
+    runDispatcher(c, auto);
+
+    expect(readFileSync(join(c.root, "prompts"), "utf8")).toContain(
+      "You cannot run commands in this session. azelf runs the project's gates after you, and calls you once more with their output if they are red.",
+    );
+  });
+
+  /**
+   * A red gate right after a resolution goes back to the resolver once, with
+   * the gate's output. On consumer-b that was a generated file's count, one
+   * too high, and the slice parked on it. The gate here wants a.txt to read
+   * `fixed`; the resolver's second call, told what the gates said, writes it.
+   */
+  describe("when the gates are red after the resolution", () => {
+    const REPAIR = `if [[ "$1" == *"WHAT THE GATES SAID"* ]]; then
+  echo fixed > a.txt
+else
+${RESOLVE_BOTH}
+fi`;
+    const redUntilFixed = (repair = REPAIR) => {
+      const fx = conflicting(
+        'bash "$(dirname "$PWD")/resolver.sh" "$1"',
+        ["a.txt"],
+        {
+          gate: ["grep", "-qx", "fixed", "a.txt"],
+        },
+      );
+      writeFileSync(join(fx.root, "resolver.sh"), logged(fx.root, repair));
+      return fx;
+    };
+
+    it("gives the resolver one round with the gate's output, commits the repair, and lands", () => {
+      c = redUntilFixed();
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.out).toContain(
+        "the gates are red after the resolution — giving the resolver one round with their output …",
+      );
+      expect(r.out).toContain(
+        "✓ repaired a.txt and committed — the gates run again",
+      );
+      expect(r.code).toBe(0);
+      expect(calls(c)).toBe(2);
+      expect(readFileSync(join(c.main, "a.txt"), "utf8")).toBe("fixed\n");
+      expect(git(c.main, "log", "--format=%s", "-1")).toMatch(
+        /^fix: the resolution — the gates said: /,
+      );
+      const prompts = readFileSync(join(c.root, "prompts"), "utf8");
+      expect(prompts).toContain("WHAT THE GATES SAID:");
+      expect(prompts).toContain(
+        "1. Edit only the files this branch changes:\n\n  a.txt",
+      );
+      expect(
+        readFileSync(join(c.main, ".slice-reviews", "repair-40.md"), "utf8"),
+      ).toContain("ACCEPTED: a.txt edited and committed");
+    });
+
+    it("rejects a repair that strays, resets the branch, and parks", () => {
+      c = redUntilFixed(`if [[ "$1" == *"WHAT THE GATES SAID"* ]]; then
+  echo fixed > a.txt; echo x > other.txt
+else
+${RESOLVE_BOTH}
+fi`);
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.out).toContain(
+        "✗ repair rejected — it changed other.txt, which this slice does not; the branch is as the gates judged it.",
+      );
+      expect(r.out).toContain("the gates are red");
+      expect(r.code).toBe(1);
+      expect(existsSync(join(c.wt(40), "other.txt"))).toBe(false);
+      expect(readFileSync(join(c.wt(40), "a.txt"), "utf8")).toBe(
+        "main\nbranch\n",
+      );
+    });
+
+    it("parks when the gates are red after the repair too, once", () => {
+      c = redUntilFixed(`if [[ "$1" == *"WHAT THE GATES SAID"* ]]; then
+  echo still-wrong > a.txt
+else
+${RESOLVE_BOTH}
+fi`);
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.out).toContain("✓ repaired a.txt and committed");
+      expect(r.out).toContain("the gates are red after the repair too");
+      expect(r.code).toBe(1);
+      expect(calls(c)).toBe(2);
+    });
+
+    it("does not call the resolver for a slice whose rebase was clean", () => {
+      c = makeConsumer({
+        worktrees: [40],
+        remote: true,
+        resolve: ["bash", "-c", `echo call >> ../calls`, "resolver"],
+        gate: ["false"],
+      });
+      commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+      sh(c.wt(40), "./scripts/slice-done.sh");
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.out).toContain("the gates are red");
+      expect(r.out).not.toContain("giving the resolver one round");
+      expect(existsSync(join(c.root, "calls"))).toBe(false);
+    });
   });
 
   /**

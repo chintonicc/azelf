@@ -3119,6 +3119,8 @@ type GateRun = { ran: string[]; skipped: Gate[] };
 type GatesByHand = { byHand?: boolean; lock?: boolean };
 /** Set by `gatesPass` when it passes; read by the reviews through `alreadyRan`. */
 const gateRuns = new Map<TicketId, GateRun>();
+/** The failing gate's output, from the last `gatesPass` that failed on a gate. */
+const gateFailures = new Map<TicketId, string>();
 
 /**
  * Re-run the quality gates against a finished slice, in its own worktree,
@@ -3144,6 +3146,7 @@ function gatesPass(
 ): boolean {
   flakyGates.delete(n);
   gateRuns.delete(n);
+  gateFailures.delete(n);
   const wt = worktreeFor(n);
   const fail = (why: string) => {
     console.log(`  ✗ ${ref(n)} not landed — ${why}`);
@@ -3254,6 +3257,7 @@ function gatesPass(
 
   const DETAIL_LINES = 10;
   const detail = result.detail ?? [];
+  gateFailures.set(n, [result.why, ...detail].join("\n"));
   if (detail.length) {
     console.log(
       detail
@@ -3639,8 +3643,8 @@ RULES. These are not advice; a resolution that breaks one of them is thrown away
    the commit list says what it is landing on top of. The resolved file has to
    still do both.
 4. Verify before you say you are done: no \`<<<<<<<\`, \`=======\` or \`>>>>>>>\`
-   left in the files above, the files you touched still parse, and the
-   project's checks pass.
+   left in the files above, and the files you touched still parse.
+   ${checksSentence()}
 5. Resolve the conflict and NOTHING ELSE. Edit only the files listed above. Do
    not rename anything, do not take the opportunity to improve the code you are
    looking at. The diff you produce should be explicable as "this is what the
@@ -3652,6 +3656,65 @@ not run \`git add\`, \`git rebase --continue\`, \`git rebase --abort\`,
 continues the rebase itself once you have finished, and calls you again if the
 next commit stops too. Reading git — \`git diff\`, \`git log\`, \`git show\` — is
 fine. To resolve a conflict by deleting a file, delete it.`;
+}
+
+/** What the resolver may run: the config's `resolverCommands`, or nothing. */
+const resolverCommands: string[] = config.resolverCommands ?? [];
+
+/**
+ * The checks half of the resolver's rules, by what it may run. A headless run
+ * can run nothing it was not allowed, and a prompt that asked for "the
+ * project's checks" anyway got "every Python call in this session was
+ * refused" on consumer-b, and a resolution nobody had tested.
+ */
+const checksSentence = (): string =>
+  resolverCommands.length
+    ? `The checks you may run, and the only commands you may run: ${resolverCommands
+        .map((c) => `\`${c}\``)
+        .join(", ")}. Run them before you finish.`
+    : "You cannot run commands in this session. azelf runs the project's gates after you, and calls you once more with their output if they are red.";
+
+/**
+ * The prompt for the one repair round: the gates are red right after a
+ * resolution, and the resolver that made it gets their output and the files
+ * this branch changes. A repair is held to the resolution's rules, and to one
+ * more: it fixes the merge, not the test that caught it.
+ */
+function repairPrompt(t: Ticket, editable: string[], failure: string): string {
+  return `An earlier headless run resolved a rebase conflict on branch \`${branchFor(
+    t.id,
+  )}\`, azelf accepted the resolution, and the project's gates are now RED. Fix the resolution so they pass. That is the whole job.
+
+WHAT THE GATES SAID:
+
+${failure
+  .split("\n")
+  .map((l) => `  ${l}`)
+  .join("\n")}
+
+WHAT THIS BRANCH IS FOR — ticket ${ref(t.id)}, ${t.title}:
+
+${ticketBody(t.id)}
+
+RULES. These are not advice; a repair that breaks one of them is thrown away.
+
+1. Edit only the files this branch changes:
+
+${editable.map((f) => `  ${f}`).join("\n")}
+
+   A change anywhere else fails the repair.
+2. Fix the merge, not the check. A gate that says the merged result is wrong is
+   right until you have read both sides and found otherwise. Do not weaken, skip
+   or delete a test to make it pass.
+3. Both sides' work stays. If the gates cannot go green without discarding one
+   side, STOP: change nothing and print one line starting \`IRRECONCILABLE:\`
+   that says why.
+4. Verify before you say you are done: the files you touched still parse, and
+   no conflict markers. ${checksSentence()}
+
+HOW TO FINISH: edit the files and stop. Do not run \`git add\`, \`git commit\`,
+\`git reset\`, \`git stash\` or \`git rebase\`: azelf commits your edit itself and
+runs the gates again. Reading git is fine.`;
 }
 
 // The waits between tries of a git write that met a held index lock, in units
@@ -3916,6 +3979,7 @@ function resolveStops(t: Ticket, conflicted: string[]): boolean {
           replaying.ok ? replaying.out.trim() : "",
         ),
       ),
+      { commands: resolverCommands },
     );
     if (!argv) return give("the agent declined the headless run");
     const { out } = run(argv, {
@@ -4139,7 +4203,9 @@ function renumber(t: Ticket, clashes: NumberClash[]): boolean {
     const mv = gitWrite(["mv", c.file, c.to], wt);
     if (!mv.ok) return give(`git mv ${c.file} failed: ${mv.out.trim()}`);
   }
-  const argv = argvFor(argSafe(renumberPrompt(t, clashes, editable)));
+  const argv = argvFor(argSafe(renumberPrompt(t, clashes, editable)), {
+    commands: resolverCommands,
+  });
   if (!argv) return give("the agent declined the headless run");
   out = run(argv, {
     cwd: wt,
@@ -4195,6 +4261,121 @@ function renumber(t: Ticket, clashes: NumberClash[]): boolean {
   console.log("     ✓ renamed and committed — the gates run next");
   console.log(`     transcript: ${path}`);
   resolvedByAgent.add(t.id);
+  return true;
+}
+
+/**
+ * One more round for the resolver when the gates are red right after its
+ * resolution, or a renumbering: it is given the gate's output and the files
+ * this branch changes, and its edit is committed as its own commit, so the
+ * review reads the repair as what it is. The gates then run again, and a red
+ * gate after the repair parks, as a red gate always did. Once per land: the
+ * commit moves the head, and a retry rebases clean and is no resolution.
+ *
+ * WHY
+ * ---
+ * On consumer-b a resolver merged a generated inventory file by hand and
+ * left its count one too high. The gate said so, in one line, and the slice
+ * parked; the fix was one command, by a person, ten minutes later. Parking on
+ * the first red gate threw away the one run that had the whole context.
+ *
+ * True only when the new commit is there and the tree is clean. Anything
+ * else resets the branch to the resolution as the gates judged it.
+ */
+function repairResolution(t: Ticket, failure: string): boolean {
+  const argvFor = agent.resolve;
+  if (!argvFor) return false;
+  const wt = worktreeFor(t.id);
+  const head = run(["git", "rev-parse", "HEAD"], {
+    cwd: wt,
+    allowFail: true,
+  }).out.trim();
+  if (!head) return false;
+  const editable = changedIn(wt, `${baseBranch}...HEAD`);
+
+  console.log(
+    `\n  the gates are red after the resolution — giving the resolver one round with their output …`,
+  );
+
+  let out = "";
+  const give = (why: string): boolean => {
+    run(["git", "reset", "--hard", head], { cwd: wt, allowFail: true });
+    run(["git", "clean", "-fdq"], { cwd: wt, allowFail: true });
+    const path = saveReport(
+      `repair-${t.id}.md`,
+      `REJECTED: ${why}\n\nTHE GATES SAID:\n${failure}\n\n${
+        out.trim() || "(the agent printed nothing)"
+      }\n`,
+      `# Repair after red gates — ${ref(t.id)} ${t.title}`,
+    );
+    console.log(
+      `     ✗ repair rejected — ${why}; the branch is as the gates judged it.`,
+    );
+    console.log(`     transcript: ${path}`);
+    return false;
+  };
+
+  const argv = argvFor(argSafe(repairPrompt(t, editable, failure)), {
+    commands: resolverCommands,
+  });
+  if (!argv) return give("the agent declined the headless run");
+  out = run(argv, {
+    cwd: wt,
+    allowFail: true,
+    timeoutMs: RESOLVE_TIMEOUT_MS,
+  }).out;
+
+  const allowed = new Set(editable);
+  const touched = [
+    ...new Set([
+      ...pathsFrom(wt, ["diff", "--name-only", "HEAD"]),
+      ...pathsFrom(wt, ["ls-files", "--others", "--exclude-standard"]),
+    ]),
+  ];
+  const stray = touched.filter((p) => !allowed.has(p));
+  if (stray.length) {
+    return give(`it changed ${stray.join(", ")}, which this slice does not`);
+  }
+  const refused = irreconcilable(out);
+  if (refused !== null) return give(`the resolver says: ${refused}`);
+  if (touched.length === 0) return give("it changed nothing");
+  const markers = withMarkers(wt, touched);
+  if (markers.length) {
+    return give(`conflict markers left in ${markers.join(", ")}`);
+  }
+  const add = gitWrite(["add", "-A"], wt);
+  if (!add.ok) return give(`git add failed: ${add.out.trim()}`);
+  const commit = gitWrite(
+    [
+      "commit",
+      "--no-verify",
+      "-m",
+      `fix: the resolution — the gates said: ${firstLine(failure).slice(
+        0,
+        120,
+      )}`,
+    ],
+    wt,
+  );
+  if (!commit.ok) return give(`git commit failed: ${commit.out.trim()}`);
+  const dirty = pathsFrom(wt, ["status", "--porcelain"]);
+  if (dirty.length) {
+    return give(`the worktree is not clean: ${dirty.join(", ")}`);
+  }
+
+  const path = saveReport(
+    `repair-${t.id}.md`,
+    `ACCEPTED: ${touched.join(
+      ", ",
+    )} edited and committed. The gates run again.\n\nTHE GATES SAID:\n${failure}\n\n${
+      out.trim() || "(the agent printed nothing)"
+    }\n`,
+    `# Repair after red gates — ${ref(t.id)} ${t.title}`,
+  );
+  console.log(
+    `     ✓ repaired ${touched.join(", ")} and committed — the gates run again`,
+  );
+  console.log(`     transcript: ${path}`);
   return true;
 }
 
@@ -4752,7 +4933,17 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       );
     }
     if (!gatesPass(t.id, changed)) {
-      return park(t, "gates", "the gates are red");
+      // A resolution the gates refuse goes back to its resolver once, with
+      // what they said. Anything else parks as it always did.
+      if (
+        !resolved ||
+        !repairResolution(t, gateFailures.get(t.id) ?? "(no output)")
+      ) {
+        return park(t, "gates", "the gates are red");
+      }
+      if (!gatesPass(t.id, worktreeChanges(t.id))) {
+        return park(t, "gates", "the gates are red after the repair too");
+      }
     }
     // After the gates, not before: no point paying for a review of something
     // that doesn't compile, and the reviewer should see the rebased diff that

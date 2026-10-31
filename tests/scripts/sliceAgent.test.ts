@@ -39,6 +39,52 @@ describe("claude", () => {
   });
 
   /**
+   * The resolver may run only what the config names. The flag is variadic,
+   * so it comes before `-p`, which ends it: after the prompt it would take
+   * the prompt as a tool name. A prefix with a space is one pattern.
+   */
+  it("allows the configured commands to the resolver, before -p, one pattern each", () => {
+    expect(
+      claude({ which: present }).resolve?.("fix it", {
+        commands: ["npm run test", "pytest"],
+      }),
+    ).toEqual([
+      "claude",
+      "--allowedTools",
+      "Bash(npm run test:*)",
+      "Bash(pytest:*)",
+      "-p",
+      "--strict-mcp-config",
+      "--permission-mode",
+      "acceptEdits",
+      "fix it",
+    ]);
+    expect(
+      claude({ which: present }).resolve?.("fix it", { commands: [] }),
+    ).not.toContain("--allowedTools");
+  });
+
+  it("lets the reviewer read the configured directories, before -p", () => {
+    expect(
+      claude({ which: present }).review("why", {
+        readDirs: ["/srv/api", "/srv/specs"],
+      }),
+    ).toEqual([
+      "claude",
+      "--add-dir",
+      "/srv/api",
+      "/srv/specs",
+      "-p",
+      "--strict-mcp-config",
+      "why",
+    ]);
+    // And never the write permission, however far it may read.
+    expect(
+      claude({ which: present }).review("why", { readDirs: ["/srv/api"] }),
+    ).not.toContain("--permission-mode");
+  });
+
+  /**
    * The two headless capabilities are not one capability. A reviewer that can
    * edit the tree is a reviewer that can make its own findings go away, so the
    * review argv must stay the one without write permission.
@@ -156,6 +202,18 @@ describe("custom", () => {
         which: present,
       }).resolve?.("x"),
     ).toEqual(["a", "--write", "x"]);
+  });
+
+  it("hands the options through to a custom headless run that wants them", () => {
+    const a = custom({
+      name: "a",
+      sessionCommand: ["a"],
+      review: (p, o) => ["a", ...(o?.readDirs ?? []), p],
+      resolve: (p, o) => ["a", ...(o?.commands ?? []), p],
+      which: present,
+    });
+    expect(a.review("x", { readDirs: ["/d"] })).toEqual(["a", "/d", "x"]);
+    expect(a.resolve?.("x", { commands: ["t"] })).toEqual(["a", "t", "x"]);
   });
 
   it("refuses an empty sessionCommand rather than building a broken agent", () => {

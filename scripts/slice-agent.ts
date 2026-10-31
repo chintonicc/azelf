@@ -45,6 +45,21 @@
 
 import { spawnSync } from "node:child_process";
 
+/**
+ * What a headless review may reach beyond the worktree it runs in: the
+ * config's `reviewReadDirs`, already absolute. Empty is the worktree alone.
+ */
+export type ReviewOptions = { readDirs: string[] };
+
+/**
+ * What a resolver may run: the config's `resolverCommands`, as command
+ * prefixes. Empty means it edits and runs nothing, and the gates judge the
+ * result afterwards — which is what every resolution was until this existed:
+ * on consumer-b the resolver reported "every Python call in this session was
+ * refused" and handed back resolutions it had not tested.
+ */
+export type ResolveOptions = { commands: string[] };
+
 export type Agent = {
   /** Short, lowercase, for the shell bridge and error messages. */
   name: string;
@@ -74,8 +89,13 @@ export type Agent = {
    * mode. The prompt is passed in because agents differ on whether it is an
    * argument, a flag value, or stdin — and the ones that want stdin can return
    * null until this seam grows a stdin variant, which nothing needs yet.
+   *
+   * `opts.readDirs` are directories the reviewer may read besides its
+   * working directory. An agent that cannot widen its reach ignores them; the
+   * prompt names them anyway, so the reviewer at least knows what it was not
+   * shown.
    */
-  review(prompt: string): string[] | null;
+  review(prompt: string, opts?: ReviewOptions): string[] | null;
 
   /**
    * Full argv for a headless run WITH TOOLS, in a given working directory, or
@@ -93,8 +113,12 @@ export type Agent = {
    * review's isn't: the dispatcher runs the argv with `cwd` set to the slice's
    * worktree, so an agent that needs to be TOLD its directory does not fit this
    * seam and should return null rather than guess.
+   *
+   * `opts.commands` are the command prefixes it may run (the consumer's test
+   * command, say). An agent with no way to allow a command ignores them, and
+   * the prompt still says what the checks are.
    */
-  resolve?(prompt: string): string[] | null;
+  resolve?(prompt: string, opts?: ResolveOptions): string[] | null;
 };
 
 /** Injected so tests never look for a real binary. */
@@ -146,13 +170,31 @@ export type ClaudeOptions = {
 export function claude(opts: ClaudeOptions = {}): Agent {
   const bin = opts.bin ?? "claude";
   const which = opts.which ?? realWhich;
+  // `--add-dir` and `--allowedTools` are VARIADIC: they take every argument
+  // up to the next flag, so placed after `-p` they would swallow the prompt.
+  // They go first, and `-p` ends them. Each pattern is its own argument; a
+  // prefix with spaces (`npm run test`) stays one pattern that way. Checked
+  // on claude 2.1.314: two prefixes, one with a space, both ran.
+  const reach = (dirs: string[] = []) =>
+    dirs.length ? ["--add-dir", ...dirs] : [];
+  const allow = (commands: string[] = []) =>
+    commands.length
+      ? ["--allowedTools", ...commands.map((c) => `Bash(${c}:*)`)]
+      : [];
   return {
     name: "claude",
     problem: () => (which(bin) ? null : missing("claude", bin)),
     sessionCommand: [bin, ...(opts.sessionFlags ?? [])],
-    review: (prompt) => [bin, "-p", "--strict-mcp-config", prompt],
-    resolve: (prompt) => [
+    review: (prompt, o) => [
       bin,
+      ...reach(o?.readDirs),
+      "-p",
+      "--strict-mcp-config",
+      prompt,
+    ],
+    resolve: (prompt, o) => [
+      bin,
+      ...allow(o?.commands),
       "-p",
       "--strict-mcp-config",
       "--permission-mode",
@@ -219,12 +261,12 @@ export function codex(opts: CodexOptions = {}): Agent {
 export type CustomOptions = {
   name: string;
   sessionCommand: string[];
-  review?: (prompt: string) => string[] | null;
+  review?: (prompt: string, opts?: ReviewOptions) => string[] | null;
   /**
    * Headless AND able to write in the worktree. Left out means no resolver,
    * which is a complete answer: the `[a]` option is not offered.
    */
-  resolve?: (prompt: string) => string[] | null;
+  resolve?: (prompt: string, opts?: ResolveOptions) => string[] | null;
   which?: Which;
 };
 

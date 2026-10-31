@@ -220,12 +220,18 @@ export function makeConsumer(opts: {
       ? `\n  agent: custom({ name: "fake", sessionCommand: ${JSON.stringify(
           opts.agent ?? ["true"],
         )}${
+          // The prompt stays $1; the options the dispatcher passes follow it,
+          // so a fake can log what it was allowed to run or read.
           opts.resolve
-            ? `, resolve: (p) => [...${JSON.stringify(opts.resolve)}, p]`
+            ? `, resolve: (p, o) => [...${JSON.stringify(
+                opts.resolve,
+              )}, p, ...(o?.commands ?? [])]`
             : ""
         }${
           opts.review
-            ? `, review: (p) => [...${JSON.stringify(opts.review)}, p]`
+            ? `, review: (p, o) => [...${JSON.stringify(
+                opts.review,
+              )}, p, ...(o?.readDirs ?? [])]`
             : ""
         } }),`
       : "";

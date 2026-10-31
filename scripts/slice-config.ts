@@ -126,6 +126,20 @@ export type SliceConfig = {
    */
   afterLand?: string[];
   /**
+   * Commands the conflict resolver may run, as prefixes: the repo's test
+   * command, a compile check. Optional; without it the resolver edits and
+   * runs nothing, and only the gates afterwards say whether the resolution
+   * holds. Each prefix allows every command that starts with it.
+   *
+   *   resolverCommands: [".venv/bin/python -m pytest", "npm run test:alle"]
+   *
+   * On consumer-b the resolver's transcript read "every Python call in this
+   * session was refused": a headless run can run nothing it was not allowed,
+   * and the prompt asked it to check its work. Keep the list to what a
+   * resolution needs to prove itself; the resolver is an unwatched run.
+   */
+  resolverCommands?: string[];
+  /**
    * Free space, in GB, the dispatcher keeps where the worktrees go. Optional;
    * 10 when left out. Below it, nothing new is prepped: landing carries on,
    * and each land removes a worktree.
@@ -683,6 +697,16 @@ function validate(c: SliceConfig): SliceConfig {
     ) {
       bad(
         'afterLand must be an array of non-empty strings, like ["./scripts/health.sh"] — [] or left out runs nothing',
+      );
+    }
+  }
+  if (c.resolverCommands !== undefined) {
+    if (
+      !Array.isArray(c.resolverCommands) ||
+      c.resolverCommands.some((w) => typeof w !== "string" || w.trim() === "")
+    ) {
+      bad(
+        'resolverCommands must be an array of non-empty command prefixes, like ["npm test"] — [] or left out lets the resolver run nothing',
       );
     }
   }

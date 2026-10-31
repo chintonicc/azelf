@@ -512,6 +512,7 @@ export default {
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree. An untracked `slice.config.ts` belongs here only if sessions are to read it; the shims read it from the main checkout, so `./scripts/slice-gates.sh` and the DB lock work without. The shims and agent files `init` writes need not be listed: the prep copies those by its own list |
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
+| `resolverCommands` | `string[]?` | command prefixes the conflict resolver may run (`"npm test"`, `".venv/bin/python -m pytest"`); each allows every command starting with it. Left out, it runs nothing and the gates judge its work. See [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `keepAwake` | `boolean?` | on macOS, `caffeinate -is` for the life of a run. Default on; `false` lets the Mac sleep. `-s` holds only on mains power, and a closed lid sleeps anyway |
 | `quietAfterMinutes` | `number?` | minutes a running session may show no sign of work (a changed file, a commit, a write to its Claude Code transcript) before the run counts it as quiet. Default 30, `0` is off |
@@ -1041,7 +1042,10 @@ files and continues the rebase.
 Review and resolve are kept apart on purpose. A reviewer that can edit the tree is a
 reviewer that can make its own findings go away — so the review argv carries no write
 permission, and `claude()` spends `--permission-mode acceptEdits` only on the
-resolver.
+resolver. The resolver may also run what `resolverCommands` names, and nothing else:
+`claude()` turns each prefix into `--allowedTools "Bash(<prefix>:*)"`. A `custom()`
+agent's `resolve(prompt, { commands })` and `review(prompt, { readDirs })` get the
+same lists and may ignore them.
 
 An agent can have the first without the others. `codex()` declares no headless mode
 unless you pass `headless: true`, because its non-interactive invocation has not been
@@ -1488,6 +1492,31 @@ commit the resolution rebased onto, and the land then rebases again over what
 arrived since. That usually applies cleanly. If the new commits conflict too, the
 resolver gets one more pass; after two, the slice parks with
 `<base> moved twice while the agent was resolving`, on the last base it reached.
+
+**The resolver can run the checks, if you say which.** A headless run may run nothing
+it was not allowed, so without `resolverCommands` the prompt tells the resolver it
+cannot run commands and that the gates run after it; on consumer-b the transcript had
+read "every Python call in this session was refused" under a rule asking for the
+project's checks to pass. With the list, the prompt names the commands and asks for
+them to be run before it finishes. Keep it to what a resolution needs to prove itself.
+
+**A red gate right after a resolution goes back to the resolver once.** It gets the
+gate's output and the files this branch changes, may edit those and nothing else, and
+its edit is committed as its own commit — `fix: the resolution — the gates said: …` —
+so the review reads the repair as what it is. Then the gates run again:
+
+```
+  ✗ #105 not landed — `test:meldungen-inventar` exited 1
+      anzahl: expected 196, got 197
+  the gates are red after the resolution — giving the resolver one round with their output …
+     ✓ repaired scripts/meldungenInventar.json and committed — the gates run again
+     transcript: /…/.slice-reviews/repair-105.md
+```
+
+A repair that strays outside the slice's files, leaves markers, changes nothing or
+says `IRRECONCILABLE:` is reset, and the slice parks as a red gate always parked; so
+does a gate still red after the repair. One round: the repair commit moves the head,
+and a retry rebases clean, which is no resolution.
 
 Files that were in the slice's diff before and are not after are **reported, never
 gated**. A legitimate resolution can drop a file — the base branch may already have
