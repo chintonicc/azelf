@@ -119,6 +119,17 @@ after the heading. Line numbers are as of `547714a`.
   refuses too when one is gone. Accepted: the setting names a path the person keeps.
 - **Phases 2 and 3 touch the same four files** and went in as one commit.
 
+## Unobserved
+
+- **A real repair round.** The argv shape (`--allowedTools` before `-p`) was checked
+  against claude 2.1.314 by hand, and the flow is covered by tests with a fake
+  resolver; no real `claude -p` has yet repaired a real red gate. The first one on
+  consumer-b leaves `.slice-reviews/repair-<n>.md` in the main checkout: read it (did
+  it run the allowed command? did it fix the merge and not the test?) and record what
+  it did here, or in the friction log if it went wrong.
+- **A real `reviewReadDirs` review**: the same, for an `UNVERIFIED:` line that should
+  no longer appear once the reviewer can read the other repo.
+
 ## Order and cost
 
 Phase 1 is the largest: the agent seam, the prompt, and the repair round. Phases 2 and
