@@ -658,6 +658,9 @@ describe("what the run log says after a land", () => {
     commitIn(c.wt(41), "a.txt", "b\n", "feat: another a");
     await d.until(/#40✓ #41 {2}a\.txt/);
     expect(d.output()).toContain("✓ = already landed");
+    // Both added a.txt with different text: the open one meets a conflict at
+    // its rebase, and the report says so — the base stands in for the landed.
+    expect(d.output()).toContain("⚠ slices will conflict at the land");
   }, 60_000);
 
   it("reads a finished slice behind another land as to land, not blocked", () => {
@@ -674,6 +677,70 @@ describe("what the run log says after a land", () => {
     );
     expect(r.code).toBe(0);
   });
+});
+
+/**
+ * The overlap report asks git whether a pair will conflict. Two slices that
+ * raised one inventory total by one (consumer-b, #89 and #109) shared a file
+ * and conflicted at the land; the report used to say the opposite — "edits
+ * that CLASH are already caught, these apply cleanly" — and the second to land
+ * was parked at its rebase an hour later.
+ */
+describe("which overlaps will conflict", () => {
+  // The base has a five-line file, and both slices are cut on top of it.
+  const onFile = () => {
+    const fx = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      agent: ["true"],
+    });
+    commitIn(fx.main, "n.txt", "1\n2\n3\n4\n5\n", "chore: n");
+    git(fx.main, "push", "-q", "origin", "main");
+    for (const n of [40, 41]) git(fx.wt(n), "rebase", "-q", "main");
+    return fx;
+  };
+
+  it("says a pair that edits one line will conflict, and names the file", () => {
+    c = onFile();
+    commitIn(c.wt(40), "n.txt", "1\n2\n3a\n4\n5\n", "feat: 40");
+    commitIn(c.wt(41), "n.txt", "1\n2\n3b\n4\n5\n", "feat: 41");
+    sessions.push(fakeSession(c, 40), fakeSession(c, 41));
+
+    const r = runDispatcher(c, ["-y", "--once", "40", "41"]);
+
+    expect(r.out).toContain(
+      "⚠ slices will conflict at the land\n     #40 #41  n.txt",
+    );
+    expect(r.out).toContain("meets this at its rebase: the resolver,");
+    expect(r.out).not.toContain("editing the same files");
+  });
+
+  it("keeps a pair that merges clean under the soft warning", () => {
+    c = onFile();
+    commitIn(c.wt(40), "n.txt", "1a\n2\n3\n4\n5\n", "feat: 40");
+    commitIn(c.wt(41), "n.txt", "1\n2\n3\n4\n5b\n", "feat: 41");
+    sessions.push(fakeSession(c, 40), fakeSession(c, 41));
+
+    const r = runDispatcher(c, ["-y", "--once", "40", "41"]);
+
+    expect(r.out).toContain(
+      "⚠ slices are editing the same files\n     #40 #41  n.txt",
+    );
+    expect(r.out).toContain("merge cleanly onto each other");
+    expect(r.out).not.toContain("will conflict at the land");
+  });
+
+  it("reprints when a later commit turns clean into a conflict", async () => {
+    c = onFile();
+    commitIn(c.wt(40), "n.txt", "1a\n2\n3\n4\n5\n", "feat: 40");
+    commitIn(c.wt(41), "n.txt", "1\n2\n3\n4\n5b\n", "feat: 41");
+    sessions.push(fakeSession(c, 40), fakeSession(c, 41));
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "40", "41"]);
+    await d.until("⚠ slices are editing the same files");
+    commitIn(c.wt(41), "n.txt", "1b\n2\n3\n4\n5b\n", "feat: 41 again");
+    await d.until("⚠ slices will conflict at the land\n     #40 #41  n.txt");
+  }, 60_000);
 });
 
 /**

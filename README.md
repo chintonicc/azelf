@@ -1127,17 +1127,31 @@ production. That is the exception, not the pattern.
 ## When two slices touch the same file
 
 While a run is polling, the dispatcher compares what each open slice has committed
-and says so when more than one of them has changed the same file:
+and says so when more than one of them has changed the same file — in two blocks,
+because it asks git which pairs will conflict:
 
 ```
+  ⚠ slices will conflict at the land
+     #89 #109  tests/test_owner_id_inventory.py
+     The second of each pair to land meets this at its rebase: the resolver,
+     or a park. Settle it while both are open — say which change stands.
+
   ⚠ slices are editing the same files
      #18 #20  app/category/[id].tsx
      #19✓ #21  lib/categoryWindow.ts  tests/lib/categoryWindow.test.ts
-     A land rebases, so edits that CLASH are already caught. These are
-     the ones that apply cleanly and still disagree — worth a look while
-     both are open. Uncommitted work is not visible here.
+     These merge cleanly onto each other and may still disagree — worth a
+     look while both are open.
+     Uncommitted work is not visible here.
      ✓ = already landed, so the open one has to rebase over it.
 ```
+
+The first block is `git merge-tree --write-tree` on each pair (both branches, or the
+base branch against the open one once the other has landed), one call per pair per
+commit, and it lists the files git names as conflicted. It needs git 2.38; an older
+git is said once and the report names shared files only. The report used to claim
+that clashing edits "are already caught" by the land's rebase. They are — an hour
+later, with the slice parked. On consumer-b two slices each raised one inventory
+total by one, and the report had called that a clean pair.
 
 A landed slice stays in the report only for the slices that were open when it
 landed. One started afterwards is cut on top of it and has nothing to rebase over,
@@ -1155,12 +1169,13 @@ not. That is a BLOCK under the same rule as any other spec failure. It exists
 because of a pair that both applied cleanly: one landed a guard whose comment said
 its sibling joins it, and the sibling, written on the older base, never did.
 
-**This is warn-only, and it is about the soft case.** Landing rebases the slice
-onto the base branch, so two slices whose edits to one file textually conflict
-already fail loudly, at land time, with the slice parked and the reason on screen.
-What nothing caught before is the pair that both apply cleanly and still disagree —
-two agents restyling the same component, or adding the same helper twice under
-different names. A rebase is happy with that; a reviewer six commits later is not.
+**This is warn-only.** Landing rebases the slice onto the base branch, so a pair
+that conflicts is still handled there — by the resolver, or a park with the reason
+on screen; the first block only says it earlier, while someone can decide which
+change stands. The second block is the pair that both apply cleanly and still
+disagree — two agents restyling the same component, or adding the same helper twice
+under different names. A rebase is happy with that; a reviewer six commits later is
+not, and no tool can see it.
 
 Three properties worth knowing:
 

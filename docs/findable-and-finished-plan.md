@@ -1,6 +1,6 @@
 # Every worktree has the shims, the launcher is ours, a clash is said before the land, and a finished session is seen
 
-**Status:** in progress · Phase 1 landed 2026-10-30
+**Status:** in progress · Phase 1 landed 2026-10-30 (7a7f2e6), Phase 2 built 2026-10-30
 **Written:** 2026-10-30
 **Companion:** consumer-b's friction log, the fifteen entries dated 2026-10-30. Ten slice
 entries are one complaint, the four dispatcher entries are four, and one slice entry
@@ -166,22 +166,39 @@ after the heading. Line numbers are as of `2d00f7c`.
 
 ## Phase 2 — a clash is said before the land
 
-- [ ] 2a. `slice-run.ts`: `conflictOf(a, b)` runs merge-tree for a pair and returns the
+- [x] 2a. `slice-run.ts`: `conflictBetween(a, b)` (the plan said `conflictOf`) runs merge-tree for a pair and returns the
   conflicted files, cached by both heads; for a landed member the base branch stands
   in. A usage error from git (no `--write-tree`) disables it for the run and is said
   once.
-- [ ] 2b. `reportOverlaps` (`:5044`): each overlap group is split by `conflictOf` into
+- [x] 2b. `reportOverlaps` (`:5044`): each overlap group is split by `conflictOf` into
   the two blocks above. The "will conflict" block lists the files git named, the other
   the shared files as today. The "once per change" key carries the verdicts. The
   `✓ = already landed` line stays with whichever block has one.
-- [ ] 2c. README: the paragraph on the overlap report says what each block means and
+- [x] 2c. README: the paragraph on the overlap report says what each block means and
   that a conflict is said while both slices are open, not at the land.
-- [ ] 2d. Tests in `sliceRun.test.ts`: two open slices change one line → "will conflict
+- [x] 2d. Tests in `sliceRun.test.ts`: two open slices change one line → "will conflict
   at the land" naming the file; two open slices change different lines of one file →
   "editing the same files" and not the other block; one landed, the open one on the
   same line → "will conflict" with the `✓`; the verdict changing after a commit reprints.
 
 ### What building it found
+
+- **`--name-only --no-messages` is the whole parse.** The output is the tree on the
+  first line and the conflicted paths after it, nothing else; checked in a scratch
+  repo before writing. Exit 0 clean, 1 conflict, anything else "cannot say" (no merge
+  base, a git before 2.38), which keeps the pair under the soft block as before.
+- **The landed half of a pair is the base branch.** `conflictsIn` stands the base in
+  for a landed member, so the round after a land checks the open slice against what
+  actually landed — the "after each land" check the entry asked for, with no second
+  code path. The existing test for that pair (both slices added `a.txt`) is an
+  add/add conflict and now asserts the conflict block.
+- **The verdict is part of the once-per-change key**, so a pair that turns from
+  clean to conflicting with one commit is reprinted; the third test commits that
+  turn and waits for the second block.
+- **One trailer for both blocks.** "Uncommitted work is not visible here" and the
+  `✓` legend apply to either, so they follow whichever blocks printed.
+- **The old-git path is reached by the text `unknown option`** and is untested here:
+  this machine's git is 2.46.
 
 ## Phase 3 — a finished session is seen
 

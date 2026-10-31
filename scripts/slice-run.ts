@@ -126,6 +126,7 @@ import {
 // overlap section, because only this file knows where a slice's branch is.
 import {
   type NumberClash,
+  type Overlap,
   findNumberClashes,
   findOverlaps,
   ignores,
@@ -5009,6 +5010,108 @@ function containsLanded(landed: TicketId, open: TicketId): boolean {
   return ok;
 }
 
+/** Pairs of heads already asked of git this run, by their answer. */
+const conflictCache = new Map<string, string[] | null>();
+
+/** Set when this git has no `merge-tree --write-tree` (before 2.38); said once. */
+let mergeTreeUnavailable = false;
+
+/**
+ * The files that conflict when `a` and `b` merge — asked of git, not inferred
+ * from file names. `git merge-tree --write-tree` does the merge in memory and
+ * names the conflicted paths without touching a worktree: exit 0 is clean, 1
+ * is a conflict with the paths after the tree on the first line, anything
+ * else is git unable to say (no merge base; a git too old for the flag), and
+ * that is null — the pair is then reported by file name alone, as before.
+ *
+ * WHY THE REPORT ASKS
+ * -------------------
+ * It used to say "a land rebases, so edits that CLASH are already caught —
+ * these are the ones that apply cleanly and still disagree", from the file
+ * names alone. On consumer-b two slices each raised one inventory total by one,
+ * on the same line with the same comment: the report said they applied
+ * cleanly, and the second to land was parked at its rebase an hour later.
+ * One `git merge-tree` by hand had shown the conflict at once.
+ *
+ * Cached by the two heads: a pair is asked again only when one of them moves,
+ * so this costs one git call per overlapping pair per commit, not per round.
+ */
+function conflictBetween(
+  a: { ref: string; head: string },
+  b: { ref: string; head: string },
+): string[] | null {
+  if (mergeTreeUnavailable) return null;
+  const key = [a.head, b.head].sort().join(":");
+  const hit = conflictCache.get(key);
+  if (hit !== undefined) return hit;
+  const r = run(
+    [
+      "git",
+      "merge-tree",
+      "--write-tree",
+      "--name-only",
+      "--no-messages",
+      a.ref,
+      b.ref,
+    ],
+    { allowFail: true },
+  );
+  let files: string[] | null;
+  if (r.status === 0) {
+    files = [];
+  } else if (r.status === 1) {
+    files = r.out
+      .split("\n")
+      .slice(1)
+      .map((l) => l.trim())
+      .filter(Boolean);
+  } else if (/unknown option|usage: git merge-tree/i.test(r.out)) {
+    mergeTreeUnavailable = true;
+    console.log(
+      `\n  note: this git cannot say which overlapping slices will conflict (${
+        r.out.split("\n")[0]
+      }); git 2.38 or later can. The report below names shared files only.`,
+    );
+    return null;
+  } else {
+    files = null;
+  }
+  conflictCache.set(key, files);
+  return files;
+}
+
+/**
+ * The files git says will conflict within one overlap group: every pair of
+ * its members, one merge-tree each. A landed member is stood in for by the
+ * base branch, which contains it — so the round after a land, the open half
+ * of a pair is checked against what actually landed, with no second code
+ * path. Empty when every pair merges clean, or when git cannot say.
+ */
+function conflictsIn(o: Overlap, open: Set<TicketId>): string[] {
+  const files = new Set<string>();
+  const side = (id: TicketId) => {
+    if (open.has(id)) {
+      const head = branchHead(id);
+      return head ? { ref: branchFor(id), head } : null;
+    }
+    const head = baseHead();
+    return head ? { ref: baseBranch, head } : null;
+  };
+  for (let i = 0; i < o.tickets.length; i++) {
+    for (let j = i + 1; j < o.tickets.length; j++) {
+      const a = o.tickets[i] as TicketId;
+      const b = o.tickets[j] as TicketId;
+      // Two landed members are history the base branch reconciled already.
+      if (!open.has(a) && !open.has(b)) continue;
+      const sa = side(a);
+      const sb = side(b);
+      if (!sa || !sb) continue;
+      for (const f of conflictBetween(sa, sb) ?? []) files.add(f);
+    }
+  }
+  return [...files].sort();
+}
+
 /** The last report printed, so an unchanged one is not printed again. */
 let lastOverlaps = "";
 
@@ -5026,6 +5129,12 @@ const numberedIgnored = ignores(config.numberedIgnore ?? []);
  * once per round. A poll loop that reprints the same warning every 30s for an
  * hour has taught you to skip it by the third time.
  *
+ * Two blocks. "Will conflict at the land" is what git says of a pair
+ * (`conflictsIn`): the second to land meets a rebase conflict, so this is said
+ * while both are open and someone can still decide which change stands.
+ * "Editing the same files" is the rest — pairs that merge clean and may still
+ * disagree, which no tool can see and a reader can.
+ *
  * Printed BEFORE the land, so on the round where one of a colliding pair
  * lands, you read the collision and then read which half of it went to the
  * base branch, in that order.
@@ -5033,8 +5142,8 @@ const numberedIgnored = ignores(config.numberedIgnore ?? []);
  * Warn-only, and deliberately: two slices touching one file is often correct
  * — a barrel file, a lockfile, the same test helper. The dispatcher cannot
  * tell which of those it is looking at, and a gate that guessed would block
- * the common case to catch the rare one. See slice-overlap.ts for the half of
- * the problem a rebase already covers.
+ * the common case to catch the rare one. A conflict is a fact, and still only
+ * said: the resolver or a park handles it at the land, as today.
  */
 function reportOverlaps(all: Ticket[]): void {
   const changed = new Map<TicketId, string[]>();
@@ -5060,31 +5169,65 @@ function reportOverlaps(all: Ticket[]): void {
     ignore: overlapIgnored,
     absorbed: containsLanded,
   });
+  // What git says of each group, asked once per pair of heads. Part of the
+  // key: a pair that turns from clean to conflicting with one commit is a
+  // change worth reprinting for.
+  const verdicts = overlaps.map((o) => conflictsIn(o, open));
   const key = overlaps
-    .map((o) => `${o.tickets.join(",")}:${o.files.join(",")}`)
+    .map(
+      (o, i) =>
+        `${o.tickets.join(",")}:${o.files.join(",")}${
+          verdicts[i]?.length ? `!${(verdicts[i] as string[]).join(",")}` : ""
+        }`,
+    )
     .join("|");
   if (key === lastOverlaps) return;
   lastOverlaps = key;
   if (overlaps.length === 0) return;
 
   const anyLanded = overlaps.some((o) => o.tickets.some((id) => !open.has(id)));
-  console.log("\n  ⚠ slices are editing the same files");
-  for (const o of overlaps) {
-    const shown = o.files.slice(0, OVERLAP_FILES_SHOWN).join("  ");
-    const rest = o.files.length - OVERLAP_FILES_SHOWN;
+  const line = (o: Overlap, files: string[]) => {
+    const shown = files.slice(0, OVERLAP_FILES_SHOWN).join("  ");
+    const rest = files.length - OVERLAP_FILES_SHOWN;
     const more = rest > 0 ? `  +${rest} more` : "";
     const ids = o.tickets
       .map((id) => (open.has(id) ? ref(id) : `${ref(id)}✓`))
       .join(" ");
     console.log(`     ${ids}  ${shown}${more}`);
+  };
+  const clashing = overlaps.filter((_, i) => (verdicts[i] ?? []).length > 0);
+  const soft = overlaps.filter((_, i) => (verdicts[i] ?? []).length === 0);
+  if (clashing.length) {
+    console.log("\n  ⚠ slices will conflict at the land");
+    for (const o of clashing) {
+      line(o, verdicts[overlaps.indexOf(o)] as string[]);
+    }
+    console.log(
+      "     The second of each pair to land meets this at its rebase: the resolver,",
+    );
+    console.log(
+      "     or a park. Settle it while both are open — say which change stands.",
+    );
   }
-  console.log(
-    "     A land rebases, so edits that CLASH are already caught. These are",
-  );
-  console.log(
-    "     the ones that apply cleanly and still disagree — worth a look while",
-  );
-  console.log("     both are open. Uncommitted work is not visible here.");
+  if (soft.length) {
+    console.log("\n  ⚠ slices are editing the same files");
+    for (const o of soft) line(o, o.files);
+    if (mergeTreeUnavailable) {
+      console.log(
+        "     A land rebases, so edits that CLASH are caught there. These may be",
+      );
+      console.log(
+        "     the ones that apply cleanly and still disagree — worth a look while",
+      );
+      console.log("     both are open.");
+    } else {
+      console.log(
+        "     These merge cleanly onto each other and may still disagree — worth a",
+      );
+      console.log("     look while both are open.");
+    }
+  }
+  console.log("     Uncommitted work is not visible here.");
   if (anyLanded) {
     console.log(
       "     ✓ = already landed, so the open one has to rebase over it.",
