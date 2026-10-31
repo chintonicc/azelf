@@ -1093,6 +1093,51 @@ describe("the spec review and the parent spec", () => {
     expect(prompt).not.toContain("parent");
   });
 
+  /**
+   * `reviewReadDirs`: the spec reviewer is told where else to look, and the
+   * agent is given the directories (fixture.ts passes them after the prompt;
+   * sliceAgent.test.ts has claude's flag). The standards review is about this
+   * repo and is told nothing.
+   */
+  it("names the directories the reviewer may read beyond the worktree", () => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      review: [
+        "bash",
+        "-c",
+        'printf "%s\\n=====\\n" "$1" >> ../prompts; shift; printf "%s\\n" "$@" >> ../dirs; echo "VERDICT: PASS"',
+        "reviewer",
+      ],
+      configExtra: 'reviewReadDirs: ["../extra"],',
+    });
+    c = fx;
+    mkdirSync(join(fx.root, "extra"));
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+    expect(r.out).toContain("landing #40");
+
+    expect(specPrompt(fx)).toContain(
+      "You may also read these directories outside the worktree, where this repo's tickets place facts the repo does not hold (another repo's fields, a spec folder): ",
+    );
+    expect(specPrompt(fx)).toContain(
+      "/extra. What you find there counts as checked.",
+    );
+    const standards = readFileSync(join(fx.root, "prompts"), "utf8")
+      .split("\n=====\n")
+      .find((p) => p.includes("coding standards"));
+    expect(standards).not.toContain("You may also read");
+    expect(readFileSync(join(fx.root, "dirs"), "utf8")).toMatch(/\/extra\n/);
+  });
+
+  it("the config refuses a directory that is not there", () => {
+    c = makeConsumer({ configExtra: 'reviewReadDirs: ["../nope"],' });
+    const r = runDispatcher(c, ["--plan"]);
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain("reviewReadDirs[0] (../nope) is not a directory: ");
+  });
+
   it("says so in the report when the parent cannot be read", () => {
     const fx = makeConsumer({
       worktrees: [40],
@@ -2194,6 +2239,88 @@ describe("azelf changing under a running dispatcher", () => {
 
     expect(d.output().split(CHANGED).length - 1).toBe(1);
   }, 60_000);
+});
+
+/**
+ * `refresh`: after a rebase that brought a matching file from the base, a
+ * step runs in the worktree and what it changes is committed. On consumer-b a
+ * generated file's count was merged wrong by hand, and a shared venv was
+ * behind main's pins; both are "run the generator again after the rebase".
+ */
+describe("refreshing after a rebase", () => {
+  const REGEN = `refresh: [{ when: ["gen/*.txt"], run: ["bash", "-c", "cat gen/in.txt gen/in.txt > gen/out.txt"], name: "regen" }],`;
+  const withBase = (extra: string) => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      configExtra: extra,
+    });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return fx;
+  };
+  const auto = ["--auto", "--once", "-y", "--no-review", "40"];
+
+  it("runs the step the base's change matched, commits its output, and lands", () => {
+    c = withBase(REGEN);
+    mkdirSync(join(c.main, "gen"));
+    commitIn(c.main, "gen/in.txt", "2\n", "main: in");
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.out).toContain(
+      "#40: the rebase brought gen/in.txt — refreshing: regen …",
+    );
+    expect(r.out).toContain("✓ refreshed: committed gen/out.txt (regen)");
+    expect(r.code).toBe(0);
+    expect(readFileSync(join(c.main, "gen/out.txt"), "utf8")).toBe("2\n2\n");
+    expect(git(c.main, "log", "--format=%s", "-2")).toBe(
+      "chore: refresh after the rebase — regen\nfeat: a",
+    );
+  });
+
+  it("runs nothing when the base's change matches no step, or the base did not move", () => {
+    c = withBase(REGEN);
+    commitIn(c.main, "other.txt", "x\n", "main: other");
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.out).not.toContain("refreshing:");
+    expect(r.code).toBe(0);
+  });
+
+  it("parks on a step that fails, and says how to go on", () => {
+    c = withBase(
+      'refresh: [{ when: ["gen/**"], run: ["false"], name: "broken" }],',
+    );
+    mkdirSync(join(c.main, "gen"));
+    commitIn(c.main, "gen/in.txt", "2\n", "main: in");
+
+    const r = runDispatcher(c, auto);
+
+    expect(r.out).toContain(
+      "refresh step `broken` failed after the rebase — run it in the worktree, commit what it changes, and azelf retry 40",
+    );
+    expect(r.code).toBe(1);
+    expect(existsSync(join(c.wt(40), "a.txt"))).toBe(true);
+  });
+
+  it("the config refuses a step without patterns or without a command", () => {
+    for (const value of [
+      '[{ when: [], run: ["true"] }]',
+      '[{ when: ["a"], run: "true" }]',
+      '"true"',
+    ]) {
+      c = makeConsumer({ configExtra: `refresh: ${value},` });
+      const r = runDispatcher(c, ["--plan"]);
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain(
+        "refresh must be an array of { when: [path patterns], run: [argv], name? }",
+      );
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

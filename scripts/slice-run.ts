@@ -88,6 +88,7 @@ import {
   quietAfterMinutes,
   ref,
   repoRoot,
+  reviewReadDirs,
   ticketFromBranch,
   tracker,
   worktreeFor,
@@ -2274,7 +2275,7 @@ type AgentAnswer = { text: string | null; why?: string };
  * saying which it was.
  */
 function askAgent(prompt: string, cwd: string): AgentAnswer {
-  const argv = agent.review(argSafe(prompt));
+  const argv = agent.review(argSafe(prompt), { readDirs: reviewReadDirs });
   if (!argv) return { text: null, why: "the agent has no headless mode" };
   const { ok, out, status } = run(argv, {
     cwd,
@@ -2452,7 +2453,15 @@ The SPEC is what this slice must do. The PARENT SPEC is the larger spec it is on
         : ""
     }
 
-${alreadyRan(context.gates)}
+${alreadyRan(context.gates)}${
+  reviewReadDirs.length
+    ? `
+
+You may also read these directories outside the worktree, where this repo's tickets place facts the repo does not hold (another repo's fields, a spec folder): ${reviewReadDirs.join(
+        ", ",
+      )}. What you find there counts as checked.`
+    : ""
+}
 
 SPEC:
 ${spec}
@@ -4795,6 +4804,100 @@ function reinstallAfterRebase(id: TicketId, before: string | null): boolean {
   return false;
 }
 
+/** Slices with `refresh` steps owed from a step that failed, by step index. */
+const refreshOwed = new Map<TicketId, number[]>();
+
+/**
+ * Run the config's `refresh` steps whose `when` the base's new commits
+ * matched, in the worktree, and commit what they changed. After the
+ * reinstall and before the gates, like the reinstall: the gates judge the
+ * tree as the base would have it.
+ *
+ * `true`, or the reason to park. A step that failed is owed, with every step
+ * after it, until it has run: the retry finds the branch already rebased
+ * and would otherwise see no base move and run nothing — the same hole the
+ * reinstall has, and the same patch. In this process only; a run that was
+ * restarted does not know.
+ */
+function refreshAfterRebase(
+  id: TicketId,
+  before: string | null,
+): true | string {
+  const steps = config.refresh ?? [];
+  if (steps.length === 0) return true;
+  const after = mergeBase(id);
+  const due = [...(refreshOwed.get(id) ?? [])];
+  const why = new Map<number, string>();
+  for (const i of due) why.set(i, "owed from a refresh that failed earlier");
+  if (before && after && before !== after) {
+    const brought = run(["git", "diff", "--name-only", before, after], {
+      allowFail: true,
+    })
+      .out.split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean);
+    steps.forEach((s, i) => {
+      const matched = brought.filter(ignores(s.when));
+      if (matched.length && !due.includes(i)) {
+        due.push(i);
+        why.set(i, `the rebase brought ${matched.join(", ")}`);
+      }
+    });
+  }
+  if (due.length === 0) return true;
+  due.sort((a, b) => a - b);
+  const wt = worktreeFor(id);
+  const nameOf = (i: number) => {
+    const s = steps[i] as NonNullable<typeof config.refresh>[number];
+    return s.name ?? s.run.join(" ");
+  };
+  for (const [k, i] of due.entries()) {
+    const s = steps[i] as NonNullable<typeof config.refresh>[number];
+    console.log(`  ${ref(id)}: ${why.get(i)} — refreshing: ${nameOf(i)} …`);
+    const { ok, out } = run(s.run, { cwd: wt, allowFail: true });
+    if (!ok) {
+      refreshOwed.set(id, due.slice(k));
+      for (const line of out.split("\n").slice(-8)) {
+        console.log(`     ${line}`);
+      }
+      return `refresh step \`${nameOf(
+        i,
+      )}\` failed after the rebase — run it in the worktree, commit what it changes, and azelf retry ${id}`;
+    }
+  }
+  refreshOwed.delete(id);
+  const changed = pathsFrom(wt, ["status", "--porcelain"]);
+  if (changed.length === 0) {
+    console.log(`     ✓ refreshed — nothing to commit`);
+    return true;
+  }
+  const names = due.map(nameOf).join(", ");
+  const add = gitWrite(["add", "-A"], wt);
+  if (!add.ok) return `git add failed after the refresh: ${add.out.trim()}`;
+  // --no-verify, as a renumbering: the gates run on this commit next.
+  const commit = gitWrite(
+    [
+      "commit",
+      "--no-verify",
+      "-m",
+      `chore: refresh after the rebase — ${names}`,
+    ],
+    wt,
+  );
+  if (!commit.ok) {
+    return `git commit failed after the refresh: ${commit.out.trim()}`;
+  }
+  console.log(
+    `     ✓ refreshed: committed ${pathsFrom(wt, [
+      "diff",
+      "--name-only",
+      "HEAD~1",
+      "HEAD",
+    ]).join(", ")} (${names})`,
+  );
+  return true;
+}
+
 /** Times one `tryLand` rebases again when the base moved before it could land. */
 const LAND_RACES = 2;
 
@@ -4914,6 +5017,8 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
         `${failed} failed after the rebase (the lockfile may not match package.json) — run ${failed} in the worktree, commit the lockfile if it changed, and azelf retry ${t.id}`,
       );
     }
+    const refreshed = refreshAfterRebase(t.id, baseBefore);
+    if (refreshed !== true) return park(t, "gates", refreshed);
     // A branch the base already contains did not fail a gate: it landed
     // already, or the base was moved past it by hand. Parked as a land, with
     // the question, where it used to read "the gates are red" — which on

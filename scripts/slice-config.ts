@@ -46,7 +46,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { type Agent, claude } from "./slice-agent";
 import { azelfFiles } from "./slice-files";
@@ -139,6 +139,38 @@ export type SliceConfig = {
    * resolution needs to prove itself; the resolver is an unwatched run.
    */
   resolverCommands?: string[];
+  /**
+   * Directories the spec reviewer may read besides the worktree, relative to
+   * the repo root or absolute. Optional. For a ticket whose facts live
+   * elsewhere: the other repo's clone, a folder of specs outside the
+   * checkout. On consumer-b the reviewer marked every such fact `UNVERIFIED:`
+   * and a person compared field names by hand. Each must exist: the point is
+   * a path you know.
+   *
+   *   reviewReadDirs: ["../api", "../design/specs"]
+   */
+  reviewReadDirs?: string[];
+  /**
+   * Steps to run in a slice's worktree after a rebase, when the base brought a
+   * change to a file that matches `when`. Optional; nothing runs without it.
+   * `when` takes the overlap report's patterns (`*`, `**`, a trailing `/`),
+   * `run` is an argv, `name` is for the log (the command when left out).
+   *
+   *   refresh: [
+   *     { when: ["requirements*.txt"], run: [".venv/bin/pip", "install", "-r", "requirements-dev.txt"] },
+   *     { when: ["scripts/inventory.json"], run: ["node", "scripts/inventory.mjs", "--write"], name: "inventory" },
+   *   ]
+   *
+   * Two things on consumer-b wanted this: a venv shared by the install step,
+   * pinned by requirements.txt, which main raised, so every slice's suite was
+   * red for a reason none of them caused; and a generated file with a count
+   * in it, merged by hand at a conflict and wrong by one. Tracked changes a
+   * step leaves are committed on the branch as one commit, so a regenerated
+   * file lands; a venv install leaves none. A step that fails parks the
+   * slice, as a red gate would. Lockfiles need no entry: `install` already
+   * runs again when the base moved one.
+   */
+  refresh?: { when: string[]; run: string[]; name?: string }[];
   /**
    * Free space, in GB, the dispatcher keeps where the worktrees go. Optional;
    * 10 when left out. Below it, nothing new is prepped: landing carries on,
@@ -700,6 +732,44 @@ function validate(c: SliceConfig): SliceConfig {
       );
     }
   }
+  if (c.reviewReadDirs !== undefined) {
+    if (
+      !Array.isArray(c.reviewReadDirs) ||
+      c.reviewReadDirs.some((d) => typeof d !== "string" || d.trim() === "")
+    ) {
+      bad(
+        'reviewReadDirs must be an array of directories, like ["../api"] — relative to the repo root, or absolute',
+      );
+    } else {
+      c.reviewReadDirs.forEach((d, i) => {
+        const abs = resolve(repoRoot, d);
+        if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+          bad(`reviewReadDirs[${i}] (${d}) is not a directory: ${abs}`);
+        }
+      });
+    }
+  }
+  if (c.refresh !== undefined) {
+    const words = (a: unknown): a is string[] =>
+      Array.isArray(a) &&
+      a.length > 0 &&
+      a.every((w) => typeof w === "string" && w.trim() !== "");
+    if (
+      !Array.isArray(c.refresh) ||
+      c.refresh.some(
+        (s) =>
+          !s ||
+          typeof s !== "object" ||
+          !words(s.when) ||
+          !words(s.run) ||
+          (s.name !== undefined && typeof s.name !== "string"),
+      )
+    ) {
+      bad(
+        'refresh must be an array of { when: [path patterns], run: [argv], name? }, like [{ when: ["requirements*.txt"], run: ["pip", "install", "-r", "requirements.txt"] }]',
+      );
+    }
+  }
   if (c.resolverCommands !== undefined) {
     if (
       !Array.isArray(c.resolverCommands) ||
@@ -814,6 +884,10 @@ export const launcher: Launcher = config.launcher ?? manual();
 export const agent: Agent = config.agent ?? claude();
 /** The configured disk floor, or 10 GB. */
 export const minFreeDiskGb: number = config.minFreeDiskGb ?? 10;
+/** The spec reviewer's extra directories, absolute; `[]` without the setting. */
+export const reviewReadDirs: string[] = (config.reviewReadDirs ?? []).map((d) =>
+  resolve(repoRoot, d),
+);
 /** Minutes without a sign of work before a session is quiet, or 30; 0 is off. */
 export const quietAfterMinutes: number = config.quietAfterMinutes ?? 30;
 

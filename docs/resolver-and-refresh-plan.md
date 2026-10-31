@@ -1,6 +1,6 @@
 # The resolver can run the checks, a red gate goes back to it once, a rebase refreshes what it moved, and the reviewer reads beyond the worktree
 
-**Status:** in progress
+**Status:** complete · Phase 1 landed 2026-10-31 (0cfa1cc), Phases 2 and 3 built 2026-10-31, in one commit
 **Written:** 2026-10-31
 **Companion:** the still-open consumer-b entries of 2026-10-22: Backend #140/#139
 (resolver refused every command), Frontend #105 (resolver merged a generated file by
@@ -91,18 +91,33 @@ after the heading. Line numbers are as of `547714a`.
 
 ## Phase 2 — a rebase refreshes what it moved
 
-- [ ] 2a. `refresh?: { when: string[]; run: string[]; name?: string }[]`, validated.
-- [ ] 2b. `refreshAfterRebase(id, before)` after `reinstallAfterRebase` in `tryLand`;
+- [x] 2a. `refresh?: { when: string[]; run: string[]; name?: string }[]`, validated.
+- [x] 2b. `refreshAfterRebase(id, before)` after `reinstallAfterRebase` in `tryLand`;
   owed on failure; commits tracked changes; says what ran and why.
-- [ ] 2c. Tests: a base change matching `when` runs `run` and commits its output; no
+- [x] 2c. Tests: a base change matching `when` runs `run` and commits its output; no
   match runs nothing; a failing `run` parks and is retried; README.
+
+### What building it found
+
+- **The owed list is this process's.** A refresh that failed is owed on the retry within
+  the run, as a reinstall is; a run restarted after the park finds the branch rebased,
+  sees no base move, and runs nothing. The park line says to run the step by hand and
+  commit, which is the path that does not depend on it.
+- **"Nothing to commit" is said**, so a venv install that changes no tracked file is
+  seen to have run.
 
 ## Phase 3 — the reviewer reads beyond the worktree
 
-- [ ] 3a. `reviewReadDirs?: string[]`, resolved against the repo root, must exist.
-- [ ] 3b. `askAgent` passes them; `reviewSpec`'s prompt lists them.
-- [ ] 3c. Tests: `claude().review` argv; the spec prompt names the directory; a missing
+- [x] 3a. `reviewReadDirs?: string[]`, resolved against the repo root, must exist.
+- [x] 3b. `askAgent` passes them; `reviewSpec`'s prompt lists them.
+- [x] 3c. Tests: `claude().review` argv; the spec prompt names the directory; a missing
   directory is refused; README.
+
+### What building it found
+
+- **The directories are checked when the config loads**, so `azelf gates` in a worktree
+  refuses too when one is gone. Accepted: the setting names a path the person keeps.
+- **Phases 2 and 3 touch the same four files** and went in as one commit.
 
 ## Order and cost
 

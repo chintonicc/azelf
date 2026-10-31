@@ -512,6 +512,8 @@ export default {
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree. An untracked `slice.config.ts` belongs here only if sessions are to read it; the shims read it from the main checkout, so `./scripts/slice-gates.sh` and the DB lock work without. The shims and agent files `init` writes need not be listed: the prep copies those by its own list |
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
+| `refresh` | `{ when, run, name? }[]?` | steps run in the worktree after a rebase brought a change to a file matching `when`; what they change is committed on the branch. See [Refreshing after a rebase](#refreshing-after-a-rebase) |
+| `reviewReadDirs` | `string[]?` | directories the spec reviewer may read besides the worktree, relative to the repo root or absolute; each must exist. For tickets whose facts live in another repo or a spec folder |
 | `resolverCommands` | `string[]?` | command prefixes the conflict resolver may run (`"npm test"`, `".venv/bin/python -m pytest"`); each allows every command starting with it. Left out, it runs nothing and the gates judge its work. See [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
 | `keepAwake` | `boolean?` | on macOS, `caffeinate -is` for the life of a run. Default on; `false` lets the Mac sleep. `-s` holds only on mains power, and a closed lid sleeps anyway |
@@ -1047,6 +1049,12 @@ resolver. The resolver may also run what `resolverCommands` names, and nothing e
 agent's `resolve(prompt, { commands })` and `review(prompt, { readDirs })` get the
 same lists and may ignore them.
 
+The spec reviewer reads the worktree, and `reviewReadDirs` widens that: for `claude()`
+each directory is an `--add-dir`, and the spec review's prompt names them and says what
+is found there counts as checked. On consumer-b a ticket that placed half its facts in
+the backend repo got `UNVERIFIED:` for all of it, and a person compared field names by
+hand. The standards and plan reviews are about this repo and are not widened.
+
 An agent can have the first without the others. `codex()` declares no headless mode
 unless you pass `headless: true`, because its non-interactive invocation has not been
 run against these review prompts — and a review that returns prose with no parseable
@@ -1538,6 +1546,37 @@ the spec review **blocks** a slice whose rebase the agent resolved, where it is
 otherwise advisory without `--auto`. With review off the gates are the only check on
 the resolution, and the run header says so. `--auto-resolve` with an agent that has
 no resolver is refused before anything is dispatched.
+
+### Refreshing after a rebase
+
+A rebase brings the base's changes under a slice, and some of them want a step run
+before the gates judge the tree: a generator whose output is tracked, an environment
+pinned by a file the base moved. `install` already runs again when the base moved a
+lockfile; `refresh` is the same idea for everything else:
+
+```ts
+refresh: [
+  { when: ["requirements*.txt"], run: [".venv/bin/pip", "install", "-r", "requirements-dev.txt"] },
+  { when: ["scripts/inventory.json"], run: ["node", "scripts/inventory.mjs", "--write"], name: "inventory" },
+],
+```
+
+After the rebase, each step whose `when` (the overlap report's patterns) matches a
+file the base's new commits changed runs in the worktree, in order. Tracked changes
+the steps leave are committed on the branch as one commit, `chore: refresh after the
+rebase — <names>`, so a regenerated file lands and the gates judge it; an install
+leaves nothing to commit. A step that fails parks the slice with the step's name and
+is owed on the retry within the run:
+
+```
+  #105: the rebase brought scripts/inventory.json — refreshing: inventory …
+     ✓ refreshed: committed scripts/inventory.json (inventory)
+```
+
+On consumer-b two things wanted this: a generated inventory file merged by hand at a
+conflict with its count wrong by one, and a venv shared through the install step that
+main's `requirements.txt` had outrun, so every slice's suite was red for a reason none
+of them caused.
 
 ### What retries a parked slice
 
