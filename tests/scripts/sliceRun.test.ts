@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import {
   appendFileSync,
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -745,7 +746,7 @@ describe("a session whose turn is over", () => {
     );
   }, 60_000);
 
-  // A run that ends on its own (--once here; a SIGTERM prints nothing) says
+  // A run that ends (--once here, a signal in the next test) says
   // at the end what is still waiting, and what releases it.
   it("lists them when the run exits", () => {
     c = finished();
@@ -763,6 +764,25 @@ describe("a session whose turn is over", () => {
     );
     expect(r.out).toContain("Their sessions are still open in their tabs");
   });
+
+  // A run stopped by a signal used to end where it stood, with none of this.
+  it("lists them when the run is stopped with SIGTERM, and exits 143", async () => {
+    c = finished();
+    sh(c.wt(40), "./scripts/slice-finished.sh -m 'Built a.txt.'");
+
+    d = startDispatcher(c, ["-y", "--interval", "30", "40"]);
+    await d.until("1 waiting for you");
+    const code = await d.stop();
+
+    expect(code).toBe(143);
+    expect(d.output()).toContain(
+      "SIGTERM — stopping after this round. Sessions keep running in their tabs.",
+    );
+    expect(d.output()).toContain("── waiting for you (1)");
+    expect(d.output()).toContain(
+      "To pick the run up again:\n\n    ./scripts/azelf run -y --interval 30 40",
+    );
+  }, 60_000);
 });
 
 /**
@@ -827,6 +847,49 @@ describe("which overlaps will conflict", () => {
     commitIn(c.wt(41), "n.txt", "1b\n2\n3\n4\n5b\n", "feat: 41 again");
     await d.until("⚠ slices will conflict at the land\n     #40 #41  n.txt");
   }, 60_000);
+
+  // Before 2.38 git has no `merge-tree --write-tree`. A `git` first on PATH
+  // that refuses the flag the way an old one does, and is the real one for
+  // everything else.
+  it("falls back to file names, once, on a git without merge-tree --write-tree", () => {
+    c = onFile();
+    commitIn(c.wt(40), "n.txt", "1\n2\n3a\n4\n5\n", "feat: 40");
+    commitIn(c.wt(41), "n.txt", "1\n2\n3b\n4\n5\n", "feat: 41");
+    sessions.push(fakeSession(c, 40), fakeSession(c, 41));
+    const realGit = spawnSync("bash", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const bin = join(c.root, "old-git");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      `#!/usr/bin/env bash
+if [[ "$1" == merge-tree && " $* " == *" --write-tree "* ]]; then
+  echo "error: unknown option \\\`write-tree'" >&2
+  echo "usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>" >&2
+  exit 129
+fi
+exec ${realGit} "$@"
+`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+
+    const r = runDispatcher(c, ["-y", "--once", "40", "41"], {
+      env: { PATH: `${bin}:${process.env.PATH}` },
+    });
+
+    expect(r.out).toContain(
+      "note: this git cannot say which overlapping slices will conflict (error: unknown option `write-tree'); git 2.38 or later can.",
+    );
+    expect(r.out.match(/this git cannot say/g)?.length).toBe(1);
+    expect(r.out).toContain(
+      "⚠ slices are editing the same files\n     #40 #41  n.txt",
+    );
+    expect(r.out).toContain(
+      "A land rebases, so edits that CLASH are caught there.",
+    );
+    expect(r.out).not.toContain("will conflict at the land");
+  });
 });
 
 /**

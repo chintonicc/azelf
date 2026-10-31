@@ -266,11 +266,87 @@ function run(
   ]
     .filter(Boolean)
     .join("\n");
+  // Ctrl-C reaches every process in the terminal's foreground group, so a
+  // gate or a resolver that died of SIGINT is the person stopping the run.
+  // Noted here, synchronously: the handler below runs only when the round
+  // next yields, and the rest of the round must not open a tab first.
+  if (
+    watchingSignals &&
+    (proc.signal === "SIGINT" || proc.signal === "SIGTERM")
+  ) {
+    noteStopSignal(proc.signal);
+  }
   const ok = proc.status === 0;
   if (!ok && !opts.allowFail) {
     throw new Error(`${cmd.join(" ")} failed:\n${out}`);
   }
   return { ok, out, status: proc.status ?? null };
+}
+
+/**
+ * The signal that is stopping this run, once one has arrived. A run stopped
+ * by SIGINT or SIGTERM used to end where it stood: no parked list, no
+ * "waiting for you", no resume command, and no release of its ticket claims,
+ * because the `exit` handler does not run on a signal left to its default.
+ * Now the first signal ends the round's sleep and leaves through the normal
+ * ending; a second one exits at once.
+ *
+ * What a handler cannot do: run while a child holds this process in
+ * `spawnSync`. Under Ctrl-C that is moot — the child got the SIGINT too and
+ * is gone, and `run()` notes it on the way out. A `kill` sent to this process
+ * alone waits for the gate or resolver in progress to finish.
+ *
+ * Watched from the first round on (`watchSignals`). Before it nothing has
+ * started, and Ctrl-C while the plan is read ends the process as it always
+ * did.
+ */
+let stoppedBy: "SIGINT" | "SIGTERM" | null = null;
+/** Ends the sleep between rounds early; set only while sleeping. */
+let wakeFromSleep: (() => void) | null = null;
+
+function noteStopSignal(sig: "SIGINT" | "SIGTERM"): void {
+  if (stoppedBy) return;
+  stoppedBy = sig;
+  console.log(
+    `\n  ${sig} — stopping after this round. Sessions keep running in their tabs. ${sig} again quits at once.`,
+  );
+  wakeFromSleep?.();
+}
+
+const onStopSignal = {
+  SIGINT: () => stopSignalArrived("SIGINT"),
+  SIGTERM: () => stopSignalArrived("SIGTERM"),
+};
+function stopSignalArrived(sig: "SIGINT" | "SIGTERM"): void {
+  // The second one: the person meant it. `process.exit` still runs the
+  // `exit` handlers, so the claims are released either way.
+  if (stoppedBy) process.exit(sig === "SIGINT" ? 130 : 143);
+  noteStopSignal(sig);
+}
+let watchingSignals = false;
+function watchSignals(on: boolean): void {
+  if (on === watchingSignals) return;
+  watchingSignals = on;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    if (on) process.on(sig, onStopSignal[sig]);
+    else process.off(sig, onStopSignal[sig]);
+  }
+}
+
+/**
+ * `prompt()` with Ctrl-C as it was. The prompt reads stdin synchronously, so
+ * a handler installed above never runs during it, and Ctrl-C at "proceed?"
+ * did nothing until Enter. Without a listener the signal has its default
+ * again and ends the process, which at a question is what Ctrl-C means.
+ */
+function ask(question: string): string | null {
+  const was = watchingSignals;
+  watchSignals(false);
+  try {
+    return prompt(question);
+  } finally {
+    watchSignals(was);
+  }
 }
 
 /**
@@ -893,7 +969,7 @@ function syncEdges(missing: MissingEdge[], assumeYes: boolean): void {
   );
   if (!assumeYes) {
     // `null` is a prompt nobody could answer: no terminal on stdin.
-    const answer = prompt("\nwrite them? [y/N]");
+    const answer = ask("\nwrite them? [y/N]");
     if (!/^y(es)?$/i.test((answer ?? "").trim())) {
       console.log(
         answer === null
@@ -4317,7 +4393,7 @@ function askAboutBlocked(
     }[r] retry now   [f] land anyway   [p] park it   [q] stop the run`,
   );
   const answer = (
-    prompt(`     what now? [${canResolve ? "a/" : ""}r/f/p/q]`) ?? ""
+    ask(`     what now? [${canResolve ? "a/" : ""}r/f/p/q]`) ?? ""
   )
     .trim()
     .toLowerCase();
@@ -4942,9 +5018,10 @@ function releaseClaims(): void {
 
 /**
  * Takes every ticket of the plan, or none and exits 1. Released when this
- * process exits. A run stopped by a signal leaves them to the next run's
- * takeover: a JS signal handler runs only between rounds here, so one would
- * hold Ctrl-C back for as long as a gate or a resolver takes.
+ * process exits, a stop by signal included: the first signal leaves through
+ * the normal ending and the second through `process.exit`, and both run the
+ * `exit` handler (see `stoppedBy`). Only SIGKILL leaves them to the next
+ * run's takeover.
  */
 function claimTickets(plan: Ticket[]): void {
   process.on("exit", releaseClaims);
@@ -5774,7 +5851,7 @@ console.log(
 );
 
 if (!assumeYes) {
-  const answer = prompt("\nproceed? [y/N]") ?? "";
+  const answer = ask("\nproceed? [y/N]") ?? "";
   if (!/^y(es)?$/i.test(answer.trim())) {
     console.log("stopped.");
     process.exit(0);
@@ -5906,8 +5983,10 @@ function stopOnError(why: string): void {
 
 // Around the loop, so a round that throws ends it the way the stops inside it
 // do. A plan-time error is left to throw: nothing had started.
+watchSignals(true);
 try {
   for (;;) {
+    if (stoppedBy) break;
     round += 1;
     sessionAnswers.clear();
     noteAzelfChange();
@@ -5960,6 +6039,9 @@ try {
       );
       break;
     }
+    // Before anything is launched: a stop that arrived during the land, or
+    // was noted by a child that died of it, opens no new tab.
+    if (stoppedBy) break;
 
     // The DB lock, read once per round. A held lock no longer stops the wave:
     // it used to ("DB lock held — not starting anything"), and on consumer-a
@@ -6314,7 +6396,15 @@ try {
       break;
     }
 
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await new Promise<void>((r) => {
+      if (stoppedBy) return r();
+      const timer = setTimeout(r, intervalMs);
+      wakeFromSleep = () => {
+        clearTimeout(timer);
+        r();
+      };
+    });
+    wakeFromSleep = null;
   }
 } catch (e) {
   stopOnError(errorLine(e));
@@ -6418,7 +6508,7 @@ if (parked.size > 0) {
   );
   console.log(`  To pick the run up again:\n\n    ${resumeCommand()}`);
   process.exitCode = 1;
-} else if (stoppedOnError) {
+} else if (stoppedOnError || stoppedBy) {
   console.log(`\n  To pick the run up again:\n\n    ${resumeCommand()}`);
 }
 
@@ -6490,3 +6580,8 @@ if (planReview) {
     if (!process.exitCode) process.exitCode = 2;
   }
 }
+
+// Last, over whatever the ending set: a run that was stopped exits as the
+// shell says a stopped process does, so a wrapper can tell it from one that
+// finished with work left (1) or with a review to read (2).
+if (stoppedBy) process.exitCode = stoppedBy === "SIGINT" ? 130 : 143;
