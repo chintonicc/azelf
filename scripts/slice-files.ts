@@ -60,6 +60,7 @@ export const SHIMS: Shim[] = [
   { name: "slice-session.sh", how: "exec" },
   { name: "slice-land.sh", how: "exec" },
   { name: "slice-done.sh", how: "exec" },
+  { name: "slice-finished.sh", how: "exec" },
   { name: "session-commit.sh", how: "exec" },
   { name: "format.sh", how: "exec" },
   { name: "slice-gates.sh", how: "exec" },

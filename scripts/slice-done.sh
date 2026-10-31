@@ -16,13 +16,20 @@
 # It writes a marker, and scripts/slice-run.ts picks it up, re-runs the gates
 # itself, lands it and closes the ticket — which unblocks the next slice.
 #
-# WHAT IT DELIBERATELY DOES NOT DO
-# --------------------------------
-# It does not land anything. The judgement ("the ticket is actually
+# WHAT IT IS, AND WHAT IT IS NOT
+# ------------------------------
+# It lands nothing itself. The judgement ("the ticket is actually
 # implemented") stays here with you; the clerical work goes to the dispatcher.
 # That split is the whole point: an agent can leave a branch committed, clean
 # and gate-green while the ticket is half-built, and no automated check can
 # tell the difference. This marker is you saying it isn't.
+#
+# But with a dispatcher running, this IS the act that lands: it rebases, gates
+# and pushes the base branch on this marker, and on a repo whose base branch
+# deploys, that push is the deploy. "Finished" and "may land" are one act
+# here, on purpose — which is why, without --auto, it is a person's. A session
+# whose turn is over and who is not that person says so with
+# slice-finished.sh, which lands nothing and leaves this to you.
 #
 # If you're not running slice-run.ts, this prints the command to land by hand
 # and changes nothing else.
@@ -106,6 +113,7 @@ if $handing_over; then
   bun "$SLICE_AZELF_DIR/scripts/slice-run.ts" --hold "$ticket" --by "its session" --why "$why"
   printf '%s\n' "$session_pid" >"$worktree_root/.slice-interrupted"
   rm -f "$worktree_root/.slice-ready-to-land"
+  rm -f "$worktree_root/.slice-finished"
   echo "  end your turn — a person takes it from here"
   exit 0
 fi
@@ -190,6 +198,9 @@ fi
 # it actually landed as, so there is something true to compare against.
 printf '%s\n%s\n' "$session_pid" "$(git rev-parse HEAD)" >"$worktree_root/.slice-ready-to-land"
 rm -f "$live_marker"
+# The turn-is-over marker (slice-finished.sh) is superseded: this slice is to
+# land now, not waiting for a person.
+rm -f "$worktree_root/.slice-finished"
 
 echo "✓ $(slice_ref "$ticket") marked done ($to_land commit(s) to land)$counted"
 echo

@@ -1,6 +1,6 @@
 # Every worktree has the shims, the launcher is ours, a clash is said before the land, and a finished session is seen
 
-**Status:** in progress · Phase 1 landed 2026-10-30 (7a7f2e6), Phase 2 built 2026-10-30
+**Status:** complete · Phase 1 landed 2026-10-30 (7a7f2e6), Phase 2 (85bd56f), Phase 3 built 2026-10-30
 **Written:** 2026-10-30
 **Companion:** consumer-b's friction log, the fifteen entries dated 2026-10-30. Ten slice
 entries are one complaint, the four dispatcher entries are four, and one slice entry
@@ -202,24 +202,24 @@ after the heading. Line numbers are as of `2d00f7c`.
 
 ## Phase 3 — a finished session is seen
 
-- [ ] 3a. `scripts/slice-finished.sh` and its shim: from a slice worktree, `-m <text>`
+- [x] 3a. `scripts/slice-finished.sh` and its shim: from a slice worktree, `-m <text>`
   or `-F <file>` (`-` for stdin), `--stuck` optional. Writes `.slice-finished`: the head,
   `stuck` or `finished`, a blank line, the report. Refuses an empty report and a
   worktree that is not a slice's. Clears nothing. `slice-done.sh` removes it (`:191`);
   `slice-session.sh` removes it when a session starts (`:519`).
-- [ ] 3b. `slice-run.ts`: `finishedAt(n)` reads the marker; `waitingForYou(n)` is a
+- [x] 3b. `slice-run.ts`: `finishedSaid(n)` reads the marker (the plan said `finishedAt`); `waitingForYou(n)` is a
   live session whose marker names `branchHead(n)`. The round line (`:5947`) counts those
   under "waiting for you" and not "running"; `[round N] #89 finished its turn — report
   in <worktree>/.slice-finished; ./scripts/slice-done.sh there lands it` once per marker,
   and "#89 is stuck: <first line>" for `--stuck`. The end-of-run summary lists them.
-- [ ] 3c. The marker in `EXCLUDE_BLOCK` (`slice-init.ts:75`); README "twelve" → the
+- [x] 3c. The marker in `EXCLUDE_BLOCK` (`slice-init.ts:75`); README "twelve" → the
   counted number (`:137`, `:166`).
-- [ ] 3d. The skill's finish: without a start instruction, write the report with
+- [x] 3d. The skill's finish: without a start instruction, write the report with
   `./scripts/slice-finished.sh -F - <<'EOF' … EOF` and end the turn; the "gates will
   not go green" and "blocked on the lock" endings do the same with `--stuck`. `azelf
   init` rewrites a skill it wrote.
-- [ ] 3e. `slice-done.sh:19–28` and README `:408`: what it triggers.
-- [ ] 3f. Tests
+- [x] 3e. `slice-done.sh:19–28` and README `:408`: what it triggers.
+- [x] 3f. Tests
   - `slice-finished.sh`: writes head and report; `-F -` reads stdin; refuses empty;
     `slice-done.sh` removes it.
   - `sliceRun.test.ts` with `fakeSession`: marker at head → "1 waiting for you" and the
@@ -227,6 +227,24 @@ after the heading. Line numbers are as of `2d00f7c`.
   - `sliceInit.test.ts`: thirteen patterns; the skill names `slice-finished.sh`.
 
 ### What building it found
+
+- **A finished marker refuses a dirty tree; a stuck one does not.** For the reason
+  `slice-done.sh` refuses one: a person reading "finished" over uncommitted work would
+  land a branch that does not contain it. A stuck session routinely leaves some, and
+  the skill tells it to leave the worktree as it is.
+- **A run killed by SIGTERM prints nothing at the end**, so the "waiting for you"
+  block at exit is reached by a run that ends on its own — `--once` in the test, a
+  completed plan, a stall. Said in the test rather than changed: the signal path is
+  older than this plan and no entry asked for it.
+- **`--once` stops before the round line.** The test of the exit block asserts the
+  block and the report path, not the count; the count is asserted by the two tests
+  that run with an interval.
+- **The line every land prints is `✓ closed #N`**, not `✓ finished the land of #N`,
+  which belongs to a land that ran across rounds. The first test waits on the former.
+- **The skill's "Do **not** run it yourself" has to stay on one line**: the init test
+  matches it, and a rewrap put a line break through it once.
+- **`round` is a module-level `let` declared after `noteFinished`**, which prints it;
+  a function body may read a later `let`, and the call comes from inside the loop.
 
 ## Order and cost
 

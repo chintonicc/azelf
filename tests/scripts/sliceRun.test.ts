@@ -680,6 +680,92 @@ describe("what the run log says after a land", () => {
 });
 
 /**
+ * Without --auto a session finishes, says so in its tab and sits at its
+ * prompt, and its shell is alive: on consumer-b the run said "3 running" for
+ * hours over three sessions that were done inside ten minutes, and the report
+ * each wrote was in its tab and nowhere else. slice-finished.sh is what a
+ * session says instead; the dispatcher counts it as waiting for a person and
+ * names the report. It lands nothing: slice-done.sh stays the act that does.
+ */
+describe("a session whose turn is over", () => {
+  const finished = () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sessions.push(fakeSession(fx, 40));
+    return fx;
+  };
+
+  it("is waiting for you, not running, until its branch moves or it is marked done", async () => {
+    c = finished();
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"]);
+    await d.until("[round 1] 1 running · 0 blocked · 1 open");
+
+    sh(
+      c.wt(40),
+      "./scripts/slice-finished.sh -m 'Built a.txt. Look at line 1.'",
+    );
+    await d.until("0 running · 1 waiting for you · 0 blocked · 1 open");
+    const head = git(c.wt(40), "rev-parse", "--short=7", "HEAD");
+    expect(d.output()).toContain(
+      `#40 finished its turn at ${head} — report in ${c.wt(
+        40,
+      )}/.slice-finished\n  read it, then ./scripts/slice-done.sh there lands it, or tell the session to go on`,
+    );
+    expect(d.output()).not.toContain("landing #40");
+
+    // The session went on: the marker names an older head, and it is running.
+    commitIn(c.wt(40), "a.txt", "aa\n", "feat: more a");
+    await d.until(/(1 running · 0 blocked · 1 open[\s\S]*){2}/);
+
+    // Said again at the new head, once.
+    sh(c.wt(40), "./scripts/slice-finished.sh -m 'Built more a.'");
+    await d.until(/(finished its turn at [\s\S]*){2}/);
+    expect(d.output().match(/finished its turn at/g)?.length).toBe(2);
+
+    // Marked done: the marker goes, and the slice is to land.
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    expect(existsSync(join(c.wt(40), ".slice-finished"))).toBe(false);
+    await d.until("✓ closed #40");
+  }, 60_000);
+
+  it("says a stuck session is stuck, with the first line of its report", async () => {
+    c = finished();
+    writeFileSync(join(c.wt(40), "b.txt"), "half\n");
+    sh(
+      c.wt(40),
+      "./scripts/slice-finished.sh --stuck -m $'gates red: test_b fails\\nb.txt is uncommitted'",
+    );
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"]);
+    await d.until("0 running · 1 waiting for you · 0 blocked · 1 open");
+    expect(d.output()).toContain(
+      `#40 is stuck: gates red: test_b fails\n  its report: ${c.wt(
+        40,
+      )}/.slice-finished — a person takes it from here`,
+    );
+  }, 60_000);
+
+  // A run that ends on its own (--once here; a SIGTERM prints nothing) says
+  // at the end what is still waiting, and what releases it.
+  it("lists them when the run exits", () => {
+    c = finished();
+    sh(c.wt(40), "./scripts/slice-finished.sh -m 'Built a.txt.'");
+
+    const r = runDispatcher(c, ["-y", "--once", "40"]);
+
+    // --once stops before the round line; the block at the end is the point.
+    expect(r.out).toContain("── waiting for you (1)");
+    const head = git(c.wt(40), "rev-parse", "--short=7", "HEAD");
+    expect(r.out).toContain(
+      `  #40  finished at ${head}\n     report: ${c.wt(
+        40,
+      )}/.slice-finished\n     ./scripts/slice-done.sh in ${c.wt(40)} lands it`,
+    );
+    expect(r.out).toContain("Their sessions are still open in their tabs");
+  });
+});
+
+/**
  * The overlap report asks git whether a pair will conflict. Two slices that
  * raised one inventory total by one (consumer-b, #89 and #109) shared a file
  * and conflicted at the land; the report used to say the opposite — "edits

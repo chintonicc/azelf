@@ -190,6 +190,7 @@ export function makeConsumer(opts: {
   }
   for (const s of [
     "slice-done.sh",
+    "slice-finished.sh",
     "slice-land.sh",
     "session-commit.sh",
     "db-lock.sh",

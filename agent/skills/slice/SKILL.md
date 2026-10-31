@@ -96,9 +96,18 @@ Then exit. The dispatcher re-runs the gates, lands the branch and closes the tic
 which unblocks whatever was waiting on it.
 
 **It did not, or there was no start instruction.** Stop with the tree committed and
-the gates green. Say the slice is ready and that `./scripts/slice-done.sh` releases
-it. Do **not** run it yourself: a land pushes the base branch, and here a human
-decides when that happens.
+the gates green, and say so where the dispatcher can see it:
+
+```sh
+./scripts/slice-finished.sh -F - <<'EOF'
+<your report: what you built, what you checked, what a reviewer should look at>
+EOF
+```
+
+That lands nothing. The dispatcher counts this slice as waiting for a person instead
+of running, names your report, and `./scripts/slice-done.sh` releases it.
+Do **not** run it yourself: a land pushes the base branch, and here a human decides
+when that happens. Then end your turn.
 
 `slice-done.sh` refuses on a dirty tree and refuses a branch with no new commits.
 Both refusals are correct — fix the cause, do not work around them.
@@ -136,12 +145,16 @@ on in this tab, or finish the work by hand.
 ## If the gates will not go green
 
 Leave the worktree exactly as it is. Do **not** run `slice-done.sh`. Say what is
-failing, and exit.
+failing where the dispatcher can see it, and exit:
+
+```sh
+./scripts/slice-finished.sh --stuck -m "<what fails, and where your work is>"
+```
 
 The same if you are blocked on the DB lock: leave the worktree clean of changes
 under `exclusiveLockPaths` if you can (`git stash push -- <those paths>` is fine),
-otherwise leave it and say so, and end your turn. Do not wait in the session for the
-lock to clear.
+otherwise leave it, say so the same way (`--stuck`), and end your turn. Do not wait
+in the session for the lock to clear.
 
 A stranded worktree costs a directory and five seconds to clean up. A bad land costs
 the base branch everyone else is cutting from. That trade is the reason declaring

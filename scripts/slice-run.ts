@@ -1053,6 +1053,8 @@ function printTree(tickets: Ticket[]): number {
 
 const LIVE_MARKER = ".slice-live";
 const READY_MARKER = ".slice-ready-to-land";
+/** Written by slice-finished.sh: the session's turn is over. See `waitingForYou`. */
+const FINISHED_MARKER = ".slice-finished";
 
 /**
  * Three different questions, which an earlier version answered with one check
@@ -1347,6 +1349,85 @@ function occupied(n: TicketId): boolean {
   if (hasSession(n)) return true;
   const t = launchedAt.get(n);
   return t !== undefined && Date.now() - t < launcher.startingGraceMs;
+}
+
+/**
+ * What a session said when its turn ended (slice-finished.sh): the head it
+ * said it at, finished or stuck, and its report. Null without the marker, or
+ * with one that does not parse.
+ */
+type Finished = { head: string; kind: "finished" | "stuck"; report: string };
+function finishedSaid(n: TicketId): Finished | null {
+  let text: string;
+  try {
+    text = readFileSync(join(worktreeFor(n), FINISHED_MARKER), "utf8");
+  } catch {
+    return null;
+  }
+  const [head = "", kind = "", ...rest] = text.split("\n");
+  if (!/^[0-9a-f]{40}$/.test(head.trim())) return null;
+  const k = kind.trim();
+  if (k !== "finished" && k !== "stuck") return null;
+  return { head: head.trim(), kind: k, report: rest.join("\n").trim() };
+}
+
+/**
+ * A live session whose turn is over, at the branch's current head: waiting
+ * for a person, not running.
+ *
+ * Without --auto a session finishes, says so in its tab and sits at its
+ * prompt. Its shell is alive, so `occupied` is true, and on consumer-b the
+ * run said "3 running" for hours over three sessions that had been done
+ * inside ten minutes; the person read commit times and the quiet of the
+ * worktrees instead, and copied each report out of its tab. The marker is
+ * what a session says instead, report included.
+ *
+ * A marker behind the branch is stale — the session went on — and the slice
+ * is running again. A slice marked done is to land, whatever it said before.
+ */
+function waitingForYou(n: TicketId): Finished | null {
+  if (!occupied(n) || isReadyToLand(n)) return null;
+  const said = finishedSaid(n);
+  if (!said) return null;
+  return said.head === branchHead(n) ? said : null;
+}
+
+/** What each slice's session last said, as `head:kind`, so it is said once. */
+const saidFinished = new Map<TicketId, string>();
+
+/** The first line of a report, for a one-line mention of it. */
+const firstLine = (s: string): string => s.split("\n")[0]?.trim() ?? "";
+
+/**
+ * Say once, when it changes, that a session's turn is over and where its
+ * report is — the line a person at the dispatcher, or a supervising session,
+ * reads instead of the tab. Said again only for a new marker: a session told
+ * to go on that finishes a second time has a new head.
+ */
+function noteFinished(all: Ticket[]): void {
+  for (const t of all) {
+    if (!t.open) continue;
+    const said = waitingForYou(t.id);
+    const key = said ? `${said.head}:${said.kind}` : "";
+    if (key === (saidFinished.get(t.id) ?? "")) continue;
+    saidFinished.set(t.id, key);
+    if (!said) continue;
+    const report = `${worktreeFor(t.id)}/${FINISHED_MARKER}`;
+    if (said.kind === "stuck") {
+      console.log(
+        `\n[round ${round}] ${ref(t.id)} is stuck: ${firstLine(
+          said.report,
+        )}\n  its report: ${report} — a person takes it from here; its session is open in its tab`,
+      );
+    } else {
+      console.log(
+        `\n[round ${round}] ${ref(t.id)} finished its turn at ${said.head.slice(
+          0,
+          7,
+        )} — report in ${report}\n  read it, then ./scripts/slice-done.sh there lands it, or tell the session to go on`,
+      );
+    }
+  }
 }
 
 /**
@@ -5854,6 +5935,7 @@ try {
     reportOverlaps(tickets);
     noteHolds(tickets);
     noteHandWork(tickets);
+    noteFinished(tickets);
 
     // Land before launching, so a slot freed this round is refilled this round.
     // One per round: every land fast-forwards the same master in the same main
@@ -6054,7 +6136,14 @@ try {
       (t) => holds.has(t.id) && !occupied(t.id) && !parked.has(t.id),
     );
     const held = openNow.filter((t) => holds.has(t.id)).length;
-    const running = openNow.filter((t) => occupied(t.id));
+    // A live session whose turn is over is waiting for a person, not running:
+    // its report is in its worktree, and slice-done.sh there lands it.
+    const waitingOnYou = openNow.filter(
+      (t) => occupied(t.id) && waitingForYou(t.id) !== null,
+    );
+    const running = openNow.filter(
+      (t) => occupied(t.id) && !waitingOnYou.includes(t),
+    );
     const toLand = openNow.filter(
       (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
     );
@@ -6070,6 +6159,7 @@ try {
     const queued =
       openNow.length -
       running.length -
+      waitingOnYou.length -
       toLand.length -
       blocked.length -
       onHuman.length -
@@ -6088,8 +6178,10 @@ try {
         ? `waiting on another repo: ${elsewhere.map(ref).join(", ")}`
         : "land one to advance";
     const roundLine = `${running.length} running · ${
-      toLand.length ? `${toLand.length} to land · ` : ""
-    }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
+      waitingOnYou.length ? `${waitingOnYou.length} waiting for you · ` : ""
+    }${toLand.length ? `${toLand.length} to land · ` : ""}${
+      queued > 0 ? `${queued} queued · ` : ""
+    }${blocked.length} blocked · ${
       onHuman.length ? `${onHuman.length} waiting on a human · ` : ""
     }${openNow.length} open${parked.size ? ` · ${parked.size} parked` : ""}${
       held ? ` · ${held} held` : ""
@@ -6346,6 +6438,36 @@ if (heldAtEnd.length > 0) {
   }
   console.log(
     "\n  Nothing lands, relaunches or removes them until they are released.",
+  );
+}
+
+// A session whose turn is over and whose slice nobody has released: the run
+// is exiting, and this is where a person looks last. Said with what releases
+// it, and with the one thing the run can no longer promise.
+const waitingAtEnd = tickets.filter(
+  (t) => t.open && waitingForYou(t.id) !== null,
+);
+if (waitingAtEnd.length > 0) {
+  console.log(
+    `\n── waiting for you (${waitingAtEnd.length}) ─────────────────────`,
+  );
+  for (const t of waitingAtEnd) {
+    const said = waitingForYou(t.id) as Finished;
+    const wt = worktreeFor(t.id);
+    console.log(
+      `  ${ref(t.id)}  ${
+        said.kind === "stuck"
+          ? `stuck: ${firstLine(said.report)}`
+          : `finished at ${said.head.slice(0, 7)}`
+      }`,
+    );
+    console.log(`     report: ${wt}/${FINISHED_MARKER}`);
+    if (said.kind === "finished") {
+      console.log(`     ./scripts/slice-done.sh in ${wt} lands it`);
+    }
+  }
+  console.log(
+    "\n  Their sessions are still open in their tabs; this run no longer watches them.",
   );
 }
 

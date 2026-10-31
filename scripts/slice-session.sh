@@ -548,6 +548,11 @@ rm -f "$worktree_path/.slice-lock-wait"
 # were finished. This is the session that picks the work back up.
 rm -f "$worktree_path/.slice-interrupted"
 
+# Said by the last session here when its turn was over (slice-finished.sh),
+# and read by the dispatcher as "waiting for you". A session is starting now,
+# so the slice is running again.
+rm -f "$worktree_path/.slice-finished"
+
 # The opening instruction, so a slice starts working when its tab opens
 # instead of waiting to be told the same thing eight times. --no-start gives
 # you the bare prompt back.

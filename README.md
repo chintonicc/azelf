@@ -83,10 +83,11 @@ The life of one slice, end to end:
    `.slice-ticket.md` **inside the worktree**.
 3. **Launch.** The launcher opens a terminal in that worktree running your agent
    with `startPrompt` as its opening instruction. The agent reads `.slice-ticket.md`,
-   builds only that ticket, commits, and stops when its own gates are green. You
-   read its report and run `./scripts/slice-done.sh` in that worktree to release
-   it. Under `--auto` the session is told to run it itself; without `--auto` it is
-   told not to.
+   builds only that ticket, commits, and stops when its own gates are green, saying
+   so with `./scripts/slice-finished.sh` and its report. You read the report
+   (`.slice-finished` in that worktree, named by the run) and run
+   `./scripts/slice-done.sh` there to release it. Under `--auto` the session is told
+   to run that itself; without `--auto` it is told not to.
 4. **Land.** The dispatcher notices the ready marker, rebases the branch onto
    `baseBranch`, **re-runs every gate itself**, optionally asks a headless agent to
    review the diff against the ticket text, fast-forward-merges, and **pushes
@@ -135,7 +136,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes twelve marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes thirteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -155,7 +156,8 @@ saying so.
 | --- | --- |
 | `slice.config.ts` | your config, stack-detected, meant to be edited |
 | `scripts/slice-session.sh` | shim — prep and open one slice |
-| `scripts/slice-done.sh` | shim — a session marks itself ready to land |
+| `scripts/slice-done.sh` | shim — a slice is marked ready to land: the act that lands |
+| `scripts/slice-finished.sh` | shim — a session says its turn is over, with its report; lands nothing |
 | `scripts/slice-land.sh` | shim — rebase, gate and fast-forward one branch |
 | `scripts/session-commit.sh` | shim — commit with explicit paths |
 | `scripts/db-lock-check.sh` | shim — the exclusive-path lock's check, sourced |
@@ -167,7 +169,7 @@ saying so.
 | `scripts/azelf` | the launcher — `./scripts/azelf run --plan` and every other verb |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | twelve marker patterns, in a delimited block |
+| `.git/info/exclude` | thirteen marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -303,6 +305,23 @@ and `N queued` for slices that could start but have no slot, no disk or no lock:
 `N waiting on a human` appears the same way, for tickets held by a `humanLabel`
 ticket (see [Epics are excluded from the plan](#epics-are-excluded-from-the-plan)).
 
+`N waiting for you` appears when a session has said its turn is over with
+`./scripts/slice-finished.sh` — the ending of a run without `--auto`. Its shell is
+still alive, so it would otherwise count as running; on consumer-b three sessions were
+done inside ten minutes and the run said `3 running` for hours. The marker holds the
+head it was said at and the session's report, the run names the report once, and
+nothing lands until you run `./scripts/slice-done.sh` in that worktree:
+
+```
+[round 9] #89 finished its turn at 3f2a1c0 — report in /…/consumer-b-ticket-89/.slice-finished
+  read it, then ./scripts/slice-done.sh there lands it, or tell the session to go on
+```
+
+A commit after the marker makes it stale — the session went on — and the slice is
+running again. `--stuck` is the same marker for "the gates will not go green" or "the
+DB lock is held": the line says `#89 is stuck: <the report's first line>`. A run that
+exits with such slices open lists them under `waiting for you` at the end.
+
 A tracker read that fails mid-run (a `gh` call that times out, an `EOF`, a VPN
 reconnecting) does not end the run. The ticket keeps its last state, the run says so
 once, and once more when the tracker answers again:
@@ -418,7 +437,9 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths
 ./scripts/session-commit.sh -y -F message.txt path/to/file # the message from a file (-F - reads stdin)
 ./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
-./scripts/slice-done.sh                                    # mark ready to land (you, or the session under --auto)
+./scripts/slice-done.sh                                    # mark ready to land — the act that lands and pushes (you, or the session under --auto)
+./scripts/slice-finished.sh -m "<report>"                  # the session's turn is over (no --auto): the dispatcher shows the report; lands nothing
+./scripts/slice-finished.sh --stuck -m "<what is in the way>"  # the same, for red gates or a held lock
 ./scripts/slice-done.sh --hand-over "<what to do>"         # not done: hold it for a person, with the reason
 ./scripts/slice-gates.sh                                   # the landing gates on this worktree, as the land will run them
 ./scripts/format.sh                                        # the write half, by hand

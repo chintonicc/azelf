@@ -58,10 +58,13 @@ Each ticket gets a git worktree outside the repo, its ticket text written to
 shown it too.
 
 Without `--auto`, a session stops when it is finished and does not mark itself done.
-You read its report and run `./scripts/slice-done.sh` in its worktree; the dispatcher
+It says so with `./scripts/slice-finished.sh`, and the round line counts it as
+`N waiting for you`, not as running, naming its report (`<worktree>/.slice-finished`).
+You read the report and run `./scripts/slice-done.sh` in its worktree; the dispatcher
 then re-runs the gates, lands the branch and **pushes the base branch to origin**.
-Nothing reviews the diff in this mode unless you pass `--review`, so that command is
-the review.
+Where the base branch deploys, that command is the deploy: it is a person's, not a
+supervising session's. Nothing reviews the diff in this mode unless you pass
+`--review`, so reading the report is the review.
 
 `--auto` implies `--self-land`: the session marks itself done and the dispatcher
 reviews, lands and pushes it with nobody in between.

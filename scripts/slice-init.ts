@@ -77,6 +77,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-autostart
 .slice-live
 .slice-ready-to-land
+.slice-finished
 .slice-lock-wait
 .slice-flags
 .slice-retry
