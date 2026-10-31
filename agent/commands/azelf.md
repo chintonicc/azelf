@@ -8,7 +8,7 @@ Run the azelf dispatcher from the MAIN checkout. One ticket, one worktree, one s
 ## Always start with the plan
 
 ```sh
-bunx azelf run --plan
+./scripts/azelf run --plan
 ```
 
 This opens nothing. It prints the ready tickets grouped into waves by their blocking
@@ -25,7 +25,7 @@ the ready label off.
 
 **A blocker that only a ticket body names stops the dispatch.** The plan prints
 `✗ #82's body says it is blocked by #81 … has no edge` and a dispatch exits 1. Two
-ways out: `bunx azelf run --sync-edges -y` records the edges (then plan again), or
+ways out: `./scripts/azelf run --sync-edges -y` records the edges (then plan again), or
 `--ignore-body-blockers` runs as planned when the body only meant a reading order.
 Run `--sync-edges -y` right after filing tickets and the question never comes up.
 
@@ -46,10 +46,10 @@ file rather than making a network call.
 ## Then dispatch
 
 ```sh
-bunx azelf run 12 14      # prep and open exactly these
-bunx azelf run            # the whole first wave
-bunx azelf run --auto     # dispatch, then land each slice as it finishes
-bunx azelf run --help     # every flag
+./scripts/azelf run 12 14      # prep and open exactly these
+./scripts/azelf run            # the whole first wave
+./scripts/azelf run --auto     # dispatch, then land each slice as it finishes
+./scripts/azelf run --help     # every flag
 ```
 
 Each ticket gets a git worktree outside the repo, its ticket text written to
@@ -162,14 +162,14 @@ unstaged resolutions were gone.
 - Before working in a slice worktree by hand, hold it, and release it after:
 
   ```sh
-  bunx azelf hold 12 --why "re-porting onto #11"
-  bunx azelf release 12
+  ./scripts/azelf hold 12 --why "re-porting onto #11"
+  ./scripts/azelf release 12
   ```
 
   While it is held the dispatcher does not land, relaunch or rebase it (it says so,
   and the run waits for it), `slice-land.sh` refuses it, no session opens in it, and
   `git worktree remove` refuses it. Once released, a branch you moved retries the land.
-- A worktree re-added by hand has none of the provisioned files: `bunx azelf
+- A worktree re-added by hand has none of the provisioned files: `./scripts/azelf
   provision 12` copies what is missing, installs, and rewrites the ticket brief,
   without launching anything.
 

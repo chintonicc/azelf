@@ -64,6 +64,11 @@ your message.
 That runs this project's landing gates on this worktree, as the dispatcher will at
 the land, and exits non-zero when one fails. It needs a clean tree: commit first. A
 gate that waits for CI on the pushed commit is skipped here and runs at the land.
+If the shim is not in this worktree, the worktree was prepped by an azelf older than
+the shim: run the main checkout's copy of the package instead, which is the version
+the land will use —
+`bash "$(git rev-parse --path-format=absolute --git-common-dir)/../node_modules/@chintonicc/azelf/scripts/slice-gates.sh"`,
+or `$AZELF_DIR/scripts/slice-gates.sh` where azelf runs from a checkout.
 The dispatcher re-runs them all, so the only thing you gain by guessing is a failed
 land. Run them, read the output, fix what you broke.
 

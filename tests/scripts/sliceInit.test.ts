@@ -9,6 +9,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Shim, azelfFiles } from "@/scripts/slice-files";
 import {
   EXCLUDE_BLOCK,
   GENERATED,
@@ -237,6 +238,39 @@ describe("shimText", () => {
     ).toContain('exec "$_azelf_dir/scripts/slice-done.sh" "$@"');
   });
 
+  /**
+   * The launcher: `./scripts/azelf run --plan`. `bunx azelf` in a repo with no
+   * node_modules/.bin/azelf asks the registry, where the name is a stranger's
+   * package, and consumer-b downloaded it. This one can reach nothing but the
+   * package, and names the CLI, not a script, in its check and its exec.
+   */
+  it("the launcher runs bin/azelf.ts through bun", () => {
+    const launcher = SHIMS.find((s) => s.name === "azelf");
+    expect(launcher).toEqual({
+      name: "azelf",
+      how: "exec",
+      target: "bin/azelf.ts",
+      via: "bun",
+    });
+    const text = shimText({ ...(launcher as Shim), fallback: null });
+    expect(text).toContain('exec bun "$_azelf_dir/bin/azelf.ts" "$@"');
+    expect(text).toContain('if [ ! -f "$_azelf_dir/bin/azelf.ts" ]; then');
+    expect(text).toContain("'bun' is not on PATH");
+    expect(text).not.toContain('scripts/azelf"');
+  });
+
+  /** What the prep copies: every shim, the launcher among them, and both agent files. */
+  it("lists every file init writes, for the prep", () => {
+    expect(azelfFiles()).toEqual([
+      ...SHIMS.map((s) => `scripts/${s.name}`),
+      ".claude/commands/azelf.md",
+      ".claude/skills/slice/SKILL.md",
+    ]);
+    expect(azelfFiles()).toContain("scripts/slice-gates.sh");
+    expect(azelfFiles()).toContain("scripts/azelf");
+    expect(azelfFiles()).not.toContain("slice.config.ts");
+  });
+
   /** A sourced shim that called `exit` would kill the caller's interactive shell. */
   it("returns rather than exits when it is sourced", () => {
     const sourced = shimText({ name: "a.sh", how: "source", fallback: null });
@@ -389,6 +423,38 @@ describe("shimText", () => {
       }
     });
 
+    it("the launcher says the same, naming the CLI", () => {
+      writeFileSync(
+        join(repo, "scripts", "azelf"),
+        shimText({
+          name: "azelf",
+          how: "exec",
+          target: "bin/azelf.ts",
+          via: "bun",
+          fallback: null,
+        }),
+        { mode: 0o755 },
+      );
+
+      const r = spawnSync(join(repo, "scripts", "azelf"), ["run", "--plan"], {
+        cwd: repo,
+        encoding: "utf8",
+        env: { ...process.env, AZELF_DIR: "" },
+      });
+
+      expect(r.status).toBe(1);
+      expect(r.stderr).toContain(
+        `no ${join(
+          repo,
+          "node_modules",
+          "@chintonicc",
+          "azelf",
+          "bin",
+          "azelf.ts",
+        )}`,
+      );
+    });
+
     it("names AZELF_DIR when that is what points nowhere", () => {
       const empty = join(repo, "empty");
       mkdirSync(empty);
@@ -401,13 +467,25 @@ describe("shimText", () => {
     });
   });
 
-  it("is valid bash for both kinds", () => {
+  it("is valid bash for every kind", () => {
     const dir = mkdtempSync(join(tmpdir(), "azelf-shim-"));
     for (const how of ["source", "exec"] as const) {
       const f = join(dir, `${how}.sh`);
       writeFileSync(f, shimText({ name: "x.sh", how, fallback: "/opt/azelf" }));
       expect(() => execFileSync("bash", ["-n", f])).not.toThrow();
     }
+    const launcher = join(dir, "azelf");
+    writeFileSync(
+      launcher,
+      shimText({
+        name: "azelf",
+        how: "exec",
+        target: "bin/azelf.ts",
+        via: "bun",
+        fallback: "/opt/azelf",
+      }),
+    );
+    expect(() => execFileSync("bash", ["-n", launcher])).not.toThrow();
     rmSync(dir, { recursive: true, force: true });
   });
 });
@@ -439,6 +517,22 @@ describe("init, against a real git repo", () => {
     expect(readFileSync(join(dir, "slice.config.ts"), "utf8")).toContain(
       "satisfies SliceConfig",
     );
+  });
+
+  /**
+   * The launcher it wrote runs: this temp repo has no node_modules, so the
+   * shim carries the fallback to this checkout, and `--help` is the CLI's.
+   */
+  it("writes a launcher that reaches the CLI", () => {
+    const lines = run().map((r) => r.line);
+    expect(lines.join("\n")).toMatch(/wrote +scripts\/azelf \(exec\)/);
+    const out = execFileSync(join(dir, "scripts", "azelf"), ["--help"], {
+      cwd: dir,
+      encoding: "utf8",
+      env: { ...process.env, AZELF_DIR: "" },
+    });
+    expect(out).toContain("usage:");
+    expect(out).toContain("azelf run [args…]");
   });
 
   it("changes nothing on a second run", () => {

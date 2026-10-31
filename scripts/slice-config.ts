@@ -49,6 +49,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { type Agent, claude } from "./slice-agent";
+import { azelfFiles } from "./slice-files";
 import type { Gate } from "./slice-gates";
 import { installFor } from "./slice-install";
 import { type Launcher, manual } from "./slice-launcher";
@@ -798,6 +799,10 @@ export function shellAssignments(): string {
     `SLICE_EXCLUSIVE_LOCK_LABEL=${shq(config.exclusiveLockLabel ?? "")}`,
     `SLICE_HUMAN_LABEL=${shq(config.humanLabel ?? "")}`,
     shArray("SLICE_PROVISION_COPY", config.provisionCopy),
+    // azelf's own files, by azelf's list: the prep copies each one the main
+    // checkout has untracked and the worktree lacks. A consumer used to name
+    // them in provisionCopy, and that copy of the list drifted (slice-files.ts).
+    shArray("SLICE_AZELF_FILES", azelfFiles()),
     shArray("SLICE_INSTALL", install.argv),
     `SLICE_INSTALL_WHY=${shq(install.why)}`,
     shArray("SLICE_AFTER_LAND", config.afterLand ?? []),

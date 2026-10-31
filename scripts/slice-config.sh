@@ -24,6 +24,8 @@
 #   SLICE_LAUNCHER_NAME SLICE_LAUNCHER_STARTS SLICE_EXCLUSIVE_LOCK_LABEL
 #   SLICE_HUMAN_LABEL
 #   SLICE_EXCLUSIVE_LOCK_PATHS[] SLICE_PROVISION_COPY[]
+#   SLICE_AZELF_FILES[] (the shims and agent files init writes; the prep copies
+#     each one the main checkout has untracked and the worktree lacks)
 #   SLICE_INSTALL[] SLICE_INSTALL_WHY (the prep's install step, and why)
 #   SLICE_AFTER_LAND[] (slice-land.sh's last step; empty when none)
 #

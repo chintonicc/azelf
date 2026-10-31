@@ -161,7 +161,7 @@ import {
   parentFromBody,
 } from "./slice-tracker";
 // Which azelf this is, read again every round: see the version check below.
-import { installedVersion } from "./slice-version";
+import { installedVersion, ownRoot } from "./slice-version";
 
 // NOT named `base`: reviewPlan already takes a `base` parameter — the commit
 // the run started from — and a module const of the same name would be shadowed
@@ -6139,7 +6139,19 @@ function runCommand(ids: TicketId[]): string {
     (a, i) =>
       a !== "--once" && !(isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? "")),
   );
-  return ["bunx azelf run", ...flags, ...ids].join(" ");
+  return [launcherCommand(), "run", ...flags, ...ids].join(" ");
+}
+
+/**
+ * How to call azelf from the main checkout: the launcher `azelf init` wrote,
+ * else this package's CLI through bun. Never `bunx azelf`: in a repo without
+ * `node_modules/.bin/azelf` that asks the registry, where the name belongs to
+ * a stranger's package, and consumer-b downloaded it (scripts/slice-files.ts).
+ */
+function launcherCommand(): string {
+  return existsSync(join(repoRoot, "scripts", "azelf"))
+    ? "./scripts/azelf"
+    : `bun ${join(ownRoot, "bin", "azelf.ts")}`;
 }
 
 /**

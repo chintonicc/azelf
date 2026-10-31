@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
 import {
+  appendFileSync,
   cpSync,
   existsSync,
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -118,7 +120,7 @@ describe("afterLand in the dispatcher", () => {
       "stopping: #40 landed, and afterLand failed after it.",
     );
     expect(r.out).toContain(
-      "\n    bunx azelf run --auto -y --no-review --interval 1 41\n",
+      "\n    ./scripts/azelf run --auto -y --no-review --interval 1 41\n",
     );
     expect(r.code).toBe(1);
     const cc = c as Consumer;
@@ -303,7 +305,7 @@ describe("a tracker that stops answering", () => {
       /✗ the dispatcher stopped in round \d+: Fake has not answered for 2 seconds\n {2}still running, with nothing to land them: #40\n/,
     );
     expect(out).toContain(
-      "To pick the run up again:\n\n    bunx azelf run -y --interval 1 40\n",
+      "To pick the run up again:\n\n    ./scripts/azelf run -y --interval 1 40\n",
     );
   }, 60_000);
 
@@ -1349,7 +1351,7 @@ describe("the disk floor and a failed prep", () => {
 
     const out = d.output();
     expect(out).toContain(
-      "and run again:\n\n    bunx azelf run --auto -y --interval 1 40\n",
+      "and run again:\n\n    ./scripts/azelf run --auto -y --interval 1 40\n",
     );
     expect(out).toMatch(/· disk: \d+\.\d GB free where the worktrees go/);
     const hold =
@@ -2187,7 +2189,7 @@ ${moveMain(
     expect(existsSync(c.closeFile)).toBe(false);
     // The same run's flags, without --once.
     expect(r.out).toContain(
-      "To pick the run up again:\n\n    bunx azelf run --auto -y --no-review 40\n",
+      "To pick the run up again:\n\n    ./scripts/azelf run --auto -y --no-review 40\n",
     );
 
     // A second run gives up again, and the first attempt's report stays.
@@ -2813,7 +2815,7 @@ describe("one dispatcher per ticket", () => {
       ),
     );
     expect(r.out).toContain(
-      "Two dispatchers on one ticket race each other's rebases, sessions and lands. Stop that one first, or run the rest on their own:\n\n    bunx azelf run --auto -y 40\n",
+      "Two dispatchers on one ticket race each other's rebases, sessions and lands. Stop that one first, or run the rest on their own:\n\n    ./scripts/azelf run --auto -y 40\n",
     );
     expect(r.out).not.toContain("prepping");
     expect(existsSync(c.wt(40))).toBe(false);
@@ -2831,7 +2833,7 @@ describe("one dispatcher per ticket", () => {
 
     expect(r.code).toBe(1);
     expect(r.out).toContain("sessions and lands. Stop that one first.\n");
-    expect(r.out).not.toContain("bunx azelf run");
+    expect(r.out).not.toContain("./scripts/azelf run");
   });
 
   it("runs beside a dispatcher holding other tickets, and lets its own go", () => {
@@ -3168,6 +3170,72 @@ describe("azelf provision", () => {
     expect(readFileSync(join(c.wt(40), ".env"), "utf8")).toBe("MAIN_ENV\n");
   });
 
+  /**
+   * azelf's own files, by azelf's own list. consumer-b keeps the shims
+   * untracked and named each in provisionCopy; that copy of the list was two
+   * shims behind on 2026-10-30, and ten sessions in one day had no
+   * ./scripts/slice-gates.sh. The prep and `provision` copy what init wrote
+   * and the worktree lacks, whether or not provisionCopy names it; a tracked
+   * one came with the checkout.
+   */
+  const untrackedOwnFiles = (fx: Consumer) => {
+    // format.sh is in SHIMS and not among the fixture's tracked shims; the
+    // command file likewise. Both untracked, both excluded, as on consumer-b.
+    writeFileSync(
+      join(fx.main, "scripts", "format.sh"),
+      "#!/usr/bin/env bash\necho fmt\n",
+      { mode: 0o755 },
+    );
+    mkdirSync(join(fx.main, ".claude", "commands"), { recursive: true });
+    writeFileSync(
+      join(fx.main, ".claude", "commands", "azelf.md"),
+      "# /azelf\n",
+    );
+    appendFileSync(
+      join(fx.main, ".git", "info", "exclude"),
+      "scripts/format.sh\n.claude/\n",
+    );
+  };
+
+  it("copies the shims and agent files the main checkout has untracked, by its own list", () => {
+    c = readded();
+    untrackedOwnFiles(c);
+
+    const r = azelfCli(c, "provision", "40");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "✓ copied scripts/format.sh — azelf's own, untracked here",
+    );
+    expect(r.out).toContain(
+      "✓ copied .claude/commands/azelf.md — azelf's own, untracked here",
+    );
+    // Tracked shims came with the checkout: nothing to copy, nothing said.
+    expect(r.out).not.toContain("copied scripts/slice-done.sh");
+    expect(
+      statSync(join(c.wt(40), "scripts", "format.sh")).mode & 0o111,
+    ).not.toBe(0);
+    expect(
+      readFileSync(join(c.wt(40), ".claude", "commands", "azelf.md"), "utf8"),
+    ).toBe("# /azelf\n");
+  });
+
+  it("the prep copies them too, before the session is opened", () => {
+    // A prep fetches origin, which `readded()` has no need of.
+    c = makeConsumer({ agent: ["true"], remote: true });
+    untrackedOwnFiles(c);
+    c.setTicket("41", {});
+
+    const r = runDispatcher(c, ["-y", "--once", "41"]);
+
+    expect(r.out).toContain(`✓ prepped — worktree ready at ${c.wt(41)}`);
+    expect(r.out).toContain(
+      "✓ copied scripts/format.sh — azelf's own, untracked here",
+    );
+    expect(existsSync(join(c.wt(41), "scripts", "format.sh"))).toBe(true);
+    expect(existsSync(join(c.wt(41), "scripts", "slice-done.sh"))).toBe(true);
+  });
+
   it("refuses with neither a worktree nor a branch, and while a session runs there", () => {
     c = readded();
     const none = azelfCli(c, "provision", "41");
@@ -3446,7 +3514,7 @@ describe("a ticket for a person (humanLabel)", () => {
       "[round 1] 0 running · 0 blocked · 2 waiting on a human · 2 open — land one to advance",
     );
     expect(r.out).toContain(
-      "nothing can advance — what is left waits on a human:\n    #2  human — blocks #3\n  Close it when done, then pick the run up again:\n\n    bunx azelf run -y --interval 1 2 3\n",
+      "nothing can advance — what is left waits on a human:\n    #2  human — blocks #3\n  Close it when done, then pick the run up again:\n\n    ./scripts/azelf run -y --interval 1 2 3\n",
     );
   });
 
@@ -3461,7 +3529,7 @@ describe("a ticket for a person (humanLabel)", () => {
       "#3  t  ← blocked by #2 (outside this set, waiting on a human)",
     );
     expect(r.out).toContain(
-      "    #2  human, outside this set — blocks #3\n  Close it when done, then pick the run up again:\n\n    bunx azelf run -y --interval 1 3\n",
+      "    #2  human, outside this set — blocks #3\n  Close it when done, then pick the run up again:\n\n    ./scripts/azelf run -y --interval 1 3\n",
     );
   });
 

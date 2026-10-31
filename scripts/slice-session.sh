@@ -360,6 +360,23 @@ if [[ ${#SLICE_PROVISION_COPY[@]} -gt 0 ]]; then
     fi
   done
 fi
+# azelf's own files — the shims and the agent files `azelf init` wrote — by
+# azelf's own list (scripts/slice-files.ts), not the consumer's. A consumer
+# that keeps them untracked (consumer-b, in .git/info/exclude) used to name
+# each one in provisionCopy, and that copy of the list was two shims behind
+# the day slice-gates.sh was added: ten sessions in one day found no
+# ./scripts/slice-gates.sh in their worktree and went looking for the
+# package's copy by hand. A tracked file is in the worktree already, so this
+# reaches only the untracked case; never over a file that is there.
+if [[ ${#SLICE_AZELF_FILES[@]} -gt 0 ]]; then
+  for azelf_file in "${SLICE_AZELF_FILES[@]}"; do
+    if [[ -f "$repo_root/$azelf_file" && ! -e "$worktree_path/$azelf_file" ]]; then
+      mkdir -p "$(dirname "$worktree_path/$azelf_file")"
+      cp -p "$repo_root/$azelf_file" "$worktree_path/$azelf_file"
+      echo "✓ copied $azelf_file — azelf's own, untracked here"
+    fi
+  done
+fi
 # The install step comes through the bridge (SLICE_INSTALL, decided in
 # scripts/slice-install.ts: the config's `install`, else the lockfile), not as
 # a `bun install` written here. It was written here, and a Python repo with no

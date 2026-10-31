@@ -121,7 +121,8 @@ Two invariants hold the whole thing together:
 
 ```sh
 bun add -d @chintonicc/azelf
-bunx azelf init
+bun node_modules/@chintonicc/azelf/bin/azelf.ts init   # once; it writes ./scripts/azelf
+./scripts/azelf run --plan
 ```
 
 `init` reads your `package.json` (or `pyproject.toml`) and writes a `slice.config.ts`
@@ -161,6 +162,9 @@ saying so.
 | `scripts/db-lock.sh` | shim — claim, release, transfer the exclusive-path lock |
 | `scripts/format.sh` | shim — the write half of the formatter, run by hand |
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
+| `scripts/slice-gates.sh` | shim — the landing gates on a worktree, as the land runs them |
+| `scripts/slice-push-main.sh` | shim — push a hand merge of the base branch, under the land lock |
+| `scripts/azelf` | the launcher — `./scripts/azelf run --plan` and every other verb |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
 | `.git/info/exclude` | twelve marker patterns, in a delimited block |
@@ -170,8 +174,19 @@ Shims resolve the package at run time via `$AZELF_DIR`, else
 worktree, so a whole wave runs the one version you installed there, whatever the
 worktree's own `bun install` left behind — else the worktree's own copy. They act on
 the tree they were run in either way, and are a few lines of logic, safe to commit.
-After a pin bump, `bun install --force` and `azelf init` in the main checkout, and
-commit and push, so new worktrees get the new shims.
+After a pin bump, `bun install --force` and `azelf init` in the main checkout. Commit
+the result or not: a worktree's prep copies in every file of this table, except
+`slice.config.ts` and the exclude block, that the main checkout has untracked and the
+worktree lacks — by azelf's own list, so a shim added by a later version is there
+without anyone editing `provisionCopy`.
+
+`./scripts/azelf` is the launcher: the same resolution, running the CLI through bun.
+Every command in this README goes through it rather than `bunx azelf`, because in a
+repo without `node_modules/.bin/azelf` — a Python repo, an npm repo whose lockfile
+cannot list this package — bunx finds no local binary and asks the registry, where the
+name `azelf` is taken by something else. consumer-b downloaded a stranger's package
+that way on the road to "could not determine executable to run". The launcher can
+reach nothing but the package.
 
 A repo that cannot take azelf as a dependency runs it from a checkout instead: a
 Python repo with no `package.json`, or an npm repo whose CI `npm ci` would refuse a
@@ -200,22 +215,22 @@ gh issue edit 17 --add-label ready-for-agent
 gh issue edit 18 --add-label ready-for-agent
 
 # 2. see what would happen — reads only, opens nothing
-bunx azelf run --plan
+./scripts/azelf run --plan
 
 # 3. open sessions for one wave
-bunx azelf run
+./scripts/azelf run
 
 # 4. …the agents work. When one stops, read its report and release it from its
 #    worktree with ./scripts/slice-done.sh (under --auto it does that itself)
 
 # 5. land whatever is ready, then stop
-bunx azelf run --once
+./scripts/azelf run --once
 ```
 
 Once you trust it, the whole thing is one command:
 
 ```sh
-bunx azelf run --auto
+./scripts/azelf run --auto
 ```
 
 which dispatches, waits, lands, releases the next wave, and repeats until nothing
@@ -311,7 +326,7 @@ the sessions that are still running.
 ```
   To pick the run up again:
 
-    bunx azelf run --auto -y 43 55
+    ./scripts/azelf run --auto -y 43 55
 ```
 
 ### `azelf retry <ticket>`
@@ -326,9 +341,9 @@ parked on. It names the dispatcher that has the ticket (`the running dispatcher 
 Hold a slice's worktree while you work in it by hand, and give it back after:
 
 ```
-bunx azelf hold 102 --why "re-porting onto #101"
+./scripts/azelf hold 102 --why "re-porting onto #101"
   ✓ held #102 for alex — nothing lands, relaunches or removes it until azelf release 102
-bunx azelf release 102
+./scripts/azelf release 102
   ✓ released #102 — held by alex since 14:55 (re-porting onto #101)
   the running dispatcher (pid 45696) takes it back next round
 ```
@@ -451,7 +466,7 @@ export default {
 | `exclusiveLockPaths` | `string[]` | paths only one worktree may hold changes to; `[]` disables |
 | `exclusiveLockLabel` | `string?` | tracker label on tickets that will touch `exclusiveLockPaths`; they are started one at a time. Needs `exclusiveLockPaths` |
 | `humanLabel` | `string?` | tracker label on tickets only a person can do. They are never dispatched, even when named, and they hold their dependents until closed. `init` writes `ready-for-human` |
-| `provisionCopy` | `string[]` | gitignored files copied into each new worktree. An untracked `slice.config.ts` belongs here only if sessions are to read it; the shims read it from the main checkout, so `./scripts/slice-gates.sh` and the DB lock work without |
+| `provisionCopy` | `string[]` | gitignored files copied into each new worktree. An untracked `slice.config.ts` belongs here only if sessions are to read it; the shims read it from the main checkout, so `./scripts/slice-gates.sh` and the DB lock work without. The shims and agent files `init` writes need not be listed: the prep copies those by its own list |
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
@@ -721,7 +736,7 @@ A run whose remaining work all waits on a person stops, rather than waiting days
     #99  ready-for-human — blocks #105
   Close it when done, then pick the run up again:
 
-    bunx azelf run -y 99 105
+    ./scripts/azelf run -y 99 105
 ```
 
 A blocker outside the run's set is read again every round, so a ticket held by one
@@ -1602,7 +1617,7 @@ afterLand: ["./scripts/health-after-deploy.sh"],
   ```
     stopping: #101 landed, and afterLand failed after it. It stays landed and closed; …
 
-      bunx azelf run --auto -y 102 103
+      ./scripts/azelf run --auto -y 102 103
   ```
 
   Whether the base needs a revert is your call. azelf does not undo a land.
@@ -1623,7 +1638,7 @@ has refuses to start:
 ✗ #102, #103 are already being dispatched by another run (pid 45696, since 14:55): azelf run -y --auto 102 103 104 107 108
   Two dispatchers on one ticket race each other's rebases, sessions and lands. Stop that one first, or run the rest on their own:
 
-    bunx azelf run -y --auto 107 108
+    ./scripts/azelf run -y --auto 107 108
 ```
 
 It refuses rather than dropping the held tickets, because that would change the plan

@@ -205,6 +205,15 @@ export function makeConsumer(opts: {
       { mode: 0o755 },
     );
   }
+  // The launcher init writes, so the resume line a test reads is the one a
+  // consumer sees.
+  writeFileSync(
+    join(main, "scripts", "azelf"),
+    `#!/usr/bin/env bash\nexec bun ${JSON.stringify(
+      join(AZELF, "bin", "azelf.ts"),
+    )} "$@"\n`,
+    { mode: 0o755 },
+  );
   const agent =
     opts.agent || opts.resolve || opts.review
       ? `\n  agent: custom({ name: "fake", sessionCommand: ${JSON.stringify(

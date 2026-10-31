@@ -8,7 +8,9 @@
  *  1. The marker patterns, into `.git/info/exclude`. Never `.gitignore` — see
  *     the block text below, and the Phase 1 finding it quotes.
  *  2. Shims in the consumer's `scripts/`, so `./scripts/session-commit.sh` and
- *     the autostart hook keep working by the names everything already uses.
+ *     the autostart hook keep working by the names everything already uses,
+ *     and the launcher, `./scripts/azelf`, which reaches this package and
+ *     nothing else (`bunx azelf` can reach the registry; see slice-files.ts).
  *  3. A starter `slice.config.ts`, because the loader's first error in a fresh
  *     repo is otherwise "no slice.config.ts found", which says what is missing
  *     and not what to write.
@@ -30,8 +32,12 @@ import {
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { AGENT_FILES, SHIMS, type Shim, shimTarget } from "./slice-files";
 import { rcFilesFor } from "./slice-launcher";
 import { configFor, detect } from "./slice-preset";
+
+/** The list lives in slice-files.ts, where the prep reads it too; re-exported for the tests and the CLI. */
+export { SHIMS, AGENT_FILES } from "./slice-files";
 
 /** This package's root — the one place `import.meta.url` is still the right anchor. */
 export const packageRoot = resolve(
@@ -151,25 +157,6 @@ export function gitPaths(cwd: string): { root: string; commonDir: string } {
 }
 
 /**
- * The scripts a consumer calls by name, and how. `source` vs `exec` is not a
- * style choice: slice-config.sh and db-lock-check.sh export variables and
- * define functions into the CALLER's shell, so running them in a subshell
- * would leave the caller with nothing.
- */
-export const SHIMS: { name: string; how: "source" | "exec" }[] = [
-  { name: "slice-config.sh", how: "source" },
-  { name: "db-lock-check.sh", how: "source" },
-  { name: "db-lock.sh", how: "exec" },
-  { name: "slice-session.sh", how: "exec" },
-  { name: "slice-land.sh", how: "exec" },
-  { name: "slice-done.sh", how: "exec" },
-  { name: "session-commit.sh", how: "exec" },
-  { name: "format.sh", how: "exec" },
-  { name: "slice-gates.sh", how: "exec" },
-  { name: "slice-push-main.sh", how: "exec" },
-];
-
-/**
  * A shim body.
  *
  * The package is found by a RULE, not by a recorded path: `$AZELF_DIR` if set,
@@ -199,12 +186,11 @@ export const SHIMS: { name: string; how: "source" | "exec" }[] = [
  * cannot take it as a dependency (consumer-b's Python and npm repos) is told to
  * set AZELF_DIR instead.
  */
-export function shimText(opts: {
-  name: string;
-  how: "source" | "exec";
-  fallback: string | null;
-}): string {
+export function shimText(opts: Shim & { fallback: string | null }): string {
   const { name, how, fallback } = opts;
+  // What the shim runs: `scripts/<name>` for every script, `bin/azelf.ts`
+  // for the launcher. The existence check, the error and the exec all name it.
+  const target = shimTarget(opts);
   // `return` in a sourced file, `exit` in an executed one: a sourced shim that
   // called exit would kill the caller's shell.
   const stop = how === "source" ? "return 1" : "exit 1";
@@ -219,12 +205,12 @@ _azelf_repo="$(cd "$(dirname "\${BASH_SOURCE[0]:-$0}")/.." && pwd -P)"
 _azelf_dir="$_azelf_repo/node_modules/@chintonicc/azelf"
 # In a slice worktree, the MAIN checkout's copy: one version per wave.
 _azelf_main="$(git -C "$_azelf_repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)"
-if [ -n "$_azelf_main" ] && [ -f "$(dirname "$_azelf_main")/node_modules/@chintonicc/azelf/scripts/${name}" ]; then
+if [ -n "$_azelf_main" ] && [ -f "$(dirname "$_azelf_main")/node_modules/@chintonicc/azelf/${target}" ]; then
   _azelf_dir="$(dirname "$_azelf_main")/node_modules/@chintonicc/azelf"
 fi
 _azelf_dir="\${AZELF_DIR:-$_azelf_dir}"${fb}
-if [ ! -f "$_azelf_dir/scripts/${name}" ]; then
-  echo "error: azelf is not installed — no $_azelf_dir/scripts/${name}" >&2
+if [ ! -f "$_azelf_dir/${target}" ]; then
+  echo "error: azelf is not installed — no $_azelf_dir/${target}" >&2
   if [ -n "\${AZELF_DIR:-}" ]; then
     echo "       AZELF_DIR=$AZELF_DIR is not an azelf package root or checkout." >&2
   elif grep -qs '"@chintonicc/azelf"' "$_azelf_repo/package.json"; then
@@ -236,8 +222,12 @@ if [ ! -f "$_azelf_dir/scripts/${name}" ]; then
 fi
 ${
   how === "source"
-    ? `# SOURCED, not executed: the real file defines functions and exports\n# variables into the CALLING shell, which a subshell would discard.\nsource "$_azelf_dir/scripts/${name}"`
-    : `# The target's usage and error messages should name the command you TYPED,\n# not a file inside node_modules. \`exec -a\` cannot do this: the shebang line\n# makes bash re-set \`$0\` to the script path it opened, so argv[0] is discarded\n# for an interpreted script. An exported variable survives that.\nexport AZELF_INVOKED_AS="$0"\nexec "$_azelf_dir/scripts/${name}" "$@"`
+    ? `# SOURCED, not executed: the real file defines functions and exports\n# variables into the CALLING shell, which a subshell would discard.\nsource "$_azelf_dir/${target}"`
+    : `# The target's usage and error messages should name the command you TYPED,\n# not a file inside node_modules. \`exec -a\` cannot do this: the shebang line\n# makes bash re-set \`$0\` to the script path it opened, so argv[0] is discarded\n# for an interpreted script. An exported variable survives that.\nexport AZELF_INVOKED_AS="$0"\n${
+        opts.via === "bun"
+          ? `# A TypeScript target runs through bun, which the package needs anyway.\nif ! command -v bun >/dev/null 2>&1; then\n  echo "error: 'bun' is not on PATH, and azelf runs through it." >&2\n  exit 1\nfi\nexec bun "$_azelf_dir/${target}" "$@"`
+          : `exec "$_azelf_dir/${target}" "$@"`
+      }`
 }
 `;
 }
@@ -332,9 +322,10 @@ export function init(opts: {
       });
     }
     mkdirSync(join(root, "scripts"), { recursive: true });
-    for (const { name, how } of SHIMS) {
+    for (const shim of SHIMS) {
+      const { name, how } = shim;
       const dest = join(root, "scripts", name);
-      const body = shimText({ name, how, fallback });
+      const body = shimText({ ...shim, fallback });
       const same = existsSync(dest) && readFileSync(dest, "utf8") === body;
       if (!same) {
         writeFileSync(dest, body);
@@ -398,17 +389,7 @@ export const GENERATED = "generated by `azelf init`";
  * every session in the project gets the same ones.
  */
 export function agentFiles(root: string): InitResult[] {
-  const files: { from: string[]; to: string[] }[] = [
-    {
-      from: ["agent", "commands", "azelf.md"],
-      to: [".claude", "commands", "azelf.md"],
-    },
-    {
-      from: ["agent", "skills", "slice", "SKILL.md"],
-      to: [".claude", "skills", "slice", "SKILL.md"],
-    },
-  ];
-  return files.map(({ from, to }) => {
+  return AGENT_FILES.map(({ from, to }) => {
     const src = join(packageRoot, ...from);
     const dest = join(root, ...to);
     const rel = to.join("/");
