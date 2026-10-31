@@ -6,8 +6,10 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -783,6 +785,141 @@ describe("a session whose turn is over", () => {
       "To pick the run up again:\n\n    ./scripts/azelf run -y --interval 30 40",
     );
   }, 60_000);
+});
+
+/**
+ * A live session that shows no sign of work is quiet, not running. On
+ * consumer-b a session died when the Mac slept and the run said "1 running"
+ * for 1.5 hours. Everything a sign could come from is backdated here.
+ */
+describe("a quiet session", () => {
+  const old = (path: string) => {
+    const t = new Date(Date.now() - 10 * 60_000);
+    utimesSync(path, t, t);
+  };
+  const quietOne = (extra = "quietAfterMinutes: 1,") => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      configExtra: extra,
+    });
+    writeFileSync(join(fx.wt(40), "a.txt"), "a\n");
+    git(fx.wt(40), "add", "a.txt");
+    sh(
+      fx.wt(40),
+      `GIT_COMMITTER_DATE=@${
+        Math.floor(Date.now() / 1000) - 600
+      } git commit -qm 'feat: a' --date=@${
+        Math.floor(Date.now() / 1000) - 600
+      }`,
+    );
+    sessions.push(fakeSession(fx, 40));
+    old(join(fx.wt(40), ".slice-live"));
+    return fx;
+  };
+  const cfg = () => {
+    const dir = join(tmpdir(), `azelf-claude-${process.pid}-${Date.now()}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  };
+
+  it("is counted apart from running and said once, until a file changes", async () => {
+    c = quietOne();
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"], {
+      env: { CLAUDE_CONFIG_DIR: cfg() },
+    });
+
+    await d.until("0 running · 1 quiet · 0 blocked · 1 open");
+    expect(d.output()).toMatch(
+      /#40 has been quiet for 10 min — no changed file, no commit since \d\d:\d\d\n {2}its session may have stopped \(the Mac slept, an API error\), be waiting at its prompt, or still be thinking: look at its tab/,
+    );
+    await d.until(/(\[round \d+\][^\n]*\n[\s\S]*){3}/);
+    expect(d.output().match(/has been quiet for/g)?.length).toBe(1);
+
+    writeFileSync(join(c.wt(40), "b.txt"), "b\n");
+    await d.until("1 running · 0 blocked · 1 open");
+    await d.stop();
+    expect(d.output()).not.toContain("── quiet (");
+  }, 60_000);
+
+  it("is not quiet while its transcript moves, and names the transcript when it stops", () => {
+    c = quietOne();
+    const root = cfg();
+    const dir = join(
+      root,
+      "projects",
+      realpathSync(c.wt(40)).replace(/[^a-zA-Z0-9]/g, "-"),
+    );
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "s.jsonl"), "{}\n");
+
+    const live = runDispatcher(c, ["-y", "--once", "40"], {
+      env: { CLAUDE_CONFIG_DIR: root },
+    });
+    expect(live.out).not.toContain("has been quiet");
+
+    old(join(dir, "s.jsonl"));
+    const quiet = runDispatcher(c, ["-y", "--once", "40"], {
+      env: { CLAUDE_CONFIG_DIR: root },
+    });
+    expect(quiet.out).toContain(
+      "#40 has been quiet for 10 min — no changed file, no commit, nothing in its transcript since",
+    );
+    expect(quiet.out).toContain("── quiet (1)");
+    expect(quiet.out).toContain("  #40  no sign of work since ");
+  });
+
+  it("is never said with quietAfterMinutes: 0", () => {
+    c = quietOne("quietAfterMinutes: 0,");
+    const r = runDispatcher(c, ["-y", "--once", "40"], {
+      env: { CLAUDE_CONFIG_DIR: cfg() },
+    });
+    expect(r.out).not.toContain("has been quiet");
+    expect(r.out).not.toContain("── quiet (");
+  });
+});
+
+/**
+ * caffeinate for the life of the run, on macOS: started with the run's pid,
+ * so it ends when the run does.
+ */
+describe("keepAwake", () => {
+  it.runIf(process.platform === "darwin")(
+    "keeps the Mac awake while the run lasts, and not after",
+    async () => {
+      c = makeConsumer({
+        worktrees: [40],
+        remote: true,
+        agent: ["true"],
+        configExtra: "keepAwake: true,",
+      });
+      sessions.push(fakeSession(c, 40));
+      d = startDispatcher(c, ["-y", "--interval", "1", "40"]);
+      await d.until("keeping this Mac awake while the run lasts");
+      const pgrep = () =>
+        spawnSync("pgrep", ["-f", `caffeinate -is -w ${d?.pid}$`], {
+          encoding: "utf8",
+        }).stdout.trim();
+      expect(pgrep()).not.toBe("");
+
+      await d.stop();
+      const deadline = Date.now() + 5000;
+      while (pgrep() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(pgrep()).toBe("");
+    },
+    60_000,
+  );
+
+  it("is off with keepAwake: false, and for --once", () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    sessions.push(fakeSession(c, 40));
+    expect(runDispatcher(c, ["-y", "--once", "40"]).out).not.toContain(
+      "keeping this Mac awake",
+    );
+  });
 });
 
 /**

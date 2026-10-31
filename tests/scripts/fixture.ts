@@ -334,6 +334,10 @@ export default {
     /\bminFreeDiskGb\b/.test(opts.configExtra ?? "")
       ? ""
       : "\n  minFreeDiskGb: 0,"
+  }${
+    // caffeinate is off unless a test sets it: hundreds of dispatcher runs
+    // need not each start one.
+    /\bkeepAwake\b/.test(opts.configExtra ?? "") ? "" : "\n  keepAwake: false,"
   }${opts.configExtra ? `\n  ${opts.configExtra}` : ""}
 } satisfies SliceConfig;
 `,

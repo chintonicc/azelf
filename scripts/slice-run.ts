@@ -58,7 +58,7 @@
  * bridge to decide whether to park flags for the hook.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -66,12 +66,14 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   statfsSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
@@ -83,6 +85,7 @@ import {
   isTicketId,
   launcher as configuredLauncher,
   minFreeDiskGb,
+  quietAfterMinutes,
   ref,
   repoRoot,
   ticketFromBranch,
@@ -1503,6 +1506,133 @@ function noteFinished(all: Ticket[]): void {
         )} — report in ${report}\n  read it, then ./scripts/slice-done.sh there lands it, or tell the session to go on`,
       );
     }
+  }
+}
+
+/**
+ * Where Claude Code keeps the transcripts of sessions started in `wt`: one
+ * directory per working directory, named by the path with every character
+ * that is not a letter or digit made a `-`. Tried as given and as its real
+ * path, since the session may have been started through either. Null when
+ * neither exists — another agent, or a session that has written nothing yet.
+ */
+function transcriptDir(wt: string): string | null {
+  const root = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+  let real = wt;
+  try {
+    real = realpathSync(wt);
+  } catch {
+    // The worktree is gone; the path as given is all there is.
+  }
+  for (const p of new Set([wt, real])) {
+    const dir = join(root, "projects", p.replace(/[^a-zA-Z0-9]/g, "-"));
+    if (existsSync(dir)) return dir;
+  }
+  return null;
+}
+
+/**
+ * The newest sign that a slice's session is working, in ms since the epoch:
+ * a changed or untracked file in its worktree, its head commit, the start of
+ * the session (`.slice-live`), a write to its agent transcript. Null when the
+ * worktree cannot be read.
+ *
+ * WHY THESE
+ * ---------
+ * `occupied()` is "its shell is alive", and a session at its prompt keeps its
+ * shell alive whether it finished, stopped on an API error, or waits for an
+ * answer. On consumer-b one died when the Mac slept, with 30 files
+ * uncommitted, and the run said "1 running" for an hour and a half; the
+ * person noticed because nothing in the worktree changed any more. Files and
+ * commits are what every agent leaves. The transcript is what moves while a
+ * session reads and thinks without writing a file; only Claude Code's is
+ * found, and without one the rest still stands.
+ */
+function lastActivity(n: TicketId): number | null {
+  const wt = worktreeFor(n);
+  const changed = run(["git", "diff", "--name-only", "-z", "HEAD"], {
+    cwd: wt,
+    allowFail: true,
+  });
+  if (!changed.ok) return null;
+  const untracked = run(
+    ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+    { cwd: wt, allowFail: true },
+  );
+  let latest = 0;
+  const seen = (path: string) => {
+    try {
+      latest = Math.max(latest, statSync(path).mtimeMs);
+    } catch {
+      // Deleted, or gone between the listing and the stat.
+    }
+  };
+  for (const f of `${changed.out}\0${untracked.out}`.split("\0")) {
+    if (f) seen(join(wt, f));
+  }
+  const head = run(["git", "log", "-1", "--format=%ct"], {
+    cwd: wt,
+    allowFail: true,
+  });
+  if (head.ok) latest = Math.max(latest, Number(head.out) * 1000 || 0);
+  seen(join(wt, LIVE_MARKER));
+  const transcripts = transcriptDir(wt);
+  if (transcripts) {
+    for (const f of readdirSync(transcripts)) {
+      if (f.endsWith(".jsonl")) seen(join(transcripts, f));
+    }
+  }
+  return latest;
+}
+
+/**
+ * Running sessions with no sign of work for `quietAfterMinutes`, by when the
+ * last sign was. Rebuilt every round by `noteQuiet`; the round line and the
+ * ending read it.
+ */
+const quietSince = new Map<TicketId, number>();
+/** The stretch of quiet already said, per slice, by its last sign of work. */
+const saidQuiet = new Map<TicketId, number>();
+
+/** `14:05`, in this machine's time, for a line a person reads at the time. */
+const clock = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
+
+/**
+ * Say once per stretch of quiet that a running session has shown no sign of
+ * work, and count it apart from running. Not "stalled": a session thinking
+ * for 31 minutes is quiet too, so the line says where to look and azelf types
+ * nothing into the tab. A slice waiting on the DB lock, one that said its
+ * turn is over, and one marked done are each counted elsewhere already.
+ */
+function noteQuiet(all: Ticket[]): void {
+  quietSince.clear();
+  if (quietAfterMinutes <= 0) return;
+  const now = Date.now();
+  for (const t of all) {
+    if (
+      !t.open ||
+      !hasSession(t.id) ||
+      isReadyToLand(t.id) ||
+      waitingForYou(t.id) !== null ||
+      existsSync(join(worktreeFor(t.id), LOCK_WAIT_MARKER))
+    ) {
+      continue;
+    }
+    const at = lastActivity(t.id);
+    if (at === null || now - at < quietAfterMinutes * 60_000) continue;
+    quietSince.set(t.id, at);
+    if (saidQuiet.get(t.id) === at) continue;
+    saidQuiet.set(t.id, at);
+    const transcript = transcriptDir(worktreeFor(t.id))
+      ? ", nothing in its transcript"
+      : "";
+    console.log(
+      `\n[round ${round}] ${ref(t.id)} has been quiet for ${Math.round(
+        (now - at) / 60_000,
+      )} min — no changed file, no commit${transcript} since ${clock(
+        at,
+      )}\n  its session may have stopped (the Mac slept, an API error), be waiting at its prompt, or still be thinking: look at its tab`,
+    );
   }
 }
 
@@ -5981,6 +6111,28 @@ function stopOnError(why: string): void {
   process.exitCode = 1;
 }
 
+/**
+ * `caffeinate -is -w <this pid>` while the run lasts, on macOS, unless
+ * `keepAwake: false` (slice-config.ts says why). `-w` ends it with this
+ * process, however this process ends. Not for `--once`, which is over in a
+ * round. A Mac without the binary runs as it did, without the line.
+ */
+function keepMacAwake(): void {
+  if (config.keepAwake === false || once || process.platform !== "darwin") {
+    return;
+  }
+  const bin = "/usr/bin/caffeinate";
+  if (!existsSync(bin)) return;
+  spawn(bin, ["-is", "-w", String(process.pid)], { stdio: "ignore" })
+    .on("error", () => {})
+    .unref();
+  console.log(
+    "\n  keeping this Mac awake while the run lasts (caffeinate; keepAwake: false in slice.config.ts turns it off)",
+  );
+}
+
+keepMacAwake();
+
 // Around the loop, so a round that throws ends it the way the stops inside it
 // do. A plan-time error is left to throw: nothing had started.
 watchSignals(true);
@@ -6015,6 +6167,7 @@ try {
     noteHolds(tickets);
     noteHandWork(tickets);
     noteFinished(tickets);
+    noteQuiet(tickets);
 
     // Land before launching, so a slot freed this round is refilled this round.
     // One per round: every land fast-forwards the same master in the same main
@@ -6223,8 +6376,14 @@ try {
     const waitingOnYou = openNow.filter(
       (t) => occupied(t.id) && waitingForYou(t.id) !== null,
     );
+    // Live, with no sign of work for quietAfterMinutes: said by noteQuiet,
+    // and not counted as running, which is what it was for 1.5 hours once.
+    const quiet = openNow.filter(
+      (t) =>
+        occupied(t.id) && quietSince.has(t.id) && !waitingOnYou.includes(t),
+    );
     const running = openNow.filter(
-      (t) => occupied(t.id) && !waitingOnYou.includes(t),
+      (t) => occupied(t.id) && !waitingOnYou.includes(t) && !quiet.includes(t),
     );
     const toLand = openNow.filter(
       (t) => !occupied(t.id) && awaitingLand(t, (id) => parked.has(id)),
@@ -6241,6 +6400,7 @@ try {
     const queued =
       openNow.length -
       running.length -
+      quiet.length -
       waitingOnYou.length -
       toLand.length -
       blocked.length -
@@ -6260,10 +6420,10 @@ try {
         ? `waiting on another repo: ${elsewhere.map(ref).join(", ")}`
         : "land one to advance";
     const roundLine = `${running.length} running · ${
-      waitingOnYou.length ? `${waitingOnYou.length} waiting for you · ` : ""
-    }${toLand.length ? `${toLand.length} to land · ` : ""}${
-      queued > 0 ? `${queued} queued · ` : ""
-    }${blocked.length} blocked · ${
+      quiet.length ? `${quiet.length} quiet · ` : ""
+    }${waitingOnYou.length ? `${waitingOnYou.length} waiting for you · ` : ""}${
+      toLand.length ? `${toLand.length} to land · ` : ""
+    }${queued > 0 ? `${queued} queued · ` : ""}${blocked.length} blocked · ${
       onHuman.length ? `${onHuman.length} waiting on a human · ` : ""
     }${openNow.length} open${parked.size ? ` · ${parked.size} parked` : ""}${
       held ? ` · ${held} held` : ""
@@ -6558,6 +6718,28 @@ if (waitingAtEnd.length > 0) {
   }
   console.log(
     "\n  Their sessions are still open in their tabs; this run no longer watches them.",
+  );
+}
+
+// Live sessions that had shown no sign of work for a while when the run
+// ended: whatever they are, nobody is watching them now.
+const quietAtEnd = tickets.filter(
+  (t) => t.open && quietSince.has(t.id) && hasSession(t.id),
+);
+if (quietAtEnd.length > 0) {
+  console.log(
+    `\n── quiet (${quietAtEnd.length}) ──────────────────────────────`,
+  );
+  for (const t of quietAtEnd) {
+    console.log(
+      `  ${ref(t.id)}  no sign of work since ${clock(
+        quietSince.get(t.id) as number,
+      )}`,
+    );
+    console.log(`     ${worktreeFor(t.id)}`);
+  }
+  console.log(
+    "\n  Look at their tabs: one that stopped on an error goes on when it is told to.",
   );
 }
 

@@ -138,6 +138,30 @@ export type SliceConfig = {
    */
   minFreeDiskGb?: number;
   /**
+   * Keep the Mac awake while a run lasts. Optional; on when left out, and
+   * nothing anywhere but macOS. `false` turns it off.
+   *
+   * The run starts `caffeinate -is -w <its pid>`, which ends with it. On
+   * consumer-b the Mac slept under a run twice in one evening: the session's
+   * API call died with "Your computer went to sleep mid-response", it sat at
+   * its prompt with 30 files uncommitted, and the run said "1 running" for an
+   * hour and a half. `-s` holds only on mains power, and a closed lid sleeps
+   * regardless.
+   */
+  keepAwake?: boolean;
+  /**
+   * Minutes a running session may go without a sign of work before the run
+   * calls it quiet. Optional; 30 when left out, `0` turns it off.
+   *
+   * A sign of work is a changed file in its worktree, a commit, or a write to
+   * its agent transcript when one can be found (Claude Code's, under
+   * `~/.claude/projects/`). A quiet session is counted apart from running and
+   * said once, with "look at its tab": it may have stopped (the Mac slept, an
+   * API error), be waiting at its prompt, or be thinking for a long time.
+   * azelf types nothing into it.
+   */
+  quietAfterMinutes?: number;
+  /**
    * Paths the overlap report leaves out. Optional; `[]` and omitted are the
    * same. `*` stays inside one path segment, `**` crosses them, a trailing
    * `/` means everything beneath a directory.
@@ -464,6 +488,19 @@ function validate(c: SliceConfig): SliceConfig {
       "minFreeDiskGb must be a number of GB, 0 or more — 0 turns the disk check off",
     );
   }
+  if (c.keepAwake !== undefined && typeof c.keepAwake !== "boolean") {
+    bad(
+      "keepAwake must be true or false — false lets the Mac sleep under a run",
+    );
+  }
+  if (
+    c.quietAfterMinutes !== undefined &&
+    !(Number.isFinite(c.quietAfterMinutes) && c.quietAfterMinutes >= 0)
+  ) {
+    bad(
+      "quietAfterMinutes must be a number of minutes, 0 or more — 0 never calls a session quiet",
+    );
+  }
   if (!Array.isArray(c.gates)) bad("gates must be an array of gates");
   for (const [i, g] of c.gates.entries()) {
     if (!g || typeof g.name !== "string" || typeof g.run !== "function") {
@@ -718,6 +755,8 @@ export const launcher: Launcher = config.launcher ?? manual();
 export const agent: Agent = config.agent ?? claude();
 /** The configured disk floor, or 10 GB. */
 export const minFreeDiskGb: number = config.minFreeDiskGb ?? 10;
+/** Minutes without a sign of work before a session is quiet, or 30; 0 is off. */
+export const quietAfterMinutes: number = config.quietAfterMinutes ?? 30;
 
 /** Is this argument a ticket id, by the tracker's own definition? */
 export const isTicketId = (s: string): boolean =>

@@ -90,15 +90,31 @@ after the heading. Line numbers are as of `dbc5238`.
 
 ## Phase 2 — the Mac stays awake, and a quiet session is seen
 
-- [ ] 2a. `keepAwake?: boolean` in the config; at the start of a run on darwin with
-  `caffeinate` present, spawn it detached with `-w process.pid` and say so once.
-- [ ] 2b. `quietAfterMinutes?: number`; `lastActivity(n)`: newest of the worktree's
-  changed files, the head commit, the agent transcript directory
-  (`$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<path with non-alphanumerics as ->`).
-- [ ] 2c. The round line counts "N quiet" apart from running; `[round N] #id has been
-  quiet for 42 min …` once per stretch; the end-of-run summary names them.
-- [ ] 2d. Tests: an old worktree with a live fake session is quiet; a fresh file makes it
-  running again; `quietAfterMinutes: 0` never says it.
+- [x] 2a. `keepAwake?: boolean` in the config; at the start of a watching run on darwin
+  with `/usr/bin/caffeinate` present, `caffeinate -is -w <pid>`, said once. Not for
+  `--once`.
+- [x] 2b. `quietAfterMinutes?: number`; `lastActivity(n)`: newest of the worktree's
+  changed and untracked files, the head commit, `.slice-live`, and the Claude Code
+  transcript directory (`$CLAUDE_CONFIG_DIR` or `~/.claude`, `projects/<path with
+  non-alphanumerics as ->`, as given or as its real path).
+- [x] 2c. The round line counts "N quiet" apart from running; `[round N] #id has been
+  quiet for 42 min …` once per stretch (keyed by the last sign of work); the ending lists
+  them under `── quiet`.
+- [x] 2d. Tests: an old worktree with a live fake session is quiet and said once; a new
+  file makes it running again; a fresh transcript keeps it running and an old one is
+  named; `quietAfterMinutes: 0` never says it; caffeinate runs with the dispatcher's pid
+  and is gone after it (macOS only); the fixture sets `keepAwake: false` by default.
+
+### What building it found
+
+- **`.slice-live` is a sign of work.** A relaunched session in an old worktree has
+  written nothing yet; without the marker's mtime it would be quiet the round it came
+  up. The tests backdate it with the rest.
+- **`git status --porcelain` is not used**: `run()` trims its output, and the first
+  entry's leading space (` M a.txt`) would go with it. `git diff --name-only HEAD` and
+  `git ls-files --others --exclude-standard` give bare paths.
+- **A slice waiting on the DB lock, one that said its turn is over, and one marked done
+  are not quiet**: each is counted elsewhere already.
 
 ## Phase 3 — each slice has its own ports
 
