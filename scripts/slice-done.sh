@@ -179,13 +179,22 @@ fi
 # warn you by number when it is about to delete the working directory of a
 # session that is still running. Empty when this is run outside a slice-session
 # tab, which is fine — the warning simply has nothing to report.
+#
+# A second run finds no .slice-live, because the first one deleted it, and keeps
+# the pid the first one wrote. On consumer-b's Backend #190 a land failed on the
+# network, the session made a follow-up commit and said done again; the empty
+# line 1 made slice-land.sh skip ending the agent, which sat an hour in a deleted
+# directory.
 live_marker="$worktree_root/.slice-live"
+done_marker="$worktree_root/.slice-ready-to-land"
 session_pid=""
 # An `if`, not `[[ … ]] && session_pid=…`: under `set -e` an and-list whose
 # left side is false exits 1 and takes the script with it, and "no marker" is
 # the ordinary case when this is run outside a session tab.
 if [[ -f "$live_marker" ]]; then
   session_pid="$(head -n 1 "$live_marker" | tr -d '[:space:]')"
+elif [[ -f "$done_marker" ]]; then
+  session_pid="$(head -n 1 "$done_marker" | tr -d '[:space:]')"
 fi
 
 # Line 2 is the commit this slice was declared done AT. Landing routinely
@@ -196,7 +205,7 @@ fi
 # from exactly that on 2026-09-23. This is the one moment the pre-rebase head
 # is still known, and slice-land.sh carries it into the ticket next to the SHA
 # it actually landed as, so there is something true to compare against.
-printf '%s\n%s\n' "$session_pid" "$(git rev-parse HEAD)" >"$worktree_root/.slice-ready-to-land"
+printf '%s\n%s\n' "$session_pid" "$(git rev-parse HEAD)" >"$done_marker"
 rm -f "$live_marker"
 # The turn-is-over marker (slice-finished.sh) is superseded: this slice is to
 # land now, not waiting for a person.

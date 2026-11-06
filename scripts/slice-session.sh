@@ -199,11 +199,22 @@ if $provision; then
     echo "error: $ticket_ref has neither a worktree nor a branch '$branch' — nothing to provision. azelf run $ticket starts it." >&2
     exit 1
   fi
-  # The same test the dispatcher makes: the marker's pid must still be a
-  # slice-session.sh, because a crash leaves the marker behind.
-  live_pid="$(head -n 1 "$worktree_path/.slice-live" 2>/dev/null | tr -d '[:space:]' || true)"
-  if [[ "$live_pid" =~ ^[0-9]+$ ]] &&
-    ps -ww -o command= -p "$live_pid" 2>/dev/null | grep -q "slice-session"; then
+fi
+
+# A session is running here already: refused, for a session as for a provision,
+# because the marker below would overwrite the live one and two agents would
+# work the same uncommitted files. Frontend #136 on consumer-b came to that
+# from the other side, an old tab deleting a newer marker; this is the door a
+# hand-started session walks through.
+#
+# The same test the dispatcher makes (isSessionOf in slice-run.ts): the marker's
+# pid must still be a slice-session.sh with this ticket on its command line,
+# because a crash leaves the marker behind and a pid can be reused by anything,
+# another ticket's session included. Before anything in the worktree is touched.
+live_pid="$(head -n 1 "$worktree_path/.slice-live" 2>/dev/null | tr -d '[:space:]' || true)"
+if [[ "$live_pid" =~ ^[0-9]+$ && "$live_pid" != "$$" ]]; then
+  live_cmd="$(ps -ww -o command= -p "$live_pid" 2>/dev/null || true)"
+  if [[ "$live_cmd" == *slice-session* && " $live_cmd " == *" $ticket "* ]]; then
     echo "error: a session is running in $worktree_path (pid $live_pid) — its files would change under it. End it first." >&2
     exit 1
   fi
@@ -599,9 +610,20 @@ fi
 # longer a slice-session.sh for this ticket, so it deletes the marker, leaves
 # .slice-interrupted in its place, and relaunches the slice. That check is
 # also why this shell must keep running for as long as the session does.
+#
+# The trap removes the marker only if it is still this shell's. A marker belongs
+# to the pid on its first line: on consumer-b's Frontend #136 a first session
+# said done and kept its tab, a second started and wrote its pid, and closing the
+# old tab deleted that marker. The next round saw no session on an uncommitted
+# tree and opened a third, two agents on the same files.
 live_marker="$worktree_path/.slice-live"
 echo "$$" >"$live_marker"
-trap 'rm -f "$live_marker"' EXIT
+remove_own_live_marker() {
+  if [[ "$(head -n 1 "$live_marker" 2>/dev/null | tr -d '[:space:]')" == "$$" ]]; then
+    rm -f "$live_marker"
+  fi
+}
+trap remove_own_live_marker EXIT
 
 # A previous session of this slice may have exited on a refused DB-lock claim
 # and left .slice-lock-wait, which parks the ticket in the dispatcher while the

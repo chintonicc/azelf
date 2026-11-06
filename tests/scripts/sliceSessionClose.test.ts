@@ -189,6 +189,27 @@ describe("a landed --auto slice's session ends, so its tab closes", () => {
     await s.exited;
   }, 60_000);
 
+  it("done, a follow-up commit, done again: the pid is kept and --end-session still ends the agent", async () => {
+    const c = setup();
+    const s = await sessionDeclaredDone(c);
+    const marker = join(c.wt(40), ".slice-ready-to-land");
+    const pid = readFileSync(marker, "utf8").split("\n")[0];
+    expect(pid).toMatch(/^[0-9]+$/);
+
+    writeFileSync(join(c.wt(40), "feature.txt"), "follow-up\n");
+    git(c.wt(40), "commit", "-qam", "follow-up");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    const [again, head] = readFileSync(marker, "utf8").split("\n");
+    expect(again).toBe(pid);
+    expect(head).toBe(git(c.wt(40), "rev-parse", "HEAD"));
+
+    const land = shResult(c.main, "./scripts/slice-land.sh 40 --end-session");
+    expect(land.ok, land.out).toBe(true);
+    expect(land.out).toContain("ended the agent in that tab");
+    expect(agentRunning()).toBe(false);
+    expect(await s.exited).toBe(86);
+  }, 60_000);
+
   it("slice-land.sh rejects an unknown flag and a second ticket", () => {
     const c = setup();
     for (const args of ["40 --end-sesion", "40 41"]) {
@@ -197,6 +218,87 @@ describe("a landed --auto slice's session ends, so its tab closes", () => {
       expect(r.out).toContain("usage:");
     }
   });
+});
+
+/**
+ * A marker belongs to the pid on its first line. On consumer-b's Frontend #136
+ * an old tab's exit deleted the marker of the session that had replaced it, and
+ * the dispatcher, seeing no session on an uncommitted tree, opened a third.
+ */
+describe("a tab removes only its own marker, and a session does not start over a live one", () => {
+  it("an old session's exit leaves a newer marker", async () => {
+    const c = setup();
+    const s = startSession(c);
+    const marker = join(c.wt(40), ".slice-live");
+    await until("the agent", () => existsSync(marker) && agentRunning());
+
+    writeFileSync(marker, "999999\n");
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    await s.exited;
+
+    expect(readFileSync(marker, "utf8")).toBe("999999\n");
+  }, 60_000);
+
+  it("a session's exit still removes its own", async () => {
+    const c = setup();
+    const s = startSession(c);
+    const marker = join(c.wt(40), ".slice-live");
+    await until("the agent", () => existsSync(marker) && agentRunning());
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    await s.exited;
+
+    expect(existsSync(marker)).toBe(false);
+  }, 60_000);
+
+  it("a second start refuses, before it touches the worktree", async () => {
+    const c = setup();
+    const s = startSession(c);
+    const marker = join(c.wt(40), ".slice-live");
+    await until("the agent", () => existsSync(marker) && agentRunning());
+    const before = readFileSync(marker, "utf8");
+    writeFileSync(join(c.wt(40), ".slice-interrupted"), "1\n");
+
+    // With a timeout: if it did not refuse, it would wait on an agent of its own.
+    const again = spawnSync(
+      "./scripts/slice-session.sh",
+      ["40", "--self-land"],
+      { cwd: c.main, encoding: "utf8", timeout: 20_000 },
+    );
+    expect(again.status).toBe(1);
+    expect(again.stderr).toContain(
+      `a session is running in ${c.wt(40)} (pid ${before.trim()})`,
+    );
+    expect(readFileSync(marker, "utf8")).toBe(before);
+    expect(existsSync(join(c.wt(40), ".slice-interrupted"))).toBe(true);
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    await s.exited;
+  }, 60_000);
+
+  it("a marker whose pid is another ticket's session does not refuse: a pid is reused", async () => {
+    const c = setup();
+    const script = join(c.root, "slice-session.sh");
+    writeFileSync(script, "while :; do sleep 0.2; done\n");
+    const other = spawn("bash", [script, "41"], { stdio: "ignore" });
+    try {
+      const marker = join(c.wt(40), ".slice-live");
+      writeFileSync(marker, `${other.pid}\n`);
+
+      const s = startSession(c);
+      await until(
+        `the agent — session output so far:\n${s.output()}`,
+        agentRunning,
+      );
+      expect(s.output()).not.toContain("a session is running");
+      expect(readFileSync(marker, "utf8")).not.toBe(`${other.pid}\n`);
+
+      spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+      await s.exited;
+    } finally {
+      other.kill("SIGKILL");
+    }
+  }, 60_000);
 });
 
 /**

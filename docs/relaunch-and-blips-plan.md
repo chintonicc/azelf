@@ -100,13 +100,21 @@ stale, and only that repo's own dispatcher moves it.
 
 ## Phase 1 — a marker belongs to its session
 
-- [ ] 1a. `slice-session.sh:604`: the trap removes the marker only when its first line is `$$`.
-- [ ] 1b. `slice-session.sh:196-211`: the live-session check leaves `if $provision` and
+- [x] 1a. `slice-session.sh:604`: the trap removes the marker only when its first line is `$$`.
+- [x] 1b. `slice-session.sh:196-211`: the live-session check leaves `if $provision` and
   matches on this ticket too. Before anything in the worktree is touched.
-- [ ] 1c. `slice-done.sh`: PID from `.slice-live`, else line 1 of `.slice-ready-to-land`.
-- [ ] 1d. Tests: an old session's exit leaves a newer marker, and still removes its own; a
+- [x] 1c. `slice-done.sh`: PID from `.slice-live`, else line 1 of `.slice-ready-to-land`.
+- [x] 1d. Tests: an old session's exit leaves a newer marker, and still removes its own; a
   second start refuses, and a marker whose PID is another ticket's does not; done, then done
   again, keeps the PID, and `slice-land.sh --end-session` ends that agent.
+
+### What building it found
+
+- **The check also covers `--prep-only`, and that is right.** The dispatcher prepares a slice
+  only when it sees no session, so a refusal there is a second dispatcher or a race, and
+  overwriting the live ticket file was the worse answer. A failed prep skips the round.
+- **A test of "refuses" needs a timeout.** Without the refusal, the second start opens an agent
+  of its own and a synchronous call waits for it, for as long as the agent lives.
 
 ## Phase 2 — a blocked slice can be sent back
 
