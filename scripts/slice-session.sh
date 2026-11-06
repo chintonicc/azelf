@@ -652,6 +652,10 @@ rm -f "$worktree_path/.slice-lock-wait"
 # were finished. This is the session that picks the work back up.
 rm -f "$worktree_path/.slice-interrupted"
 
+# Written by a run for the session it found open here (noteRunMode). This session
+# has its own prompt from the run that started it.
+rm -f "$worktree_path/.slice-run-mode"
+
 # Said by the last session here when its turn was over (slice-finished.sh),
 # and read by the dispatcher as "waiting for you". A session is starting now,
 # so the slice is running again.

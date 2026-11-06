@@ -1,6 +1,6 @@
 # A ticket's comments are part of it, a red gate keeps its output, one land at a time across runs, and an adopted session can see the run's mode
 
-**Status:** in progress
+**Status:** built 2026-11-06 on branch `comments-gate-log-next-land`, not on `main` yet · Phase 1 dca95f3, Phase 2 61702bc, Phase 3 ef4be5a, Phase 4 next · see "Unobserved"
 **Written:** 2026-11-06
 **Companion:** the consumer-b friction entries of 2026-11-06 that came after
 `relaunch-and-blips-plan.md` was written: Backend #196, twice (binding assumptions only in an
@@ -105,12 +105,19 @@ after the heading. Line numbers are as of `0b5c108`.
 
 ## Phase 4 — an adopted session can see the run's mode
 
-- [ ] 4a. Round 1: for each live session this run did not start and that does not self-land,
+- [x] 4a. Round 1: for each live session this run did not start and that does not self-land,
   `--auto` writes `.slice-run-mode` where git ignores it and says so; without `--auto` it removes one.
-- [ ] 4b. `slice-session.sh` removes it at start. In `EXCLUDE_BLOCK`.
-- [ ] 4c. The skill says what to do with a message about a change of mode.
-- [ ] 4d. Tests: written for an adopted session under `--auto`, not for one with `--self-land`, not without
+- [x] 4b. `slice-session.sh` removes it at start. In `EXCLUDE_BLOCK`.
+- [x] 4c. The skill says what to do with a message about a change of mode.
+- [x] 4d. Tests: written for an adopted session under `--auto`, not for one with `--self-land`, not without
   `--auto`; gone at the next start; the session is not landed for it.
+
+## Unobserved
+
+Tested with fake agents and a fake tracker. On consumer-b's next real runs: does a session act on
+comments at the end of `.slice-ticket.md` without being told more? Do two dispatchers on one repo now
+stay out of each other's way? A person at a prompt is the one path without a test, since it needs a
+terminal. Nothing yet says whether a session ever checks `.slice-run-mode`.
 
 ## Order and cost
 

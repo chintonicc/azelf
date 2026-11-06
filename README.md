@@ -136,7 +136,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes fifteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes sixteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -169,7 +169,7 @@ saying so.
 | `scripts/azelf` | the launcher — `./scripts/azelf run --plan` and every other verb |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | fifteen marker patterns, in a delimited block |
+| `.git/info/exclude` | sixteen marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -1902,6 +1902,12 @@ The ssh and https spellings of one remote are two keys; give the checkouts one
 spelling. `AZELF_LOCKS_DIR` moves the root (the tests set it). A repo without an
 origin keeps `azelf-land.lock` in its common git dir. The gate lock stays in the
 common git dir: it is about load on one machine's checkout, which its worktrees share.
+
+**A session this run did not start keeps the prompt it was started with.** A run restarted
+with `--auto` does not land a session that was told a person releases it, and says so in its first
+round. So that the session can check when someone tells it the mode changed, the run writes
+`.slice-run-mode` in its worktree, which the next session there removes. `./scripts/slice-done.sh`
+in that tab releases the slice, and `azelf relaunch` replaces the session once it has ended.
 
 **One slice at a time goes from rebase to land, across runs.** The land lock covers the
 push, which takes seconds. The rebase, gates and review before it take minutes, and another

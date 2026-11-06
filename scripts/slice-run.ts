@@ -1465,6 +1465,68 @@ function waitingForYou(n: TicketId): Finished | null {
   return said.head === branchHead(n) ? said : null;
 }
 
+/** Written for a session started before this run, when the run is --auto. */
+const RUN_MODE_MARKER = ".slice-run-mode";
+
+/** Was this session told to land itself? On its command line, or parked in flags. */
+function selfLands(n: TicketId, pid: number): boolean {
+  const cmd = run(["ps", "-ww", "-o", "command=", "-p", String(pid)], {
+    allowFail: true,
+  }).out;
+  if (cmd.split(/\s+/).includes("--self-land")) return true;
+  try {
+    return readFileSync(join(worktreeFor(n), ".slice-flags"), "utf8")
+      .split("\n")
+      .includes("--self-land");
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What a run says to the sessions it found already open, in its first round.
+ *
+ * A session has the prompt of the run that started it. Under a restart with
+ * --auto it still says "a human releases this slice", and on consumer-b's Backend
+ * #196 another session told it that had changed; nothing in the worktree could
+ * confirm that, so it asked, and a person who was away was asked with it.
+ *
+ * Evidence, and nothing acts on it. A session told nothing goes on as it was, and
+ * a run does not land a session that said it finished: that session was told a
+ * person releases it. Its own marker and not `.slice-flags`, which the next session
+ * reads back to turn things on: a `--self-land` parked there would land one
+ * started by hand later.
+ */
+function noteRunMode(tickets: Ticket[]): void {
+  for (const t of tickets) {
+    if (!t.open || !hasWorktree(t.id)) continue;
+    const wt = worktreeFor(t.id);
+    const path = join(wt, RUN_MODE_MARKER);
+    if (!autoLand) {
+      rmSync(path, { force: true });
+      continue;
+    }
+    const pid = liveSession(t.id);
+    if (pid === null || selfLands(t.id, pid)) continue;
+    const told = ignoredIn(wt, RUN_MODE_MARKER);
+    if (told) {
+      writeFileSync(
+        path,
+        `auto\nWritten at ${new Date().toISOString()} by the dispatcher (pid ${
+          process.pid
+        }), which runs with --auto and found this session open. A slice in this mode lands when it says it is done: ./scripts/slice-done.sh, and not slice-finished.sh. A comment on the ticket that asks for a person's release still stands.\n`,
+      );
+    }
+    console.log(
+      `  ${ref(
+        t.id,
+      )}: its session (pid ${pid}) was started without --auto, so it still waits for a person — ./scripts/slice-done.sh in its tab releases it${
+        told ? `; ${RUN_MODE_MARKER} tells it, if it asks` : ""
+      }`,
+    );
+  }
+}
+
 /** What each slice's session last said, as `head:kind`, so it is said once. */
 const saidFinished = new Map<TicketId, string>();
 
@@ -6942,6 +7004,7 @@ try {
     noteHandWork(tickets);
     noteFinished(tickets);
     noteQuiet(tickets);
+    if (round === 1) noteRunMode(tickets);
 
     // Land before launching, so a slot freed this round is refilled this round.
     // One per round: every land fast-forwards the same master in the same main

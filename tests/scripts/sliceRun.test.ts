@@ -4056,6 +4056,97 @@ describe("the land reservation", () => {
   }, 60_000);
 });
 
+/**
+ * A session has the prompt of the run that started it. A run under --auto that
+ * finds one started without it says so in the worktree, where the session can
+ * check it, and does not land it for that.
+ */
+describe(".slice-run-mode", () => {
+  const AUTO = ["--auto", "--once", "-y", "--no-review", "40"];
+  const mode = (fx: Consumer) => join(fx.wt(40), ".slice-run-mode");
+  /** A commit in #40, and a session the dispatcher takes for #40's. */
+  const open = (extra: string[] = []) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    const script = join(fx.root, "slice-session.sh");
+    writeFileSync(script, "while :; do sleep 0.2; done\n");
+    const s = spawn("bash", [script, "40", ...extra], { stdio: "ignore" });
+    stray.push(s);
+    writeFileSync(join(fx.wt(40), ".slice-live"), `${s.pid}\n`);
+    return { fx, pid: s.pid };
+  };
+  const stray: ReturnType<typeof spawn>[] = [];
+  afterEach(() => {
+    for (const s of stray.splice(0)) s.kill("SIGKILL");
+  });
+
+  it("is written for a session started without --auto, and the slice is not landed for it", () => {
+    const { fx, pid } = open();
+
+    const r = runDispatcher(fx, AUTO);
+
+    expect(readFileSync(mode(fx), "utf8")).toMatch(/^auto\nWritten at /);
+    expect(r.out).toContain(
+      `#40: its session (pid ${pid}) was started without --auto, so it still waits for a person — ./scripts/slice-done.sh in its tab releases it; .slice-run-mode tells it, if it asks`,
+    );
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("init");
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+
+  it("is not written for a session told to land itself, on its command line or in its flags", () => {
+    const a = open(["--self-land"]);
+    expect(runDispatcher(a.fx, AUTO).out).not.toContain(
+      "started without --auto",
+    );
+    expect(existsSync(mode(a.fx))).toBe(false);
+    rmSync(a.fx.root, { recursive: true, force: true });
+
+    const b = open();
+    writeFileSync(join(b.fx.wt(40), ".slice-flags"), "--self-land\n");
+    expect(runDispatcher(b.fx, AUTO).out).not.toContain(
+      "started without --auto",
+    );
+    expect(existsSync(mode(b.fx))).toBe(false);
+  }, 60_000);
+
+  it("is not written where git does not ignore it, and the run still says so", () => {
+    const { fx } = open();
+    const exclude = join(fx.main, ".git", "info", "exclude");
+    writeFileSync(
+      exclude,
+      readFileSync(exclude, "utf8").replace(".slice-run-mode\n", ""),
+    );
+
+    const r = runDispatcher(fx, AUTO);
+
+    expect(existsSync(mode(fx))).toBe(false);
+    expect(r.out).toContain("was started without --auto");
+    expect(r.out).not.toContain(".slice-run-mode tells it");
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+
+  it("is removed by a run without --auto", () => {
+    const { fx } = open();
+    writeFileSync(mode(fx), "auto\nold\n");
+
+    const r = runDispatcher(fx, ["--once", "-y", "40"]);
+
+    expect(existsSync(mode(fx))).toBe(false);
+    expect(r.out).not.toContain("started without --auto");
+  }, 60_000);
+
+  it("is gone when the next session starts", () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    c = fx;
+    writeFileSync(mode(fx), "auto\nold\n");
+
+    sh(fx.main, "./scripts/slice-session.sh 40");
+
+    expect(existsSync(mode(fx))).toBe(false);
+  }, 60_000);
+});
+
 describe("azelf relaunch", () => {
   /** Two attempts on file for #40, in the review's own shape. */
   const reviewed = (fx: Consumer, spec: string) => {

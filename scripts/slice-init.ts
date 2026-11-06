@@ -83,6 +83,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-lock-wait
 .slice-flags
 .slice-retry
+.slice-run-mode
 .slice-interrupted
 .slice-hold
 .slice-reviews/
