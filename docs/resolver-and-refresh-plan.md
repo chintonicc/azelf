@@ -121,12 +121,12 @@ after the heading. Line numbers are as of `547714a`.
 
 ## Unobserved
 
-- **A real repair round.** The argv shape (`--allowedTools` before `-p`) was checked
-  against claude 2.1.314 by hand, and the flow is covered by tests with a fake
-  resolver; no real `claude -p` has yet repaired a real red gate. The first one on
-  consumer-b leaves `.slice-reviews/repair-<n>.md` in the main checkout: read it (did
-  it run the allowed command? did it fix the merge and not the test?) and record what
-  it did here, or in the friction log if it went wrong.
+- **A real repair round: seen.** On consumer-b, Backend #196 (2026-11-06). After the rebase the
+  suite was red in one test of about 14,000: a docs file stood 36 bytes over a byte budget. The
+  round cut 43 bytes from the branch's own additions and changed neither test nor limit. It reported
+  the suite green, azelf's gates agreed, and the ticket landed. One blemish: the commit subject is
+  `fix: the resolution — the gates said: <gate command> failed`, which names no ticket and gives the
+  command rather than the change.
 - **A real `reviewReadDirs` review: seen.** On consumer-b, Frontend #136's review
   (2026-11-02) compared lists in the backend clone, and its `UNVERIFIED:` line narrowed to
   the commit hash, since a reviewer cannot run git. Backend #190's (2026-11-06) kept one: the
