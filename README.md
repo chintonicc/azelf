@@ -1903,12 +1903,25 @@ spelling. `AZELF_LOCKS_DIR` moves the root (the tests set it). A repo without an
 origin keeps `azelf-land.lock` in its common git dir. The gate lock stays in the
 common git dir: it is about load on one machine's checkout, which its worktrees share.
 
-**A land the base moved under is rebased again.** The lock covers the land, not the
-gates and the review before it, or every other run's lands would wait behind a
-ten-minute review. So another run can land while a slice is being reviewed, and
-`slice-land.sh` then refuses it as diverged, with exit 75. The dispatcher rebases it
-onto the new base (reinstalling and resolving as on the first rebase), runs the gates
-again, and lands it in the same round:
+**One slice at a time goes from rebase to land, across runs.** The land lock covers the
+push, which takes seconds. The rebase, gates and review before it take minutes, and another
+run's land used to throw all of them away: on consumer-b three dispatchers on one repo lost
+races for an hour, and one slice was reviewed three times and still parked. So a run takes a
+reservation beside the land lock (`<key>/land-next`) before it rebases a slice, and gives it
+back after the land or the park. A run that finds it held says so once, skips landing for that
+round and does the rest of it:
+
+```
+  #146 waits for #150's land (another run, pid 41016): landing first would throw away its rebase, gates and review. Trying again next round.
+```
+
+A holder that is gone is taken over. A question to a person gives it back first, since the
+person may be gone too.
+
+**A land the base moved under is rebased again.** A merge by hand or `azelf push-main` still
+moves the base, and takes no reservation. `slice-land.sh` then refuses the slice as diverged,
+with exit 75. The dispatcher rebases it onto the new base (reinstalling and resolving as on the
+first rebase), runs the gates again, and lands it in the same round:
 
 ```
   #103: master moved while it was being gated and reviewed (now 0e28eaa) — rebasing again

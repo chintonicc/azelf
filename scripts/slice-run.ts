@@ -121,6 +121,7 @@ import {
   acquire,
   formatOwner,
   isRunning,
+  nextLandDir,
   parseOwner,
   processStart,
   readOwner,
@@ -5537,6 +5538,58 @@ function awaitingLand(
   );
 }
 
+/** Who this run last said it waits for, so it is said once per holder. */
+let reservationSaid = "";
+
+/**
+ * May this slice go from rebase to land now, or is another run on that road?
+ *
+ * Two runs on one repo land one at a time anyway. What they did not share was
+ * the road there: on consumer-b three dispatchers lost races for an hour, because
+ * each land threw away another run's rebase, gates and review, and #146 went round
+ * three times and still parked. The README used to say the wait would be worse.
+ * It is not, because the work it avoids is what takes the time.
+ *
+ * Never blocks: a run that finds it held skips landing this round and does the
+ * rest of the round, starting sessions and all. A holder that is gone is taken
+ * over. It is an optimisation and not a safety lock, so `LAND_RACES` stays for a
+ * merge by hand, and nothing is worse off without it than it was.
+ */
+function reserveLand(t: Ticket): boolean {
+  const dir = nextLandDir(repoRoot);
+  const a = tryTake(dir, {
+    pid: process.pid,
+    started: processStart(process.pid) ?? "",
+    label: ref(t.id),
+    since: new Date().toISOString(),
+  });
+  if (a.taken) {
+    reservationSaid = "";
+    if (a.tookOver) {
+      console.log(
+        `  took over the land reservation from ${a.tookOver.label} (pid ${a.tookOver.pid}) — that process is no longer running`,
+      );
+    }
+    return true;
+  }
+  const holder = a.holder
+    ? `${a.holder.label}'s land (another run, pid ${a.holder.pid})`
+    : "another run's land";
+  if (holder !== reservationSaid) {
+    reservationSaid = holder;
+    console.log(
+      `  ${ref(
+        t.id,
+      )} waits for ${holder}: landing first would throw away its rebase, gates and review. Trying again next round.`,
+    );
+  }
+  return false;
+}
+
+function releaseLand(): void {
+  release(nextLandDir(repoRoot), process.pid);
+}
+
 /**
  * Record the failure, ask what to do, and act on the answer.
  *
@@ -5562,6 +5615,9 @@ function park(
     body: kind === "review" ? bodyHash(t.id) ?? undefined : undefined,
     autoRetries: spent,
   };
+  // A person may be gone for hours, and other runs should not wait on that. A
+  // retry they ask for goes on unreserved, with today's risk of a lost race.
+  if (!assumeYes && process.stdin.isTTY) releaseLand();
   switch (askAboutBlocked(t, reason, waysOut(t.id, kind, spent), conflicted)) {
     case "resolve":
       // A successful resolution leaves the branch rebased, so the tryLand it
@@ -6895,12 +6951,20 @@ try {
     if (stopForAfterLand()) break;
     const finished = tickets.filter((t) => awaitingLand(t, isParked));
     if (finished.length) {
-      console.log(
-        `\n[round ${round}] ${finished.length} marked done — landing one`,
-      );
       const next = landOrder(finished)[0] as Ticket;
-      retriedFor.delete(next.id);
-      tryLand(next);
+      // The line after the reservation: a wait is said once, and this would
+      // repeat every round of it.
+      if (reserveLand(next)) {
+        console.log(
+          `\n[round ${round}] ${finished.length} marked done — landing one`,
+        );
+        retriedFor.delete(next.id);
+        try {
+          tryLand(next);
+        } finally {
+          releaseLand();
+        }
+      }
     }
     if (stopForAfterLand()) break;
 

@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   appendFileSync,
   chmodSync,
@@ -3944,6 +3944,115 @@ describe("a red gate's whole output", () => {
     expect(r.out).not.toContain("whole output");
     expect(existsSync(logOf(fx))).toBe(false);
     expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+});
+
+/**
+ * One slice at a time goes from rebase to land, across runs. Under the old rule
+ * each land threw away another run's rebase, gates and review.
+ */
+describe("the land reservation", () => {
+  const LOCK = join(AZELF, "scripts", "slice-lock.ts");
+  const dirOf = (fx: Consumer) =>
+    spawnSync("bun", [LOCK, "next-land-dir", fx.main], {
+      encoding: "utf8",
+      env: process.env,
+    }).stdout.trim();
+  const WAITS = "#40 waits for #99's land (another run, pid";
+  /** Another run on its way: a live process holding the reservation. */
+  const holdFor = (fx: Consumer) => {
+    const other = spawn("sleep", ["120"], { stdio: "ignore" });
+    const r = spawnSync(
+      "bun",
+      [
+        LOCK,
+        "acquire",
+        dirOf(fx),
+        "--pid",
+        String(other.pid),
+        "--label",
+        "#99",
+        "--what",
+        "land",
+      ],
+      { encoding: "utf8", env: process.env },
+    );
+    expect(r.status, r.stderr).toBe(0);
+    return other;
+  };
+
+  it("held by another run: nothing is gated, the run goes on, and it lands when that one ends", async () => {
+    const fx = makeConsumer({
+      worktrees: [40, 41],
+      remote: true,
+      gate: ["bash", "-c", "echo gate >> ../gates"],
+    });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    sessions.push(fakeSession(fx, 41));
+    const other = holdFor(fx);
+    try {
+      d = startDispatcher(fx, ["--auto", "-y", "--interval", "1", "40", "41"]);
+      await d.until(WAITS);
+      await d.until(/waits for[\s\S]*\[round \d+\][\s\S]*\[round \d+\]/);
+      expect(d.output().split(WAITS).length - 1).toBe(1);
+      expect(existsSync(join(fx.root, "gates"))).toBe(false);
+      expect(git(fx.main, "log", "-1", "--format=%s")).toBe("init");
+    } finally {
+      other.kill("SIGKILL");
+    }
+    await d.until("took over the land reservation from #99");
+    await d.until("1 running · 0 blocked · 1 open —");
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    expect(existsSync(dirOf(fx))).toBe(false);
+  }, 60_000);
+
+  it("two real runs on two slices run the gates twice, not three times", async () => {
+    const fx = makeConsumer({
+      worktrees: [40, 42],
+      remote: true,
+      gate: ["bash", "-c", "sleep 1; echo gate >> ../gates"],
+    });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    commitIn(fx.wt(42), "b.txt", "b\n", "feat: b");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    sh(fx.wt(42), "./scripts/slice-done.sh");
+
+    const args = ["--auto", "--no-review", "-y", "--interval", "1"];
+    const a = startDispatcher(fx, [...args, "40"]);
+    const b = startDispatcher(fx, [...args, "42"]);
+    const [codeA, codeB] = await Promise.all([a.exited, b.exited]);
+
+    expect(codeA, a.output()).toBe(0);
+    expect(codeB, b.output()).toBe(0);
+    expect(
+      readFileSync(join(fx.root, "gates"), "utf8").trim().split("\n").length,
+    ).toBe(2);
+    expect(`${a.output()}${b.output()}`).not.toContain("rebasing again");
+    expect(git(fx.main, "log", "--format=%s", "-2").split("\n").sort()).toEqual(
+      ["feat: a", "feat: b"],
+    );
+    expect(existsSync(dirOf(fx))).toBe(false);
+  }, 90_000);
+
+  it("is given back after a park", () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, gate: ["false"] });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(fx, [
+      "--auto",
+      "--once",
+      "-y",
+      "--no-review",
+      "40",
+    ]);
+
+    expect(r.out).toContain("did not land");
+    expect(existsSync(dirOf(fx))).toBe(false);
   }, 60_000);
 });
 

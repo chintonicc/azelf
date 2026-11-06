@@ -94,12 +94,12 @@ after the heading. Line numbers are as of `0b5c108`.
 
 ## Phase 3 — one land at a time across runs
 
-- [ ] 3a. `nextLandDir(checkout)` in `slice-lock.ts`, beside `landLockDir`.
-- [ ] 3b. The round's land: `reserveLand(next)`, or a line said once per holder and on to the rest of the
+- [x] 3a. `nextLandDir(checkout)` in `slice-lock.ts`, beside `landLockDir`.
+- [x] 3b. The round's land: `reserveLand(next)`, or a line said once per holder and on to the rest of the
   round. A dead holder is taken over, and said.
-- [ ] 3c. `park` releases before a question to a person.
-- [ ] 3d. README, the paragraph that said the opposite.
-- [ ] 3e. Tests: held by a live process, nothing is gated and the run goes on; the holder ends and it
+- [x] 3c. `park` releases before a question to a person.
+- [x] 3d. README, the paragraph that said the opposite.
+- [x] 3e. Tests: held by a live process, nothing is gated and the run goes on; the holder ends and it
   lands; two real dispatchers on two slices run the gates twice, not three times; released after a
   land and after a park.
 

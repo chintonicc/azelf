@@ -6,6 +6,7 @@
  *   bun slice-lock.ts acquire <dir> --pid <n> --label <who> --what <land> [--wait <seconds>]
  *   bun slice-lock.ts release <dir> --pid <n>
  *   bun slice-lock.ts land-dir <checkout>     where the land lock of that checkout's remote lives
+ *   bun slice-lock.ts next-land-dir <checkout>  where the reservation beside it lives
  *
  * WHY THIS EXISTS
  * ---------------
@@ -107,6 +108,16 @@ export function landLockDir(checkout: string): string {
   mkdirSync(dir, { recursive: true });
   return join(dir, "land");
 }
+
+/**
+ * The reservation beside the land lock: who is on their way from rebase to land.
+ * A land takes seconds and is what `landLockDir` serialises; the rebase, gates
+ * and review before it take minutes, and another run's land throws all of them
+ * away. Keyed by the remote the same way, so every clone sees it. See
+ * `reserveLand` in slice-run.ts.
+ */
+export const nextLandDir = (checkout: string): string =>
+  `${landLockDir(checkout)}-next`;
 
 export type Owner = {
   pid: number;
@@ -321,6 +332,11 @@ function cli(argv: string[]): number {
     console.log(landLockDir(dir));
     return 0;
   }
+  if (verb === "next-land-dir") {
+    if (!dir || argv.length !== 2) return usage();
+    console.log(nextLandDir(dir));
+    return 0;
+  }
   const value = (flag: string) => {
     const i = argv.indexOf(flag);
     return i === -1 ? undefined : argv[i + 1];
@@ -367,6 +383,7 @@ function usage(): number {
   );
   console.error("       slice-lock.ts release <dir> --pid <n>");
   console.error("       slice-lock.ts land-dir <checkout>");
+  console.error("       slice-lock.ts next-land-dir <checkout>");
   return 64;
 }
 
