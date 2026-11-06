@@ -109,6 +109,13 @@ next round, whatever it parked on. A review verdict on an unchanged diff and an
 unchanged ticket cannot change, so re-running it would be a paid loop rather than
 optimism. A parked ticket closed some other way — landed by hand — stops counting.
 
+`azelf relaunch <ticket>` sends a slice back to a new session in its worktree, with the
+ticket as it reads now and the last review's finding in `.slice-reviews/last-block.md`.
+Use it when a BLOCK needs the code changed, or when a slice that said done needs a
+follow-up: do not hand-write markers, and do not tell the old session to go on, since it
+no longer has a marker and a retried land can start under it. Under `--auto`, editing the
+ticket after a BLOCK does this by itself.
+
 If every open slice is parked and nothing is running, the dispatcher says so and
 stops instead of sleeping in a circle. The run ends with a list of what is parked and
 why, and the command that picks the run up again, and exits non-zero. Every attempt's

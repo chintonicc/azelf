@@ -118,35 +118,47 @@ stale, and only that repo's own dispatcher moves it.
 
 ## Phase 2 — a blocked slice can be sent back
 
-- [ ] 2a. `markForRelaunch(id)` in `slice-run.ts`: reads the PID from `.slice-ready-to-land`,
+- [x] 2a. `markForRelaunch(id)` in `slice-run.ts`: reads the PID from `.slice-ready-to-land`,
   removes it and `.slice-finished`, writes `.slice-interrupted` with first line `relaunch`
   and `.slice-retry` (so a running dispatcher un-parks it through `isParked`, then neither
   `awaitingLand` nor `autoFinished` takes it, and `runnable` does), writes or removes
   `last-block.md`, and ends the old agent if `isSessionOf` still says so (`pkill -TERM -P`,
   as `end_agent_under`).
-- [ ] 2b. `last-block.md`: the last `## Attempt` of `.slice-reviews/ticket-<n>.md`, when its
+- [x] 2b. `last-block.md`: the last `## Attempt` of `.slice-reviews/ticket-<n>.md`, when its
   spec says `VERDICT: BLOCK`.
-- [ ] 2c. `azelf relaunch <n>` / `--relaunch <n>`, before the plan loads, like `--retry`.
+- [x] 2c. `azelf relaunch <n>` / `--relaunch <n>`, before the plan loads, like `--retry`.
   Refuses, with the reason: no worktree, a hold, a git operation in progress, a live session,
   a land record. Says whether a running dispatcher has it (`liveClaim`), as `--retry` does.
   `bin/azelf.ts`, `slice-run-usage.ts`, README, `agent/commands/azelf.md`.
-- [ ] 2d. `isParked`: when `due.why === "edited"`, under `autoLand`, on a BLOCK that was a
+- [x] 2d. `isParked`: when `due.why === "edited"`, under `autoLand`, on a BLOCK that was a
   verdict: `markForRelaunch` and a line that says so. `retryDue` stays read-only (its comment
   says why). `Parked` needs to know verdict from `spec.failed`.
-- [ ] 2e. `isParked`'s line says "relaunch requested" when `.slice-interrupted` is there, not
+- [x] 2e. `isParked`'s line says "relaunch requested" when `.slice-interrupted` is there, not
   "retrying the land". `waysOut` and the ✗ line in `reviewSlice` name `azelf relaunch <n>`.
-- [ ] 2f. `slice-session.sh`: when `last-block.md` exists, the start prompt adds: the last
+- [x] 2f. `slice-session.sh`: when `last-block.md` exists, the start prompt adds: the last
   land was refused by the spec review, the finding is in that file, `.slice-ticket.md` is the
   ticket as it reads now; fix what the finding names that the ticket still asks for, and if
   nothing is left, say so and finish.
-- [ ] 2g. `slice-session.sh`, the tab: a fourth way a self-landing session is over: replaced.
+- [x] 2g. `slice-session.sh`, the tab: a fourth way a self-landing session is over: replaced.
   `.slice-interrupted` says `relaunch`, or `.slice-live` names another PID. Exit 86, else
   every relaunch leaves a dead tab behind (the ending agent exits on a signal).
-- [ ] 2h. Tests: BLOCK, edit, under `--auto`: a new session in the same worktree with the new
+- [x] 2h. Tests: BLOCK, edit, under `--auto`: a new session in the same worktree with the new
   ticket and the finding, no gate or review run first, then it lands. `azelf relaunch` on a
   parked slice in a running dispatcher, and with none running. Each refusal. The old session
   is ended and its tab exits 86. `last-block.md` leaves the tree clean. No BLOCK, no file.
   A `spec.failed` park, edited, reviews again.
+
+### What building it found
+
+- **`Parked` did not need a new field.** The review file already tells a verdict from a review
+  that could not run: `lastBlock` is non-null only for a spec section with `VERDICT: BLOCK`.
+  One source for the finding and the decision to send it back, and it survives a restart.
+- **`.slice-retry` is written by the command, not by `markForRelaunch`.** `isParked` has already
+  consumed the marker when it relaunches; written there, it would un-park the slice's next
+  failure for nothing.
+- **A relaunch during a land is left alone.** A person can run it while the dispatcher is gating
+  that slice. The land goes on: if it passes, it lands what was reviewed, and if it parks, the
+  `.slice-retry` un-parks it into the session. Neither loses anything, so there is no check.
 
 ## Phase 3 — a network blip is not a failure
 

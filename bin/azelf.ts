@@ -53,6 +53,9 @@ const usage = (asked = false): never => {
       "        azelf run --help lists every flag",
       "  azelf retry <ticket>",
       "        retry a parked slice's land in the running dispatcher's next round",
+      "  azelf relaunch <ticket>",
+      "        send a slice back to a new session, with the last review's finding;",
+      "        the old session is ended",
       "  azelf hold <ticket> [--by <who>] [--why <text>]",
       "        hold a slice's worktree for work by hand: nothing lands, relaunches",
       "        or removes it until azelf release <ticket>",
@@ -101,6 +104,7 @@ if (verb === "init") {
 } else if (
   verb === "run" ||
   verb === "retry" ||
+  verb === "relaunch" ||
   verb === "hold" ||
   verb === "release" ||
   verb === "gates"
@@ -109,7 +113,12 @@ if (verb === "init") {
   if (verb !== "run" && verb !== "gates" && (!id || id.startsWith("-"))) {
     usage();
   }
-  if ((verb === "retry" || verb === "release") && rest.length > 0) usage();
+  if (
+    (verb === "retry" || verb === "relaunch" || verb === "release") &&
+    rest.length > 0
+  ) {
+    usage();
+  }
   if (verb === "hold" && !holdFlags(rest)) usage();
   // At most one ticket, and no flags: the verb is the whole instruction. The
   // session's own check does not wait for the gate lock; see gatesPass.

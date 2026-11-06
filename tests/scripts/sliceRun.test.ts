@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AZELF,
@@ -3066,33 +3066,55 @@ describe("a parked slice", () => {
     );
   });
 
-  it("retries a BLOCK when the ticket is edited, and not before", async () => {
-    // Blocks until the ticket body says FIXED. It runs in the worktree, so
-    // ../reviews is next to it, under the consumer's root.
-    const review = `echo call >> ../reviews
-case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
+  it("sends a BLOCK back to a session when the ticket is edited, with the ticket and the finding", async () => {
+    // Blocks until the ticket body says FIXED. Each step adds a line to one
+    // file, next to the worktree, so the order is what the test reads.
+    const review = `echo review >> ../events
+case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "the screen is missing"; echo "VERDICT: BLOCK" ;; esac`;
+    const agent = `echo session >> ../events
+printf "%s" "$1" > ../prompt
+cp .slice-ticket.md ../ticket-seen
+cp .slice-reviews/last-block.md ../finding-seen
+git status --porcelain > ../status-seen`;
     const { c, d } = parkedRun(
-      { review: ["bash", "-c", review, "reviewer"], body: "build a" },
+      {
+        review: ["bash", "-c", review, "reviewer"],
+        gate: ["bash", "-c", "echo gate >> ../events"],
+        agent: ["bash", "-c", agent, "agent"],
+        launch: true,
+        body: "build a",
+      },
       ["--auto"],
     );
+    const seenFile = (name: string) => readFileSync(join(c.root, name), "utf8");
     await d.until(
-      "parked (non-interactive) — retried when its branch moves, when the ticket is edited, or now with: azelf retry 40",
+      "parked (non-interactive) — retried when its branch moves, or now with: azelf retry 40; sent back to a session when the ticket is edited, or now with: azelf relaunch 40",
     );
     await d.until(seen("parked (non-interactive)", 1, 3));
-    // Spec and standards, once each: an unchanged ticket is not reviewed again.
-    const reviews = () =>
-      readFileSync(join(c.root, "reviews"), "utf8").trim().split("\n").length;
-    expect(reviews()).toBe(2);
-    // The ✗ line names the review file, right under it.
+    // An unchanged ticket is not reviewed again.
+    expect(seenFile("events")).toBe("gate\nreview\nreview\n");
+    // The ✗ line names the way back, and the review file right under it.
     expect(d.output()).toMatch(
-      /#40 not landed — spec review says BLOCK\..*\n {5}review: \S+\/\.slice-reviews\/ticket-40\.md\n/,
+      /#40 not landed — spec review says BLOCK\. Send it back to a session with the finding \(azelf relaunch 40\).*\n {5}review: \S+\/\.slice-reviews\/ticket-40\.md\n/,
     );
 
     c.setTicket("40", { body: "build a — FIXED" });
-    await d.until("#40: the ticket was edited since the BLOCK — retrying.");
+    await d.until(
+      "#40: the ticket was edited since the BLOCK — sending it back to a session with the finding.",
+    );
     await d.until(LANDED);
 
-    expect(reviews()).toBe(4);
+    // The session comes first: no gate or review of unchanged code against
+    // the new ticket. The land after it is the ordinary one.
+    expect(seenFile("events")).toBe(
+      "gate\nreview\nreview\nsession\ngate\nreview\nreview\n",
+    );
+    expect(seenFile("prompt")).toContain(
+      "The last land of this slice was refused by the spec review. Its finding is in .slice-reviews/last-block.md in this worktree",
+    );
+    expect(seenFile("ticket-seen")).toContain("build a — FIXED");
+    expect(seenFile("finding-seen")).toContain("the screen is missing");
+    expect(seenFile("status-seen")).toBe("");
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
     // The passing review did not replace the BLOCK that parked it.
     const report = readFileSync(
@@ -3103,6 +3125,60 @@ case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
     expect(report).toMatch(
       /## Attempt 1 — [\d-]+ \d\d:\d\d\n\n### Spec\n[\s\S]*VERDICT: BLOCK[\s\S]*## Attempt 2 — [\d-]+ \d\d:\d\d\n\n### Spec\n[\s\S]*VERDICT: PASS/,
     );
+  }, 60_000);
+
+  it("a review that could not run has no finding: an edited ticket reviews again", async () => {
+    const review = `case "$1" in *FIXED*) echo "VERDICT: PASS" ;; *) echo "no reviewer" >&2; exit 1 ;; esac`;
+    const { c, d } = parkedRun(
+      {
+        review: ["bash", "-c", review, "reviewer"],
+        launch: true,
+        body: "build a",
+      },
+      ["--auto"],
+    );
+    await d.until(
+      "parked (non-interactive) — retried when its branch moves, when the ticket is edited, or now with: azelf retry 40; sent back to a session with: azelf relaunch 40",
+    );
+
+    c.setTicket("40", { body: "build a — FIXED" });
+    await d.until("#40: the ticket was edited since the BLOCK — retrying.");
+    await d.until(LANDED);
+
+    expect(d.output()).not.toContain("starting #40");
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("azelf relaunch opens a session for a parked slice in the running dispatcher", async () => {
+    // Red until the session has run: it leaves ../ok next to the worktree.
+    const { c, d } = parkedRun(
+      {
+        gate: ["test", "-f", "../ok"],
+        agent: [
+          "bash",
+          "-c",
+          "echo session >> ../events; touch ../ok",
+          "agent",
+        ],
+        launch: true,
+      },
+      ["--auto", "--no-review"],
+    );
+    await d.until(RED);
+
+    const r = azelfRelaunch(c, "40");
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("#40 goes back to a session");
+    expect(r.out).toContain("its last review gave no BLOCK to pass on");
+    expect(r.out).toContain(
+      `the running dispatcher (pid ${d.pid}) opens it next round`,
+    );
+    await d.until("#40: relaunch requested — opening a session.");
+    await d.until(LANDED);
+
+    expect(readFileSync(join(c.root, "events"), "utf8")).toBe("session\n");
+    expect(count(d.output(), RED)).toBe(1);
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
   }, 60_000);
 
   it("does not stop the run while a parked slice is due a retry", () => {
@@ -3377,6 +3453,180 @@ const azelfRetry = (fx: Consumer, id: string) => {
   });
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 };
+
+const azelfRelaunch = (fx: Consumer, ...args: string[]) => {
+  const r = spawnSync(
+    "bun",
+    [join(AZELF, "bin", "azelf.ts"), "relaunch", ...args],
+    {
+      cwd: fx.main,
+      encoding: "utf8",
+      env: { ...process.env, SLICE_REPO_ROOT: fx.main },
+    },
+  );
+  return { code: r.status, out: `${r.stdout}${r.stderr}` };
+};
+
+describe("azelf relaunch", () => {
+  /** Two attempts on file for #40, in the review's own shape. */
+  const reviewed = (fx: Consumer, spec: string) => {
+    mkdirSync(join(fx.main, ".slice-reviews"), { recursive: true });
+    writeFileSync(
+      join(fx.main, ".slice-reviews", "ticket-40.md"),
+      `# Review — #40 t
+
+## Attempt 1 — 2026-11-02 10:00
+
+### Spec
+
+the first finding
+VERDICT: BLOCK
+
+### Standards
+
+nothing
+
+## Attempt 2 — 2026-11-02 11:00
+
+### Spec
+
+${spec}
+
+### Standards
+
+VERDICT: BLOCK is not this section's to say
+`,
+    );
+  };
+  const done = () => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["bash", "-c", 'printf "%s" "$1" > ../prompt', "agent"],
+      launch: true,
+    });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    c = fx;
+    return fx;
+  };
+  const marker = (fx: Consumer, name: string) => join(fx.wt(40), name);
+  const FINDING = ".slice-reviews/last-block.md";
+
+  it("with no dispatcher: marks the slice, and the next run opens the session with the finding", async () => {
+    const fx = done();
+    reviewed(fx, "the second finding\nVERDICT: BLOCK");
+
+    const r = azelfRelaunch(fx, "40");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      `#40 goes back to a session, with the review's finding in ${fx.wt(
+        40,
+      )}/${FINDING}.`,
+    );
+    expect(r.out).toContain(
+      "no running dispatcher has #40 — azelf run --auto 40 starts one",
+    );
+    expect(existsSync(marker(fx, ".slice-ready-to-land"))).toBe(false);
+    expect(readFileSync(marker(fx, ".slice-interrupted"), "utf8")).toBe(
+      "relaunch\n",
+    );
+    const finding = readFileSync(marker(fx, FINDING), "utf8");
+    expect(finding).toContain("the second finding");
+    expect(finding).not.toContain("the first finding");
+    // In the exclude block: a dirty tree would read as unfinished work.
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+
+    const run = runDispatcher(fx, [
+      "--auto",
+      "--once",
+      "-y",
+      "--no-review",
+      "40",
+    ]);
+    expect(run.out).toContain("started #40");
+    expect(run.out).not.toContain("marked done");
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("init");
+    const prompt = join(fx.root, "prompt");
+    const end = Date.now() + 30_000;
+    while (!existsSync(prompt) && Date.now() < end) {
+      await new Promise((res) => setTimeout(res, 100));
+    }
+    expect(readFileSync(prompt, "utf8")).toContain(
+      "Its finding is in .slice-reviews/last-block.md",
+    );
+  }, 60_000);
+
+  it("no BLOCK, no file: a PASS on the last attempt takes back an older finding", () => {
+    const fx = done();
+    mkdirSync(join(fx.wt(40), ".slice-reviews"));
+    writeFileSync(marker(fx, FINDING), "from an earlier relaunch\n");
+    reviewed(fx, "fine\nVERDICT: PASS");
+
+    const r = azelfRelaunch(fx, "40");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("its last review gave no BLOCK to pass on");
+    expect(existsSync(marker(fx, FINDING))).toBe(false);
+  });
+
+  it("a review that could not run is no finding", () => {
+    const fx = done();
+    reviewed(fx, "(spec review did not return — treating as BLOCK)");
+
+    const r = azelfRelaunch(fx, "40");
+
+    expect(r.code).toBe(0);
+    expect(existsSync(marker(fx, FINDING))).toBe(false);
+  });
+
+  it("refuses a ticket with no worktree, and an unusable id", () => {
+    c = makeConsumer({});
+    const none = azelfRelaunch(c, "99");
+    expect(none.code).toBe(1);
+    expect(none.out).toContain("#99: no worktree at");
+    expect(azelfRelaunch(c, "nope").code).toBe(64);
+    expect(azelfRelaunch(c, "99", "100").code).not.toBe(0);
+  });
+
+  /** A refusal changes nothing: the ready marker is still there. */
+  const refused = (fx: Consumer, text: string) => {
+    const r = azelfRelaunch(fx, "40");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain(text);
+    expect(existsSync(marker(fx, ".slice-ready-to-land"))).toBe(true);
+    expect(existsSync(marker(fx, ".slice-interrupted"))).toBe(false);
+  };
+
+  it("refuses a held worktree", () => {
+    const fx = done();
+    sh(fx.main, "./scripts/azelf hold 40 --why 'by hand'");
+    refused(fx, "#40: it is held");
+  });
+
+  it("refuses with a git operation in progress", () => {
+    const fx = done();
+    const dir = git(fx.wt(40), "rev-parse", "--git-path", "rebase-merge");
+    mkdirSync(isAbsolute(dir) ? dir : join(fx.wt(40), dir), {
+      recursive: true,
+    });
+    refused(fx, "is in progress in its worktree");
+  });
+
+  it("refuses a live session", () => {
+    const fx = done();
+    const session = fakeSession(fx, 40);
+    sessions.push(session);
+    refused(fx, `a session is running in it (pid ${session.pid})`);
+  });
+
+  it("refuses a slice whose land only has to finish", () => {
+    const fx = done();
+    writeFileSync(join(fx.main, ".git", "azelf-landed-40.txt"), "x\n");
+    refused(fx, "it is pushed already");
+  });
+});
 
 describe("azelf retry", () => {
   it("refuses a ticket with no worktree", () => {

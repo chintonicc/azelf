@@ -27,6 +27,8 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --gates          the same for the slice whose worktree you are in
   azelf run --gates --no-lock    without waiting for the gate lock (azelf gates)
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
+  azelf run --relaunch 12    send slice 12 back to a session, with the review's
+                             finding (azelf relaunch)
   azelf run --hold 12 [--by <who>] [--why <text>]
                              hold slice 12's worktree for work by hand: nothing
                              lands, relaunches or removes it (azelf hold)
@@ -45,6 +47,7 @@ export const VALUE_FLAGS = new Set([
   "--max",
   "--interval",
   "--retry",
+  "--relaunch",
   "--hold",
   "--release",
   "--by",

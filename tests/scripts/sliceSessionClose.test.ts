@@ -2,7 +2,14 @@ import { type ChildProcess, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type Consumer, git, makeConsumer, sh, shResult } from "./fixture";
+import {
+  AZELF,
+  type Consumer,
+  git,
+  makeConsumer,
+  sh,
+  shResult,
+} from "./fixture";
 
 /**
  * The tab of a landed --auto slice closes because `slice-session.sh` exits 86,
@@ -298,6 +305,79 @@ describe("a tab removes only its own marker, and a session does not start over a
     } finally {
       other.kill("SIGKILL");
     }
+  }, 60_000);
+});
+
+/**
+ * `azelf relaunch` ends the session it replaces, which exits on a signal; kept
+ * as a crash, every relaunch would leave a dead tab behind.
+ */
+describe("a session that was replaced closes its tab", () => {
+  it("azelf relaunch ends a session that said done, and its tab exits 86", async () => {
+    const c = setup();
+    const s = await sessionDeclaredDone(c);
+    const pid = readFileSync(
+      join(c.wt(40), ".slice-ready-to-land"),
+      "utf8",
+    ).split("\n")[0];
+
+    const r = spawnSync(
+      "bun",
+      [join(AZELF, "bin", "azelf.ts"), "relaunch", "40"],
+      {
+        cwd: c.main,
+        encoding: "utf8",
+        env: { ...process.env, SLICE_REPO_ROOT: c.main },
+      },
+    );
+
+    expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+    expect(r.stdout).toContain(`ended the old session (pid ${pid})`);
+    expect(agentRunning()).toBe(false);
+    expect(await s.exited).toBe(86);
+    expect(s.output()).toContain("replaced by a new session of this slice");
+    expect(existsSync(c.wt(40))).toBe(true);
+  }, 60_000);
+
+  it("a marker naming another session closes the tab too", async () => {
+    const c = setup();
+    const s = startSession(c);
+    const marker = join(c.wt(40), ".slice-live");
+    await until("the agent", () => existsSync(marker) && agentRunning());
+
+    writeFileSync(marker, "999999\n");
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+
+    expect(await s.exited).toBe(86);
+  }, 60_000);
+
+  it("without --self-land the tab stays: a person may be reading it", async () => {
+    const c = setup();
+    const s = startSession(c, []);
+    await until(
+      "the agent",
+      () => existsSync(join(c.wt(40), ".slice-live")) && agentRunning(),
+    );
+    writeFileSync(join(c.wt(40), ".slice-interrupted"), "relaunch\n");
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+
+    expect(await s.exited).toBe(128 + 15);
+    expect(s.output()).not.toContain("closing this tab");
+  }, 60_000);
+
+  it("a crash with a pid on .slice-interrupted is still a crash", async () => {
+    const c = setup();
+    const s = startSession(c);
+    await until(
+      "the agent",
+      () => existsSync(join(c.wt(40), ".slice-live")) && agentRunning(),
+    );
+    writeFileSync(join(c.wt(40), ".slice-interrupted"), "12345\n");
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+
+    expect(await s.exited).toBe(128 + 15);
   }, 60_000);
 });
 

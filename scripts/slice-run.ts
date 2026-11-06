@@ -2923,7 +2923,7 @@ function reviewSlice(t: Ticket): string | null {
       `  ✗ ${ref(t.id)} not landed — ${
         spec.failed
           ? `${refusal}. Retry it once the reviewer can run (azelf retry ${t.id})`
-          : "spec review says BLOCK. Fix it in the worktree, correct the ticket if the spec is wrong"
+          : `spec review says BLOCK. Send it back to a session with the finding (azelf relaunch ${t.id}), fix it in the worktree, correct the ticket if the spec is wrong`
       }, or land it without the review: ./scripts/slice-land.sh ${t.id}.`,
     );
     // The path is printed above too, as `report saved:`, but the review's text
@@ -4503,7 +4503,9 @@ function retryDue(
 ): { line: string; spent: number; why: RetryWhy } | null {
   if (existsSync(join(worktreeFor(id), RETRY_MARKER))) {
     return {
-      line: `${ref(id)}: retry requested — retrying the land.`,
+      line: relaunchRequested(id)
+        ? `${ref(id)}: relaunch requested — opening a session.`
+        : `${ref(id)}: retry requested — retrying the land.`,
       spent: p.autoRetries,
       why: "requested",
     };
@@ -4589,8 +4591,149 @@ function landOrder(ready: Ticket[]): Ticket[] {
 }
 
 /**
+ * The first line of `.slice-interrupted` when `markForRelaunch` wrote it. The
+ * other writers put a pid there. The old session's tab reads it too, to tell a
+ * replacement from a crash: see "Closing the tab" in slice-session.sh.
+ */
+const RELAUNCH_MARK = "relaunch";
+function relaunchRequested(id: TicketId): boolean {
+  try {
+    const text = readFileSync(
+      join(worktreeFor(id), INTERRUPTED_MARKER),
+      "utf8",
+    );
+    return text.split("\n")[0]?.trim() === RELAUNCH_MARK;
+  } catch {
+    return false;
+  }
+}
+
+/** Where a session sent back after a BLOCK finds the finding, in its worktree. */
+const LAST_BLOCK_DIR = ".slice-reviews";
+const LAST_BLOCK_FILE = "last-block.md";
+
+/**
+ * The last attempt in this slice's review file, when its spec section gave
+ * the verdict BLOCK. Null for a PASS, for a review that could not run, and for
+ * an answer with no verdict in it: `spec.failed` and "no parseable VERDICT"
+ * leave no finding for a session to act on.
+ */
+function lastBlock(id: TicketId): string | null {
+  let text: string;
+  try {
+    text = readFileSync(join(REVIEW_DIR, `ticket-${id}.md`), "utf8");
+  } catch {
+    return null;
+  }
+  const last = [...text.matchAll(/^## Attempt \d+/gm)].pop();
+  if (last?.index === undefined) return null;
+  const attempt = text.slice(last.index);
+  const end = attempt.lastIndexOf("### Standards");
+  const spec = end < 0 ? attempt : attempt.slice(0, end);
+  return spec.match(/^VERDICT:\s*(PASS|BLOCK)\s*$/m)?.[1] === "BLOCK"
+    ? attempt
+    : null;
+}
+
+/** Why this slice cannot be sent back to a session now, or null if it can. */
+function relaunchRefusal(id: TicketId): string | null {
+  const wt = worktreeFor(id);
+  if (!hasWorktree(id)) return `no worktree at ${wt} — nothing to relaunch`;
+  const held = holdOf(repoRoot, wt);
+  if (held) {
+    return `it is ${describeHold(held)} — ${releaseCommand(
+      id,
+      wt,
+      held,
+    )} first`;
+  }
+  const what = handWork(wt);
+  if (what) {
+    return `a ${what} is in progress in its worktree — finish or abort it first`;
+  }
+  const pid = liveSession(id);
+  if (pid !== null) {
+    return `a session is running in it (pid ${pid}) — tell that session, or end it first`;
+  }
+  if (hasLandRecord(id)) {
+    return "it is pushed already, and only its land has to finish — azelf run finishes it";
+  }
+  return null;
+}
+
+/**
+ * Sends a slice back to a session, through the path a crash takes: with
+ * `.slice-interrupted` there, neither `awaitingLand` nor `autoFinished` takes
+ * it, `runnable` does, and the ordinary prep rewrites `.slice-ticket.md`. On
+ * consumer-b's Frontend #136 the review was right and the ticket was corrected,
+ * and nothing could send the slice back but that marker made by hand, read out
+ * of this source, and the new session got the ticket but not the finding.
+ *
+ * Beyond the crash path: what says "finished" goes, the finding goes where the
+ * new session finds it, and the old session is ended, because a session that
+ * said done often still sits at its REPL, and its tab would stay. The marker is
+ * written before the agent is ended, since that is what the tab reads.
+ *
+ * The finding is in the worktree rather than the main checkout's review file
+ * because `.slice-reviews/` is in the exclude block `azelf init` writes, so it
+ * is no dirty tree, and because the session reads this worktree.
+ *
+ * The pid is `.slice-ready-to-land`'s: `.slice-live` was deleted by slice-done.sh
+ * (`relaunchRefusal` has refused one that is live, so one still there is stale).
+ *
+ * Returns what it did, for the line the caller prints.
+ */
+function markForRelaunch(id: TicketId): {
+  finding: string | null;
+  ended: number | null;
+  stuck: boolean;
+} {
+  const wt = worktreeFor(id);
+  const ready = join(wt, READY_MARKER);
+  let pid = "";
+  try {
+    pid = readFileSync(ready, "utf8").split("\n")[0]?.trim() ?? "";
+  } catch {
+    // Not declared done: a parked slice that --auto read as finished.
+  }
+
+  const block = lastBlock(id);
+  const finding = join(wt, LAST_BLOCK_DIR, LAST_BLOCK_FILE);
+  if (block) {
+    mkdirSync(join(wt, LAST_BLOCK_DIR), { recursive: true });
+    writeFileSync(finding, block);
+  } else {
+    rmSync(finding, { force: true });
+  }
+
+  writeFileSync(join(wt, INTERRUPTED_MARKER), `${RELAUNCH_MARK}\n`);
+  rmSync(ready, { force: true });
+  rmSync(join(wt, FINISHED_MARKER), { force: true });
+  rmSync(join(wt, LIVE_MARKER), { force: true });
+
+  const ended =
+    /^[0-9]+$/.test(pid) && isSessionOf(id, Number(pid)) ? Number(pid) : null;
+  const stuck = ended !== null && !endAgentUnder(ended);
+  return { finding: block ? finding : null, ended, stuck };
+}
+
+/** The old session's fate, for the line after a relaunch. Empty when there was none. */
+function endedSaid(r: { ended: number | null; stuck: boolean }): string {
+  if (r.ended === null) return "";
+  return r.stuck
+    ? ` could not end the agent under pid ${r.ended} — close that tab yourself.`
+    : ` ended the old session (pid ${r.ended}).`;
+}
+
+/**
  * Has this ticket been parked, with nothing it waits on changed since? A
  * ticket that is due a retry is un-parked here, which is what retries it.
+ *
+ * Under --auto, an edited ticket after a BLOCK that was a verdict goes back to
+ * a session rather than to the reviewer: unchanged code against a changed ticket
+ * is what cost #136 its second round. It runs once per edit, because the new
+ * park reads the new body. A review that could not run has no finding, and
+ * reviews again; so does a slice that cannot be sent back just now.
  */
 function isParked(id: TicketId): boolean {
   const p = parked.get(id);
@@ -4601,7 +4744,23 @@ function isParked(id: TicketId): boolean {
   rmSync(join(worktreeFor(id), RETRY_MARKER), { force: true });
   if (!p) return false;
   if (due) {
-    console.log(`  ${due.line}`);
+    if (
+      due.why === "edited" &&
+      autoLand &&
+      lastBlock(id) !== null &&
+      relaunchRefusal(id) === null
+    ) {
+      const r = markForRelaunch(id);
+      console.log(
+        `  ${ref(
+          id,
+        )}: the ticket was edited since the BLOCK — sending it back to a session with the finding.${endedSaid(
+          r,
+        )}`,
+      );
+    } else {
+      console.log(`  ${due.line}`);
+    }
     parked.delete(id);
     retriesSpent.set(id, due.spent);
     retriedFor.set(id, { why: due.why, head: branchHead(id) ?? "" });
@@ -4635,8 +4794,14 @@ function waysOut(id: TicketId, kind: ParkKind, spent: number): string {
   if ((kind === "gates" || kind === "land") && spent < AUTO_RETRIES) {
     when.push(`when ${baseBranch} moves`);
   }
-  if (kind === "review") when.push("when the ticket is edited");
-  return `retried ${when.join(", ")}, or now with: azelf retry ${id}`;
+  // A BLOCK that was a verdict has a finding to take back to a session.
+  const edit = kind === "review" && autoLand && lastBlock(id) !== null;
+  if (kind === "review" && !edit) when.push("when the ticket is edited");
+  const retried = `retried ${when.join(", ")}, or now with: azelf retry ${id}`;
+  if (kind !== "review") return retried;
+  return `${retried}; sent back to a session${
+    edit ? " when the ticket is edited, or now" : ""
+  } with: azelf relaunch ${id}`;
 }
 
 export type Escalation = "resolve" | "retry" | "force" | "park" | "quit";
@@ -5921,6 +6086,40 @@ if (flag("--retry")) {
       ? `  the running dispatcher (pid ${holder.pid}) retries ${ref(
           id,
         )} next round`
+      : `  no running dispatcher has ${ref(
+          id,
+        )} — azelf run --auto ${id} starts one`,
+  );
+  process.exit(0);
+}
+
+// `--relaunch <n>`: what `azelf relaunch` runs. Before any plan is loaded, like
+// --retry. `.slice-retry` un-parks it in a running dispatcher (`isParked`), and
+// a run started after this removes that marker and finds `.slice-interrupted`.
+if (flag("--relaunch")) {
+  const id = value("--relaunch") ?? "";
+  if (!isTicketId(id)) {
+    console.error("--relaunch needs one ticket id");
+    process.exit(64);
+  }
+  const refused = relaunchRefusal(id);
+  if (refused) {
+    console.error(`  ✗ ${ref(id)}: ${refused}`);
+    process.exit(1);
+  }
+  const r = markForRelaunch(id);
+  writeFileSync(join(worktreeFor(id), RETRY_MARKER), `${Date.now()}\n`);
+  console.log(
+    `  ✓ ${ref(id)} goes back to a session${
+      r.finding
+        ? `, with the review's finding in ${r.finding}`
+        : " — its last review gave no BLOCK to pass on"
+    }.${endedSaid(r)}`,
+  );
+  const holder = liveClaim(id);
+  console.log(
+    holder
+      ? `  the running dispatcher (pid ${holder.pid}) opens it next round`
       : `  no running dispatcher has ${ref(
           id,
         )} — azelf run --auto ${id} starts one`,

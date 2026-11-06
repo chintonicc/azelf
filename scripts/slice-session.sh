@@ -694,6 +694,14 @@ if [[ "$ahead" != "0" || -n "$(git status --porcelain 2>/dev/null)" ]]; then
   start_prompt="$start_prompt This worktree already has work from an earlier session of this ticket that ended before it finished — see \`git log $SLICE_BASE_BRANCH..HEAD\` and \`git status\`. Continue from it; don't start over."
 fi
 
+# Sent back after a spec review's BLOCK (`azelf relaunch`, or an edited ticket
+# under --auto). The file is what the review said, and the prompt names it
+# because the skill may be an older copy. "If nothing is left" because the fix may
+# have been the ticket's: a session that finds the code right should finish.
+if [[ -f "$worktree_path/.slice-reviews/last-block.md" ]]; then
+  start_prompt="$start_prompt The last land of this slice was refused by the spec review. Its finding is in .slice-reviews/last-block.md in this worktree, and .slice-ticket.md is the ticket as it reads now. Fix what the finding names that the ticket still asks for; if nothing is left, say so and finish."
+fi
+
 # The slice's ports, in the prompt as well as the environment: the prompt is
 # what a session reads, and "never pkill -f" is the half the environment
 # cannot say. On consumer-b a `pkill -f scripts/mock/mock_api.mjs` killed a
@@ -826,5 +834,17 @@ fi
 if $self_land && [[ -f "$worktree_path/.slice-lock-wait" ]]; then
   echo "── waiting on the DB lock — closing this tab; the dispatcher starts it again when the lock is free ─"
   exit 86
+fi
+# The fourth: another session has taken this slice. `azelf relaunch` says so in
+# .slice-interrupted before it ends this agent, and the new session's marker says
+# so once it has started and deleted that. Kept as a crash, every relaunch would
+# leave a dead tab behind the session that replaced it.
+if $self_land; then
+  replaced_by="$(head -n 1 "$worktree_path/.slice-live" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$(head -n 1 "$worktree_path/.slice-interrupted" 2>/dev/null || true)" == "relaunch" ]] ||
+    [[ -n "$replaced_by" && "$replaced_by" != "$$" ]]; then
+    echo "── replaced by a new session of this slice — closing this tab ─"
+    exit 86
+  fi
 fi
 exit $agent_status

@@ -271,6 +271,7 @@ Installs into the repo you are standing in.
 | `--no-auto-resolve` | never let an agent resolve a rebase conflict — park it, as before |
 | `-y`, `--yes` | non-interactive: park on any failure instead of asking |
 | `--retry <id>` | what `azelf retry` runs |
+| `--relaunch <id>` | what `azelf relaunch` runs |
 | `-h`, `--help` | print every flag and exit |
 
 `--gates` is how you check a slice by hand — no tracker call, no rebase, no land.
@@ -376,6 +377,28 @@ Retries a parked slice's land in the running dispatcher's next round, whatever i
 parked on. It names the dispatcher that has the ticket (`the running dispatcher (pid
 45696) retries #103 next round`), or says that none does; then `azelf run --auto
 <ticket>` starts one. See [What retries a parked slice](#what-retries-a-parked-slice).
+
+### `azelf relaunch <ticket>`
+
+Sends a slice back to a new session in the same worktree, with the ticket as it reads
+now and the last review's finding. For a review that was right, where someone has to
+change the code, and for a follow-up to a slice that already said done:
+
+```
+./scripts/azelf relaunch 136
+  ✓ #136 goes back to a session, with the review's finding in /…/repo-ticket-136/.slice-reviews/last-block.md. ended the old session (pid 45812).
+  the running dispatcher (pid 45696) opens it next round
+```
+
+It removes what says the slice is finished, ends the session that said done if it is still
+sitting at its prompt, and marks the worktree as a crash does, so the ordinary relaunch
+path opens the session and rewrites `.slice-ticket.md`. The finding is the last attempt in
+`.slice-reviews/ticket-<n>.md`, when its spec section says `VERDICT: BLOCK`; otherwise
+there is none and the session starts without one. With no dispatcher running, `azelf run
+--auto <ticket>` picks it up.
+
+It refuses a worktree that is held, one with a git operation in progress, one with a session
+running, and a slice whose land only has to finish.
 
 ### `azelf hold <ticket> [--by <who>] [--why <text>]` and `azelf release <ticket>`
 
@@ -1594,8 +1617,14 @@ exactly those:
 | --- | --- |
 | **its branch moves** — you committed a fix in the worktree | anything |
 | **the base branch moves**, at most twice per branch head | red gates, or `slice-land.sh` refusing |
-| **the ticket body changes** on the tracker | a spec review BLOCK |
+| **the ticket body changes** on the tracker | a spec review that could not run, or a BLOCK under `--auto` (below) |
 | **`azelf retry <ticket>`**, next round | anything |
+
+Under `--auto`, editing the ticket after a BLOCK that was a verdict does not re-review the
+same code. The slice goes back to a session with the new ticket and the finding, as
+[`azelf relaunch`](#azelf-relaunch-ticket) does, and is gated and reviewed when that session
+is done. When the code was already right, the session says so and finishes. A BLOCK with no
+edit stays parked: whether the code or the ticket is wrong is a person's call.
 
 A rebase conflict gets only the first and the last: a resolver run can take twenty
 minutes, and a moving base rarely removes a conflict.
