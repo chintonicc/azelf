@@ -1,6 +1,6 @@
 # A tab removes only its own marker, a blocked slice can be sent back, a blip is not a failure, a session reads what its ticket names, and the two review axes run together
 
-**Status:** built 2026-11-06 on branch `relaunch-and-blips`, not on `main` yet · Phase 1 07a7706, Phase 2 a517650, Phase 3 2c3288f, Phase 4 9c80c43, Phase 5 986449b · see "Unobserved"
+**Status:** complete · landed 2026-11-06 · Phase 1 07a7706, Phase 2 a517650, Phase 3 2c3288f, Phase 4 9c80c43, Phase 5 986449b · see "Unobserved"
 **Written:** 2026-11-06
 **Companion:** the consumer-b friction entries since the last plan: 2026-10-31 Backend #179
 (`gh` timeout, stack trace, no retry) and #180 (ticket points at a comment on another
