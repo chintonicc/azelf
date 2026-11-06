@@ -332,7 +332,7 @@ describe("a session that was replaced closes its tab", () => {
     );
 
     expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
-    expect(r.stdout).toContain(`ended the old session (pid ${pid})`);
+    expect(r.stdout).toContain(`Ended the old session (pid ${pid})`);
     expect(agentRunning()).toBe(false);
     expect(await s.exited).toBe(86);
     expect(s.output()).toContain("replaced by a new session of this slice");

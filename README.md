@@ -404,7 +404,7 @@ change the code, and for a follow-up to a slice that already said done:
 
 ```
 ./scripts/azelf relaunch 136
-  ✓ #136 goes back to a session, with the review's finding in /…/repo-ticket-136/.slice-reviews/last-block.md. ended the old session (pid 45812).
+  ✓ #136 goes back to a session, with the review's finding in /…/repo-ticket-136/.slice-reviews/last-block.md. Ended the old session (pid 45812).
   the running dispatcher (pid 45696) opens it next round
 ```
 
@@ -1102,6 +1102,11 @@ one behind is left alone, and the reviewer reads an export of origin's head from
 directory, removed when the run ends. The prompt says which commit it is reading. If the
 fetch or the export fails, the checkout is used as it is and the prompt says it may be
 behind. A directory outside git, or with no origin, is simply read.
+
+The spec and standards reviews run at the same time, each with its own limit, through one
+blocking call to `scripts/slice-par.ts`. Neither reads the other's answer, and the report
+keeps its order. If one cannot run, the other's report still stands: a standards review that
+does not return is skipped, and a spec review that does not return parks the slice as before.
 
 An agent can have the first without the others. `codex()` declares no headless mode
 unless you pass `headless: true`, because its non-interactive invocation has not been

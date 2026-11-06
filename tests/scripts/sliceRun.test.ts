@@ -30,6 +30,13 @@ import {
 } from "./fixture";
 
 /**
+ * A fake reviewer's line for keeping its prompt, under a lock because the two
+ * axes run at once and a long prompt is more than one write.
+ */
+const RECORD_PROMPT =
+  'until mkdir ../prompts.lock 2>/dev/null; do sleep 0.01; done; printf "%s\\n=====\\n" "$1" >> ../prompts; rmdir ../prompts.lock';
+
+/**
  * slice-run.ts end to end: a real dispatcher process against a throwaway
  * consumer, a fake tracker it reads from a file, and a fake resolver.
  */
@@ -1093,7 +1100,7 @@ describe("the spec review and the parent spec", () => {
   const RECORD = [
     "bash",
     "-c",
-    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
     "reviewer",
   ];
   const specPrompt = (fx: Consumer) =>
@@ -1149,7 +1156,7 @@ describe("the spec review and the parent spec", () => {
       review: [
         "bash",
         "-c",
-        'printf "%s\\n=====\\n" "$1" >> ../prompts; shift; printf "%s\\n" "$@" >> ../dirs; echo "VERDICT: PASS"',
+        `${RECORD_PROMPT}; shift; printf "%s\\n" "$@" >> ../dirs; echo "VERDICT: PASS"`,
         "reviewer",
       ],
       configExtra: 'reviewReadDirs: ["../extra"],',
@@ -1179,9 +1186,10 @@ describe("the spec review and the parent spec", () => {
     const LOG_REVIEW = [
       "bash",
       "-c",
-      `printf "%s\\n=====\\n" "$1" >> ../prompts
+      `${RECORD_PROMPT}
+case "$1" in *"coding standards"*) axis=standards ;; *) axis=spec ;; esac
 shift
-printf "%s\\n" "$#" >> ../dir-counts
+echo "$axis $#" >> ../dir-counts
 for d in "$@"; do
   printf "%s\\n" "$d" >> ../dirs
   [[ -f "$d/new.txt" ]] && echo found >> ../found
@@ -1263,10 +1271,12 @@ echo "VERDICT: PASS"`,
     it("the standards review gets no directories, and is told of none", () => {
       const { fx } = withClone();
       expect(land(fx).out).toContain("landing #40");
-      // Spec, then standards.
       expect(
-        readFileSync(join(fx.root, "dir-counts"), "utf8").trim().split("\n"),
-      ).toEqual(["1", "0"]);
+        readFileSync(join(fx.root, "dir-counts"), "utf8")
+          .trim()
+          .split("\n")
+          .sort(),
+      ).toEqual(["spec 1", "standards 0"]);
     }, 60_000);
   });
 
@@ -1274,7 +1284,7 @@ echo "VERDICT: PASS"`,
     const review = [
       "bash",
       "-c",
-      'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+      `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
       "reviewer",
     ];
     const SENTENCE =
@@ -1392,7 +1402,7 @@ describe("a review that cannot run", () => {
   const RECORD = [
     "bash",
     "-c",
-    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
     "reviewer",
   ];
 
@@ -1460,7 +1470,7 @@ describe("what the spec review is told, and what it says it could not check", ()
       review: [
         "bash",
         "-c",
-        'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+        `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
         "reviewer",
       ],
     });
@@ -1509,7 +1519,7 @@ describe("a slice that lands onto a sibling's files", () => {
   const RECORD = [
     "bash",
     "-c",
-    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
     "reviewer",
   ];
   const specPrompts = (fx: Consumer) =>
@@ -1626,7 +1636,7 @@ describe("new tests run against the base", () => {
   const RECORD = [
     "bash",
     "-c",
-    'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+    `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
     "reviewer",
   ];
   const TEST_ON_BASE = `testOnBase: { command: (files) => ["bash", "-c", 'for f in "$@"; do bash "$f" || exit 1; done', "runner", ...files] },`;
@@ -1744,6 +1754,75 @@ describe("new tests run against the base", () => {
     );
     expect(specPrompt(fx)).not.toContain("NEW TESTS");
     noThrowaway(fx);
+  }, 60_000);
+});
+
+/**
+ * The two axes run together. Each review waits to see the other start, so run
+ * one after the other, neither would, and the answers say which it was.
+ */
+describe("the two review axes", () => {
+  const axisReview = (spec: string, standards: string) => [
+    "bash",
+    "-c",
+    `case "$1" in *"coding standards"*) me=standards other=spec ;; *) me=spec other=standards ;; esac
+touch ../started-$me
+for _ in $(seq 100); do [ -f ../started-$other ] && break; sleep 0.1; done
+[ -f ../started-$other ] && echo saw >> ../saw-$me
+case $me in spec) ${spec} ;; standards) ${standards} ;; esac`,
+    "reviewer",
+  ];
+  const landed = (
+    review: string[],
+    args = ["--auto", "--once", "-y", "40"],
+  ) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, review });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(fx, args);
+    const report = () =>
+      readFileSync(join(fx.main, ".slice-reviews", "ticket-40.md"), "utf8");
+    return { fx, r, report };
+  };
+
+  it("run at once, and the report has spec, then standards", () => {
+    const { fx, r, report } = landed(
+      axisReview(
+        'echo "SPEC-SAID"; echo "VERDICT: PASS"',
+        'echo "STANDARDS-SAID"',
+      ),
+    );
+
+    expect(existsSync(join(fx.root, "saw-spec"))).toBe(true);
+    expect(existsSync(join(fx.root, "saw-standards"))).toBe(true);
+    expect(r.out).toContain("spec review: PASS");
+    expect(report()).toMatch(
+      /### Spec\n\nSPEC-SAID\nVERDICT: PASS\n\n### Standards\n\nSTANDARDS-SAID/,
+    );
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("standards failing leaves the spec's report, and it lands", () => {
+    const { fx, report } = landed(
+      axisReview('echo "SPEC-SAID"; echo "VERDICT: PASS"', "exit 1"),
+    );
+
+    expect(report()).toContain("SPEC-SAID");
+    expect(report()).toContain("(standards review did not return — skipped)");
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("the spec failing leaves the standards' report, and parks as a review that could not run", () => {
+    const { fx, r, report } = landed(
+      axisReview('echo "nobody home" >&2; exit 1', 'echo "STANDARDS-SAID"'),
+    );
+
+    expect(r.out).toContain(
+      "#40 not landed — the spec review could not run — nobody home",
+    );
+    expect(report()).toContain("STANDARDS-SAID");
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("init");
   }, 60_000);
 });
 
@@ -4884,7 +4963,7 @@ describe("a gate scoped by path", () => {
     c = scoped("a.txt", [
       "bash",
       "-c",
-      'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+      `${RECORD_PROMPT}; echo "VERDICT: PASS"`,
       "reviewer",
     ]);
     const r = runDispatcher(c, ["--review", "-y", "--interval", "1", "40"]);

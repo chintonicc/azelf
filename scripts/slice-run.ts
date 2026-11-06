@@ -75,6 +75,7 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
 // file; nothing below should grow a literal back.
@@ -136,6 +137,7 @@ import {
   ignores,
   numberClashes,
 } from "./slice-overlap";
+import { type ParResult, spawnFailure } from "./slice-par";
 // Same split again: whether a conflict resolution may proceed is a decision
 // over facts and lives there; reading those facts out of a worktree is here.
 import {
@@ -239,6 +241,8 @@ function run(
     timeoutMs?: number;
     /** Added to this process's environment, not in place of it. */
     env?: Record<string, string>;
+    /** Given to the command on stdin. */
+    input?: string;
   } = {},
 ): { ok: boolean; out: string; status: number | null } {
   const [bin, ...args] = cmd;
@@ -249,6 +253,7 @@ function run(
       stdio: opts.inherit ? "inherit" : "pipe",
       encoding: "utf8",
       timeout: opts.timeoutMs,
+      input: opts.input,
       env: opts.env ? { ...process.env, ...opts.env } : undefined,
       // Default is 1MB, which a full-branch `git diff` or a long tsc run can
       // exceed — and spawnSync signals that by TRUNCATING and setting an error,
@@ -353,22 +358,6 @@ function ask(question: string): string | null {
   } finally {
     watchSignals(was);
   }
-}
-
-/**
- * What spawnSync threw or returned as its error, on one line, with the code
- * in it: Bun's message for a missing binary says "Executable not found" and
- * not ENOENT. Cut short, because the message for a bad argument quotes the
- * argument, and that argument is a whole prompt.
- */
-function spawnFailure(e: unknown): string {
-  const err = e as NodeJS.ErrnoException;
-  const message = (err?.message ?? String(e)).split("\n")[0] ?? "";
-  const line =
-    err?.code && !message.includes(err.code)
-      ? `${err.code}: ${message}`
-      : message;
-  return line.length > 200 ? `${line.slice(0, 200)}…` : line;
 }
 
 // ─── the graph ────────────────────────────────────────────────────────────
@@ -2262,18 +2251,16 @@ type AgentAnswer = { text: string | null; why?: string };
  * is a reason to review less, never a reason to refuse to land. `why` is for
  * saying which it was.
  */
-function askAgent(
-  prompt: string,
-  cwd: string,
-  readDirs: string[] = [],
-): AgentAnswer {
-  const argv = agent.review(argSafe(prompt), { readDirs });
-  if (!argv) return { text: null, why: "the agent has no headless mode" };
-  const { ok, out, status } = run(argv, {
-    cwd,
-    allowFail: true,
-    timeoutMs: REVIEW_TIMEOUT_MS,
-  });
+function askAgent(prompt: string, cwd: string): AgentAnswer {
+  return askAgents([{ prompt }], cwd)[0] as AgentAnswer;
+}
+
+const NO_HEADLESS: AgentAnswer = {
+  text: null,
+  why: "the agent has no headless mode",
+};
+
+function answerOf({ ok, out, status }: ParResult): AgentAnswer {
   if (ok && out.trim()) return { text: out.trim() };
   const said = out.trim().split("\n").pop() ?? "";
   return {
@@ -2282,6 +2269,52 @@ function askAgent(
       ? "it exited 0 and printed nothing"
       : said || `it exited ${status ?? "on a signal"} and printed nothing`,
   };
+}
+
+const PAR_SCRIPT = fileURLToPath(new URL("./slice-par.ts", import.meta.url));
+
+/**
+ * Several headless prompts at once, each answered as `askAgent` answers one, in
+ * the order asked. One blocking call to a helper process (see slice-par.ts), so
+ * a land stays synchronous. A single prompt needs no helper. If the helper
+ * itself fails, every prompt it held failed, and says so.
+ */
+function askAgents(
+  asks: { prompt: string; readDirs?: string[] }[],
+  cwd: string,
+): AgentAnswer[] {
+  const argvs = asks.map((a) =>
+    agent.review(argSafe(a.prompt), { readDirs: a.readDirs ?? [] }),
+  );
+  const commands = argvs.filter((a): a is string[] => a !== null);
+  let results: ParResult[];
+  if (commands.length < 2) {
+    results = commands.map((argv) =>
+      run(argv, { cwd, allowFail: true, timeoutMs: REVIEW_TIMEOUT_MS }),
+    );
+  } else {
+    const helper = run([process.execPath, PAR_SCRIPT], {
+      cwd,
+      allowFail: true,
+      input: JSON.stringify({ cwd, timeoutMs: REVIEW_TIMEOUT_MS, commands }),
+      // Its own limit has to come first: this one leaves the agents running.
+      timeoutMs: REVIEW_TIMEOUT_MS + 30_000,
+    });
+    try {
+      // One line, whatever bun said on stderr after it.
+      results = JSON.parse(helper.out.split("\n")[0] ?? "") as ParResult[];
+    } catch {
+      const said = helper.out.split("\n").pop() ?? "";
+      return asks.map(() => ({
+        text: null,
+        why: `the helper that runs them failed: ${said || "no output"}`,
+      }));
+    }
+  }
+  let next = 0;
+  return argvs.map((argv) =>
+    argv ? answerOf(results[next++] as ParResult) : NO_HEADLESS,
+  );
 }
 
 /**
@@ -2321,16 +2354,13 @@ function saveReport(name: string, body: string, heading?: string): string {
 }
 
 /** Standards axis. Always report-only — a smell is a judgement call. */
-function reviewStandards(
+function standardsPrompt(
   scope: string,
   commits: string,
   diff: string,
-  cwd: string,
   gates?: GateRun,
 ): string {
-  return (
-    askAgent(
-      `You are reviewing a diff on ONE axis only: does it follow this repo's coding standards?
+  return `You are reviewing a diff on ONE axis only: does it follow this repo's coding standards?
 
 Read CLAUDE.md and any standards docs in the repo for the documented rules — a documented repo rule ALWAYS overrides the generic baseline below, and where the repo endorses something the baseline would flag, stay quiet.
 
@@ -2347,10 +2377,7 @@ COMMITS:
 ${commits}
 
 DIFF:
-${diff}`,
-      cwd,
-    ).text ?? "(standards review did not return — skipped)"
-  );
+${diff}`;
 }
 
 /**
@@ -2378,6 +2405,8 @@ type ReadDirs = { dirs: string[]; notes: string[] };
 
 /** One directory per process: another repo's dispatcher may read the same commit. */
 const READ_EXPORTS = join(tmpdir(), `azelf-read-${process.pid}`);
+/** The export in use for each repo. A newer head replaces it; reviews are serial. */
+const readExports = new Map<string, string>();
 
 /**
  * `reviewReadDirs`, as current as the origin behind each.
@@ -2425,9 +2454,14 @@ function freshReadDir(dir: string): { dir: string; note?: string } {
   const top = root.out.trim();
   const target = join(READ_EXPORTS, `${basename(top)}-${short}`);
   if (!existsSync(target)) {
-    process.once("exit", () =>
-      rmSync(READ_EXPORTS, { recursive: true, force: true }),
-    );
+    if (readExports.size === 0) {
+      process.once("exit", () =>
+        rmSync(READ_EXPORTS, { recursive: true, force: true }),
+      );
+    }
+    const before = readExports.get(top);
+    if (before) rmSync(before, { recursive: true, force: true });
+    readExports.set(top, target);
     mkdirSync(target, { recursive: true });
     const exported = run(
       [
@@ -2488,16 +2522,14 @@ const unverifiedLines = (out: string): string[] =>
  * the parent spec had been cut off; nothing in the run log showed it, so a
  * PASS with holes read like any other. The lines never change the verdict.
  */
-function reviewSpec(
+function specPrompt(
   spec: string,
   scope: string,
   commits: string,
   diff: string,
-  cwd: string,
   context: SpecContext = {},
-): SpecReview {
-  const answer = askAgent(
-    `You are reviewing a diff on ONE axis only: does it faithfully implement the spec below?
+): string {
+  return `You are reviewing a diff on ONE axis only: does it faithfully implement the spec below?
 
 Report only:
  (a) requirements the spec asked for that are MISSING or partial;
@@ -2509,8 +2541,8 @@ Report only:
      : ""
  }
 Quote the spec line for each finding${
-      context.landed ? ", or for (d) the landed line" : ""
-    }. Do not comment on style, naming or structure — a separate axis covers that. Under 400 words.
+    context.landed ? ", or for (d) the landed line" : ""
+  }. Do not comment on style, naming or structure — a separate axis covers that. Under 400 words.
 
 Before the verdict, put each thing you could not check on a line of its own:
 UNVERIFIED: <what you could not check, and why>
@@ -2521,16 +2553,16 @@ VERDICT: PASS
 VERDICT: BLOCK
 
 BLOCK only for (a)${
-      context.landed ? ", (c) or (d)" : " or (c)"
-    } — something asked for is missing or looks wrong${
-      context.landed ? ", or a contract the landed work set up is not kept" : ""
-    }. Scope creep alone is a finding, not a block. If the spec is too vague to judge against, PASS and say so.${
-      context.parent
-        ? `
+    context.landed ? ", (c) or (d)" : " or (c)"
+  } — something asked for is missing or looks wrong${
+    context.landed ? ", or a contract the landed work set up is not kept" : ""
+  }. Scope creep alone is a finding, not a block. If the spec is too vague to judge against, PASS and say so.${
+    context.parent
+      ? `
 
 The SPEC is what this slice must do. The PARENT SPEC is the larger spec it is one slice of: it says why, and it decides wherever the two disagree. Where the diff follows the parent against the ticket's wording, report that as "ticket and parent disagree" — it is not (a) and not (c), and never a reason to BLOCK. A requirement only the parent states belongs to another slice: it is not missing from this one.`
-        : ""
-    }
+      : ""
+  }
 
 ${alreadyRan(context.gates)}${
   context.readDirs?.dirs.length
@@ -2577,11 +2609,11 @@ Other slices of the same plan landed on files this diff also changes, after this
 
 ${context.landed}`
     : ""
-}`,
-    cwd,
-    context.readDirs?.dirs,
-  );
+}`;
+}
 
+/** What the spec review's answer decides: see `SpecReview`. */
+function specReview(answer: AgentAnswer): SpecReview {
   const out = answer.text;
   if (!out) {
     const failed = answer.why ?? "it gave no answer";
@@ -2950,32 +2982,38 @@ function reviewSlice(t: Ticket): string | null {
 
   console.log(`  reviewing ${ref(t.id)} (spec + standards) …`);
   const parent = parentSpec(t.id);
-  const spec = reviewSpec(
-    `${ref(t.id)} — ${t.title}\n\n${ticketBody(t.id)}`,
-    scope,
-    commits,
-    diff,
+  // Together, through one blocking call: each takes over a minute, and neither
+  // reads the other's answer. Both have always run whatever the spec said.
+  const [specAnswer, standardsAnswer] = askAgents(
+    [
+      {
+        prompt: specPrompt(
+          `${ref(t.id)} — ${t.title}\n\n${ticketBody(t.id)}`,
+          scope,
+          commits,
+          diff,
+          {
+            parent: parent.text,
+            landed: landedUnder(t.id),
+            testsOnBase: onBase?.section,
+            gates: gateRuns.get(t.id),
+            readDirs,
+            refs: existsSync(join(wt, ".slice-refs.md")),
+          },
+        ),
+        readDirs: readDirs.dirs,
+      },
+      { prompt: standardsPrompt(scope, commits, diff, gateRuns.get(t.id)) },
+    ],
     wt,
-    {
-      parent: parent.text,
-      landed: landedUnder(t.id),
-      testsOnBase: onBase?.section,
-      gates: gateRuns.get(t.id),
-      readDirs,
-      refs: existsSync(join(wt, ".slice-refs.md")),
-    },
-  );
+  ) as [AgentAnswer, AgentAnswer];
+  const spec = specReview(specAnswer);
   if (parent.note) spec.report = `${parent.note}\n\n${spec.report}`;
   if (onBase && !onBase.section) {
     spec.report = `(new tests on base: ${onBase.line})\n\n${spec.report}`;
   }
-  const standards = reviewStandards(
-    scope,
-    commits,
-    diff,
-    wt,
-    gateRuns.get(t.id),
-  );
+  const standards =
+    standardsAnswer.text ?? "(standards review did not return — skipped)";
 
   const heading = `# Review — ${ref(t.id)} ${t.title}`;
   const body = `### Spec\n\n${spec.report}\n\n### Standards\n\n${standards}\n`;
@@ -4814,8 +4852,8 @@ function markForRelaunch(id: TicketId): {
 function endedSaid(r: { ended: number | null; stuck: boolean }): string {
   if (r.ended === null) return "";
   return r.stuck
-    ? ` could not end the agent under pid ${r.ended} — close that tab yourself.`
-    : ` ended the old session (pid ${r.ended}).`;
+    ? ` Could not end the agent under pid ${r.ended} — close that tab yourself.`
+    : ` Ended the old session (pid ${r.ended}).`;
 }
 
 /**

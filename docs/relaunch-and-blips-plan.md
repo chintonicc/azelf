@@ -235,16 +235,39 @@ stale, and only that repo's own dispatcher moves it.
 
 ## Phase 5 — the two axes run together
 
-- [ ] 5a. `scripts/slice-par.ts`: takes `{ cwd, timeoutMs, commands }` as JSON, runs them
+- [x] 5a. `scripts/slice-par.ts`: takes `{ cwd, timeoutMs, commands }` as JSON, runs them
   concurrently, prints `[{ ok, out, status }]`. No knowledge of reviews.
-- [ ] 5b. `reviewSpec` and `reviewStandards` split into prompt and reading of the answer;
+- [x] 5b. `reviewSpec` and `reviewStandards` split into prompt and reading of the answer;
   `reviewSlice` asks both through one `askAgents`. Reports, order in the file and verdict as
   they are. `reviewPlan` keeps `askAgent`.
-- [ ] 5c. Tests: the fake agent sleeps and both end in under the sum; one axis failing leaves
+- [x] 5c. Tests: the fake agent sleeps and both end in under the sum; one axis failing leaves
   the other's report; a timeout. Fixture tests that assert the order of agent calls will need
   reading by prompt rather than by position.
 
 Expected: the median review from about 2.5 to about 1.3 minutes, on every land in both repos.
+
+### What building it found
+
+- **A fake reviewer's log had to take a lock.** Prompts are longer than one write, and two
+  reviewers appending at once interleaved them. Tests that read by position now read by prompt.
+- **`out` is decoded by the stream**, because a character split across two chunks otherwise comes
+  back broken, and these answers are full of them. `run()` had this for free from `spawnSync`.
+- **One prompt needs no helper,** so the plan review and any agent with a single axis run as they
+  did. An export replaced by a newer head is removed, or a long run would keep one per head.
+
+## Unobserved
+
+Everything here is tested with fake agents and a fake tracker, and the one shape read from a real
+`gh` (`issue view --json title,url,body,comments`) was checked by hand. None of it has seen a real
+run. The first ones on consumer-b, in the friction log if they go wrong:
+
+- **A real relaunch:** does a `claude` session given the finding fix it, or start over? Does the
+  old tab close under Warp?
+- **Two `claude -p` at once in one worktree.** Expected to be fine, since they share nothing but
+  the read-only checkout. The review medians will say whether the 2.5 to 1.3 minutes holds.
+- **A real blip.** `isNetworkError` was written from logged messages and from what git and gh
+  print; a message not on the list still fails as it did.
+- **A real `.slice-refs.md`:** does a session read only what its ticket points to?
 
 ## Order and cost
 
