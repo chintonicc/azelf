@@ -200,27 +200,38 @@ stale, and only that repo's own dispatcher moves it.
 
 ## Phase 4 — a session reads what its ticket names, and a review reads what is current
 
-- [ ] 4a. Optional `Tracker.thread?(id)`: `{ title, url, body, comments: { author, at, body }[] }`;
+- [x] 4a. Optional `Tracker.thread?(id)`: `{ title, url, body, comments: { author, at, body }[] }`;
   in `github()` `gh issue view <id> --json title,url,body,comments`, `-R` for another repo.
-- [ ] 4b. `slice-config.ts --tracker refs <id>`: this ticket's own comments, then every id
+- [x] 4b. `slice-config.ts --tracker refs <id>`: this ticket's own comments, then every id
   `idsIn` finds in the body except itself and its parent. One that cannot be read gets a line
   saying so. Nothing when the tracker has no `thread`. Capped: 30 refs, 256 KB, and it says so.
-- [ ] 4c. `slice-session.sh`, beside the parent block (`:424`): writes `.slice-refs.md`, only
+- [x] 4c. `slice-session.sh`, beside the parent block (`:424`): writes `.slice-refs.md`, only
   where git ignores it, removed when empty, never fatal. `.slice-refs.md` in `EXCLUDE_BLOCK`.
-- [ ] 4d. A prompt sentence only when the file exists (what `.slice-parent.md` taught us): the
+- [x] 4d. A prompt sentence only when the file exists (what `.slice-parent.md` taught us): the
   tickets and comments this ticket names are in `.slice-refs.md`; read what it points you to;
   a requirement only they state is not yours. Same in the skill, and in the spec review.
-- [ ] 4e. Read dirs: `freshReadDirs()` before the spec review. For a git checkout with an
+- [x] 4e. Read dirs: `freshReadDirs()` before the spec review. For a git checkout with an
   origin: fetch; if `HEAD` has origin's head, pass it as it is; otherwise export
   `origin/HEAD` to `<tmp>/azelf-read/<repo>-<sha12>`, once per SHA in the run, removed at
   exit. The prompt says which commit it is reading. Fetch or export failing: the directory
   as it is, and the prompt says it may be behind. A non-git directory is unchanged.
-- [ ] 4f. `askAgent` passes `readDirs` to every review (`:2278`), and the last plan's decision
+- [x] 4f. `askAgent` passes `readDirs` to every review (`:2278`), and the last plan's decision
   says spec only. Pass it for the spec review only.
-- [ ] 4g. Tests: body with `#7` and `other/repo#8` writes both; an unreadable ref does not
+- [x] 4g. Tests: body with `#7` and `other/repo#8` writes both; an unreadable ref does not
   stop the prep; no `thread`, no file; not ignored, no file and the hint; the prompt sentence
   follows the file. A read dir behind origin reaches the agent as the export and level as
   itself; the argv of the standards review has no `--add-dir`.
+
+### What building it found
+
+- **The export directory is per process, `<tmp>/azelf-read-<pid>/`, not the shared one the plan
+  named.** Consumer-b's two repos read each other: one run's exit would have deleted what the
+  other run's review was reading.
+- **The whole repo is exported, and a read dir in a subfolder maps into it**, so two read dirs in
+  one repo share an export. A subfolder origin's head does not have counts as "may be behind",
+  because `--add-dir` on a missing path is worse than a stale one.
+- **`.slice-refs.md` costs a hint on every prep** in a checkout that has not re-run `azelf init`,
+  as `.slice-parent.md` does. The refusal to write an unignored file is the part that matters.
 
 ## Phase 5 — the two axes run together
 

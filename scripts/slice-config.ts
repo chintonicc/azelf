@@ -61,6 +61,7 @@ import {
   openBlockers,
   parentFromBody,
   refFor,
+  refsBrief,
 } from "./slice-tracker";
 import { ownRoot } from "./slice-version";
 
@@ -1003,7 +1004,7 @@ function trackerCli(args: string[]): never {
   const [verb, id, ...rest] = args;
   const usage = (): never => {
     console.error(
-      "usage: slice-config.ts --tracker get|open-blockers|brief|parent|tab-title <id> | close <id> <comment>",
+      "usage: slice-config.ts --tracker get|open-blockers|brief|parent|refs|tab-title <id> | close <id> <comment>",
     );
     process.exit(64);
   };
@@ -1046,6 +1047,11 @@ function trackerCli(args: string[]): never {
         console.log(
           `# ${ref(parent)} — ${t.title}\n\n${t.url}\n\n---\n\n${body}`,
         );
+        break;
+      }
+      case "refs": {
+        const refs = refsBrief(tracker, id);
+        if (refs) console.log(refs);
         break;
       }
       case "tab-title": {

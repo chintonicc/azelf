@@ -73,8 +73,8 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, isAbsolute, join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join } from "node:path";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
 // file; nothing below should grow a literal back.
@@ -161,6 +161,7 @@ import {
   blockerLine,
   bodyOnlyBlockers,
   compareIds,
+  errorLine,
   findEpics,
   isTrackerUnavailable,
   openBlockers,
@@ -1734,20 +1735,6 @@ function refreshOpenState(tickets: Ticket[]): {
   return { failed, allFailed: read > 0 && failed.length === read };
 }
 
-/**
- * The line of an error worth printing. The GitHub adapter's message is
- * `gh … failed:` with all of `gh`'s stderr below it, and the line after that
- * header is the one that says what happened.
- */
-function errorLine(e: unknown): string {
-  const lines = (e instanceof Error ? e.message : String(e))
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
-  const at = lines.length > 1 && lines[0]?.endsWith("failed:") ? 1 : 0;
-  return lines[at] ?? "no message";
-}
-
 // How long every read may fail before the run gives up: long enough to ride
 // out a VPN reconnecting, short enough that a run whose network is gone for
 // good says so the same morning. Seconds, like SLICE_HEARTBEAT_SECONDS, so a
@@ -2275,8 +2262,12 @@ type AgentAnswer = { text: string | null; why?: string };
  * is a reason to review less, never a reason to refuse to land. `why` is for
  * saying which it was.
  */
-function askAgent(prompt: string, cwd: string): AgentAnswer {
-  const argv = agent.review(argSafe(prompt), { readDirs: reviewReadDirs });
+function askAgent(
+  prompt: string,
+  cwd: string,
+  readDirs: string[] = [],
+): AgentAnswer {
+  const argv = agent.review(argSafe(prompt), { readDirs });
   if (!argv) return { text: null, why: "the agent has no headless mode" };
   const { ok, out, status } = run(argv, {
     cwd,
@@ -2376,7 +2367,94 @@ type SpecContext = {
   testsOnBase?: string | null;
   /** Which gates ran on the slice and which were skipped: see `alreadyRan`. */
   gates?: GateRun;
+  /** The directories it may read besides the worktree: see `freshReadDirs`. */
+  readDirs?: ReadDirs;
+  /** The worktree has a `.slice-refs.md`: what the ticket names, with comments. */
+  refs?: boolean;
 };
+
+/** Where the spec review may read, and what to say about how current each is. */
+type ReadDirs = { dirs: string[]; notes: string[] };
+
+/** One directory per process: another repo's dispatcher may read the same commit. */
+const READ_EXPORTS = join(tmpdir(), `azelf-read-${process.pid}`);
+
+/**
+ * `reviewReadDirs`, as current as the origin behind each.
+ *
+ * A read dir is someone's checkout, and only that repo's own dispatcher moves it.
+ * On consumer-b, Backend #190's review wrote `UNVERIFIED` for the frontend half
+ * of its ticket: the frontend clone stood four days behind origin, and a screen
+ * the ticket names was not in it. A read setting does not move a checkout, so
+ * one behind is exported: `git archive | tar -x` needs no worktree registration
+ * and leaves nothing to undo. Once per commit in a run, removed at its exit.
+ *
+ * A directory outside git, or with no origin, is what it is. One that cannot be
+ * brought level is used as it is, and the prompt says it may be behind. A review
+ * never fails on this, for the reason it never fails on an agent without `-p`.
+ */
+function freshReadDirs(): ReadDirs {
+  const read: ReadDirs = { dirs: [], notes: [] };
+  for (const dir of reviewReadDirs) {
+    const fresh = freshReadDir(dir);
+    read.dirs.push(fresh.dir);
+    if (fresh.note) read.notes.push(fresh.note);
+  }
+  return read;
+}
+
+function freshReadDir(dir: string): { dir: string; note?: string } {
+  const git = (...args: string[]) =>
+    run(["git", ...args], { cwd: dir, allowFail: true, timeoutMs: 60_000 });
+  const root = git("rev-parse", "--show-toplevel");
+  if (!root.ok || !git("remote", "get-url", "origin").ok) return { dir };
+  const behind = (why: string) => ({
+    dir,
+    note: `${dir} may be behind origin (${why}): what you do not find there may simply not have reached this checkout.`,
+  });
+  if (!git("fetch", "-q", "origin").ok) return behind("the fetch failed");
+  const head = git("rev-parse", "--verify", "-q", "origin/HEAD^{commit}");
+  if (!head.ok) return behind("this clone has no origin/HEAD");
+  const sha = head.out.trim();
+  const short = sha.slice(0, 12);
+  if (git("merge-base", "--is-ancestor", sha, "HEAD").ok) {
+    return { dir, note: `${dir} has origin's head (${short}).` };
+  }
+
+  // The whole repo, so two read dirs in one repo share an export.
+  const top = root.out.trim();
+  const target = join(READ_EXPORTS, `${basename(top)}-${short}`);
+  if (!existsSync(target)) {
+    process.once("exit", () =>
+      rmSync(READ_EXPORTS, { recursive: true, force: true }),
+    );
+    mkdirSync(target, { recursive: true });
+    const exported = run(
+      [
+        "bash",
+        "-c",
+        'set -o pipefail; git -C "$0" archive "$1" | tar -x -C "$2"',
+        top,
+        sha,
+        target,
+      ],
+      { allowFail: true, timeoutMs: 120_000 },
+    );
+    if (!exported.ok) {
+      rmSync(target, { recursive: true, force: true });
+      return behind("its export failed");
+    }
+  }
+  const exportedDir = join(
+    target,
+    git("rev-parse", "--show-prefix").out.trim(),
+  );
+  if (!existsSync(exportedDir)) return behind("origin's head does not have it");
+  return {
+    dir: exportedDir,
+    note: `${exportedDir} is origin's head (${short}) of ${dir}, whose checkout is behind it: read this one.`,
+  };
+}
 
 /**
  * What the spec review decided, and what it says it could not check.
@@ -2455,12 +2533,20 @@ The SPEC is what this slice must do. The PARENT SPEC is the larger spec it is on
     }
 
 ${alreadyRan(context.gates)}${
-  reviewReadDirs.length
+  context.readDirs?.dirs.length
     ? `
 
-You may also read these directories outside the worktree, where this repo's tickets place facts the repo does not hold (another repo's fields, a spec folder): ${reviewReadDirs.join(
+You may also read these directories outside the worktree, where this repo's tickets place facts the repo does not hold (another repo's fields, a spec folder): ${context.readDirs.dirs.join(
         ", ",
-      )}. What you find there counts as checked.`
+      )}. What you find there counts as checked.${context.readDirs.notes
+        .map((n) => `\n${n}`)
+        .join("")}`
+    : ""
+}${
+  context.refs
+    ? `
+
+The tickets and comments this ticket names are in .slice-refs.md in the worktree: read what the spec points to before you call something missing. A requirement only they state is not this slice's.`
     : ""
 }
 
@@ -2493,6 +2579,7 @@ ${context.landed}`
     : ""
 }`,
     cwd,
+    context.readDirs?.dirs,
   );
 
   const out = answer.text;
@@ -2858,6 +2945,9 @@ function reviewSlice(t: Ticket): string | null {
   const onBase = testsOnBase(t.id);
   if (onBase) console.log(`  new tests on base: ${onBase.line}`);
 
+  const readDirs = freshReadDirs();
+  for (const note of readDirs.notes) console.log(`  read dir: ${note}`);
+
   console.log(`  reviewing ${ref(t.id)} (spec + standards) …`);
   const parent = parentSpec(t.id);
   const spec = reviewSpec(
@@ -2871,6 +2961,8 @@ function reviewSlice(t: Ticket): string | null {
       landed: landedUnder(t.id),
       testsOnBase: onBase?.section,
       gates: gateRuns.get(t.id),
+      readDirs,
+      refs: existsSync(join(wt, ".slice-refs.md")),
     },
   );
   if (parent.note) spec.report = `${parent.note}\n\n${spec.report}`;

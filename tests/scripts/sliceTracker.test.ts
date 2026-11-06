@@ -1,5 +1,7 @@
 import {
   type GhRunner,
+  type Tracker,
+  type TicketThread,
   TrackerUnavailable,
   blockerLine,
   blockersFromBody,
@@ -14,6 +16,7 @@ import {
   parentFromBody,
   patient,
   refFor,
+  refsBrief,
 } from "@/scripts/slice-tracker";
 import { describe, expect, it } from "vitest";
 
@@ -1039,5 +1042,165 @@ describe("github() and a network that comes and goes", () => {
     expect(() =>
       github({ gh: closeDown.gh, sleep: () => {} }).close("7", "done"),
     ).toThrow(TrackerUnavailable);
+  });
+});
+
+describe("github().thread", () => {
+  const VIEW = "issue view 7 --json title,url,body,comments";
+  const OTHER = "issue view 8 -R other/repo --json title,url,body,comments";
+  const answer = {
+    title: "t",
+    url: "https://x/7",
+    body: "b",
+    comments: [
+      {
+        author: { login: "alex" },
+        createdAt: "2026-10-31T10:00:00Z",
+        body: "c1",
+      },
+      { author: null, createdAt: "2026-10-31T11:00:00Z", body: "c2" },
+    ],
+  };
+
+  it("reads the ticket with its comments, and one in another repo with -R", () => {
+    const { gh } = fakeGh({
+      [VIEW]: { stdout: JSON.stringify(answer) },
+      [OTHER]: { stdout: JSON.stringify({ ...answer, comments: [] }) },
+    });
+    const t = github({ gh });
+    expect(t.thread?.("7")).toEqual({
+      title: "t",
+      url: "https://x/7",
+      body: "b",
+      comments: [
+        { author: "alex", at: "2026-10-31T10:00:00Z", body: "c1" },
+        { author: "(deleted)", at: "2026-10-31T11:00:00Z", body: "c2" },
+      ],
+    });
+    expect(t.thread?.("other/repo#8").comments).toEqual([]);
+  });
+
+  it("throws when it cannot be read", () => {
+    const { gh } = fakeGh({});
+    expect(() => github({ gh }).thread?.("7")).toThrow(/gh issue view 7/);
+  });
+});
+
+describe("refsBrief", () => {
+  const thread = (over: Partial<TicketThread> = {}): TicketThread => ({
+    title: "T",
+    url: "",
+    body: "",
+    comments: [],
+    ...over,
+  });
+  const tracker = (
+    threads: Record<string, TicketThread>,
+    asked: string[] = [],
+  ): Tracker =>
+    ({
+      idPattern: "^[0-9]+$",
+      refTemplate: "#{n}",
+      thread: (id: string) => {
+        asked.push(id);
+        const t = threads[id];
+        if (!t)
+          throw new Error(`gh issue view ${id} failed:\nHTTP 404: Not Found`);
+        return t;
+      },
+    }) as unknown as Tracker;
+
+  it("is empty for a tracker without thread", () => {
+    const { thread: _, ...without } = tracker({ "1": thread() });
+    expect(refsBrief(without as Tracker, "1")).toBe("");
+  });
+
+  it("is empty when the ticket has no comments and names nothing", () => {
+    expect(
+      refsBrief(tracker({ "1": thread({ body: "Just build." }) }), "1"),
+    ).toBe("");
+  });
+
+  it("has this ticket's comments, then each ticket the body names, with theirs", () => {
+    const out = refsBrief(
+      tracker({
+        "1": thread({
+          body: "See #7 and other/repo#8.",
+          comments: [{ author: "alex", at: "then", body: "OWN-COMMENT" }],
+        }),
+        "7": thread({
+          title: "Seven",
+          url: "https://x/7",
+          body: "SEVEN-BODY",
+          comments: [{ author: "sam", at: "now", body: "SEVEN-COMMENT" }],
+        }),
+        "other/repo#8": thread({ title: "Eight", body: "EIGHT-BODY" }),
+      }),
+      "1",
+    );
+    expect(out).toContain("# What #1 names");
+    expect(out).toContain("## #1 — the comments on this ticket");
+    expect(out).toContain("### alex, then\n\nOWN-COMMENT");
+    expect(out).toContain("## #7 — Seven\n\nhttps://x/7\n\nSEVEN-BODY");
+    expect(out).toContain("### sam, now\n\nSEVEN-COMMENT");
+    expect(out).toContain("## other/repo#8 — Eight\n\nEIGHT-BODY");
+    expect(out.indexOf("OWN-COMMENT")).toBeLessThan(out.indexOf("SEVEN-BODY"));
+  });
+
+  it("leaves out the ticket itself and its parent", () => {
+    const asked: string[] = [];
+    const out = refsBrief(
+      tracker(
+        {
+          "1": thread({ body: "This is #1. See #7.\n\n## Parent\n\n#17\n" }),
+          "7": thread({ title: "Seven" }),
+          "17": thread({ title: "Spec" }),
+        },
+        asked,
+      ),
+      "1",
+    );
+    expect(asked).toEqual(["1", "7"]);
+    expect(out).not.toContain("Spec");
+  });
+
+  it("says which one could not be read, and goes on", () => {
+    const out = refsBrief(
+      tracker({
+        "1": thread({ body: "See #7 and #9." }),
+        "9": thread({ title: "Nine" }),
+      }),
+      "1",
+    );
+    expect(out).toContain("## #7\n\n(could not be read: HTTP 404: Not Found)");
+    expect(out).toContain("## #9 — Nine");
+  });
+
+  it("stops at 30 tickets and says which it left", () => {
+    const ids = Array.from({ length: 32 }, (_, i) => String(i + 2));
+    const threads: Record<string, TicketThread> = {
+      "1": thread({ body: ids.map((i) => `#${i}`).join(" ") }),
+    };
+    for (const i of ids) threads[i] = thread({ title: `N${i}` });
+    const asked: string[] = [];
+    const out = refsBrief(tracker(threads, asked), "1");
+    expect(asked.length).toBe(31);
+    expect(out).toContain("(not read, over the limit: #32, #33)");
+  });
+
+  it("stops at 256 KB and says so", () => {
+    const big = "x".repeat(200 * 1024);
+    const out = refsBrief(
+      tracker({
+        "1": thread({ body: "#2 #3 #4" }),
+        "2": thread({ body: big }),
+        "3": thread({ body: big }),
+        "4": thread({ title: "Four" }),
+      }),
+      "1",
+    );
+    expect(out).toContain("(cut at 256 KB)");
+    expect(out).toContain("(not read, over the limit: #4)");
+    expect(Buffer.byteLength(out)).toBeLessThan(257 * 1024);
   });
 });

@@ -77,13 +77,14 @@ describe("upsertBlock", () => {
 });
 
 describe("the exclude block", () => {
-  it("carries exactly the fourteen markers", () => {
+  it("carries exactly the fifteen markers", () => {
     const patterns = EXCLUDE_BLOCK.split("\n").filter(
       (l) => l.length > 0 && !l.startsWith("#"),
     );
     expect(patterns).toEqual([
       ".slice-ticket.md",
       ".slice-parent.md",
+      ".slice-refs.md",
       ".slice-landed.md",
       ".slice-autostart",
       ".slice-live",
@@ -508,7 +509,7 @@ describe("init, against a real git repo", () => {
   it("writes the markers, the shims and a starter config", () => {
     const lines = run().map((r) => r.line);
     expect(lines.join("\n")).toContain(
-      ".git/info/exclude — 14 marker patterns",
+      ".git/info/exclude — 15 marker patterns",
     );
     expect(
       readFileSync(join(dir, ".git", "info", "exclude"), "utf8"),

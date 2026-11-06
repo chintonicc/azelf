@@ -95,6 +95,14 @@ export type TicketInfo = {
 /** `id` may name a ticket in another project; see the header. */
 export type Blocker = { id: TicketId; state: TicketState };
 
+/** A ticket as someone would read it on the tracker, comments included. */
+export type TicketThread = {
+  title: string;
+  url: string;
+  body: string;
+  comments: { author: string; at: string; body: string }[];
+};
+
 export type Tracker = {
   /** Shown in the dispatcher's banner and in error messages. */
   name: string;
@@ -122,6 +130,13 @@ export type Tracker = {
   blockers(id: TicketId): Blocker[];
   /** The ticket text; empty string when it has none. */
   body(id: TicketId): string;
+  /**
+   * The ticket with its comments, for what a session may need to read and
+   * cannot fetch: `refsBrief` asks it for this ticket and for every ticket its
+   * body names, another project's included. Optional; a tracker without it
+   * gives a session no `.slice-refs.md`. Throws if the ticket cannot be read.
+   */
+  thread?(id: TicketId): TicketThread;
   /**
    * The tickets hanging UNDER this one, if the tracker models hierarchy
    * natively; `[]` when it has none. Optional — most trackers do not model it
@@ -282,6 +297,108 @@ function idsIn(text: string, idPattern: string): TicketId[] {
       ),
     ),
   ];
+}
+
+/** At most this many tickets in one `.slice-refs.md`, and this many bytes. */
+const REFS_MAX_TICKETS = 30;
+const REFS_MAX_BYTES = 256 * 1024;
+
+/**
+ * What goes in `.slice-refs.md`: this ticket's own comments, then every ticket
+ * its body names, each with its comments. Empty when there is nothing, which is
+ * no file. Its parent is left out, since `.slice-parent.md` has that one.
+ *
+ * On consumer-b's Backend #180 a ticket put deciding facts in a comment on
+ * another issue, and a session cannot fetch issues. Over-fetching costs a few
+ * calls and no context, because the file is read only when the ticket points
+ * at it. A name that cannot be read gets a line saying so, and nothing stops: a
+ * `#3` in prose may be no ticket at all.
+ */
+export function refsBrief(tracker: Tracker, id: TicketId): string {
+  if (!tracker.thread) return "";
+  const thread = tracker.thread.bind(tracker);
+  const ref = (t: TicketId) =>
+    t.includes("/") ? t : refFor(tracker.refTemplate, t);
+  const commentsOf = (t: TicketThread) =>
+    t.comments.map((c) => `### ${c.author}, ${c.at}\n\n${c.body.trim()}`);
+
+  let own: TicketThread;
+  try {
+    own = thread(id);
+  } catch (e) {
+    return `# What ${ref(id)} names\n\n(${ref(
+      id,
+    )} could not be read, so neither could what it names: ${errorLine(e)})`;
+  }
+  const parent = parentFromBody(own.body, tracker.idPattern);
+  const named = idsIn(own.body, tracker.idPattern).filter(
+    (t) => t !== id && t !== parent,
+  );
+  const reading = named.slice(0, REFS_MAX_TICKETS);
+
+  const sections: string[] = [];
+  const ownComments = commentsOf(own);
+  if (ownComments.length) {
+    sections.push(
+      [`## ${ref(id)} — the comments on this ticket`, ...ownComments].join(
+        "\n\n",
+      ),
+    );
+  }
+  let size = Buffer.byteLength(sections.join("\n\n"));
+  const unread: TicketId[] = named.slice(REFS_MAX_TICKETS);
+  for (const [i, t] of reading.entries()) {
+    if (size >= REFS_MAX_BYTES) {
+      unread.unshift(...reading.slice(i));
+      break;
+    }
+    let section: string;
+    try {
+      const th = thread(t);
+      section = [
+        `## ${ref(t)} — ${th.title}`,
+        ...(th.url ? [th.url] : []),
+        th.body.trim() || "(no body)",
+        ...commentsOf(th),
+      ].join("\n\n");
+    } catch (e) {
+      section = `## ${ref(t)}\n\n(could not be read: ${errorLine(e)})`;
+    }
+    size += Buffer.byteLength(section);
+    sections.push(section);
+  }
+  if (!sections.length) return "";
+
+  const text = sections.join("\n\n");
+  const bytes = Buffer.from(text);
+  const kept =
+    bytes.length > REFS_MAX_BYTES
+      ? `${bytes.subarray(0, REFS_MAX_BYTES).toString()}\n\n(cut at ${
+          REFS_MAX_BYTES / 1024
+        } KB)`
+      : text;
+  return [
+    `# What ${ref(id)} names`,
+    "Written when this session started. A requirement only these state is not this ticket's.",
+    kept,
+    ...(unread.length
+      ? [`(not read, over the limit: ${unread.map(ref).join(", ")})`]
+      : []),
+  ].join("\n\n");
+}
+
+/**
+ * The line of an error worth printing. The GitHub adapter's message is
+ * `gh … failed:` with all of `gh`'s stderr below it, and the line after that
+ * header is the one that says what happened.
+ */
+export function errorLine(e: unknown): string {
+  const lines = (e instanceof Error ? e.message : String(e))
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const at = lines.length > 1 && lines[0]?.endsWith("failed:") ? 1 : 0;
+  return lines[at] ?? "no message";
 }
 
 /**
@@ -743,6 +860,37 @@ export function github(opts: GithubOptions = {}): Tracker {
         );
       }
       return numbers;
+    },
+
+    thread(id) {
+      const other = inOtherRepo(id);
+      const t = call<{
+        title: string;
+        url: string;
+        body: string;
+        comments: {
+          author: { login: string } | null;
+          createdAt: string;
+          body: string;
+        }[];
+      }>([
+        "issue",
+        "view",
+        ...(other ? [other[1], "-R", other[0]] : [id]),
+        "--json",
+        "title,url,body,comments",
+      ]);
+      return {
+        title: t.title,
+        url: t.url,
+        body: t.body ?? "",
+        comments: (t.comments ?? []).map((c) => ({
+          // A deleted account has no author.
+          author: c.author?.login ?? "(deleted)",
+          at: c.createdAt,
+          body: c.body,
+        })),
+      };
     },
 
     get(id) {

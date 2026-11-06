@@ -443,6 +443,22 @@ else
   rm -f "$parent_file"
 fi
 
+# What the ticket names, for the same reason as the parent: a ticket can put
+# deciding facts in a comment on another issue (consumer-b's Backend #180), and
+# a session cannot fetch that. Rewritten on every prep, removed when there is
+# nothing, never fatal, and only where git ignores it. A tracker without `thread`
+# gives nothing.
+refs_file="$worktree_path/.slice-refs.md"
+if ! git -C "$worktree_path" check-ignore -q .slice-refs.md; then
+  rm -f "$refs_file"
+  echo "  (no .slice-refs.md: git does not ignore it here yet — run \`azelf init\` once to get the tickets this one names in the worktree)"
+elif refs_brief=$(slice_tracker_refs "$ticket" 2>/dev/null) && [[ -n "$refs_brief" ]]; then
+  printf '%s\n' "$refs_brief" >"$refs_file"
+  echo "✓ wrote .slice-refs.md — the tickets and comments this one names"
+else
+  rm -f "$refs_file"
+fi
+
 # ─── Ports ───────────────────────────────────────────────────────────────
 # A block of ports per slice, when slice.config.ts has `ports`. Parallel
 # sessions told only "take your own ports" took the same ones on consumer-b:
@@ -675,6 +691,12 @@ if [[ "$SLICE_START_PROMPT" == *"{parent}"* ]]; then
   fi
 elif [[ -z "$parent_sentence" ]]; then
   start_prompt="$start_prompt This ticket hangs under no spec: there is no .slice-parent.md in this worktree, and nothing takes precedence over .slice-ticket.md."
+fi
+
+# Only when the file is there, which is what .slice-parent.md taught: a prompt
+# that names a file a worktree lacks sends a session looking for it.
+if [[ -f "$worktree_path/.slice-refs.md" ]]; then
+  start_prompt="$start_prompt The tickets and comments this ticket names are in .slice-refs.md in this worktree: read what the ticket points you to. A requirement only they state is not yours."
 fi
 
 # A worktree with commits of its own, or uncommitted changes, is a relaunch:

@@ -109,6 +109,10 @@ export type FakeTicket = {
   children?: string[];
   /** The tracker's own edges; `addBlocker` (`--sync-edges`) appends here. */
   blockedBy?: string[];
+  /** What `thread` answers, under `threads`. */
+  comments?: { author: string; at: string; body: string }[];
+  /** `thread` throws for this one, under `threads`. */
+  unreadable?: boolean;
 };
 
 export function makeConsumer(opts: {
@@ -144,6 +148,8 @@ export function makeConsumer(opts: {
   body?: string;
   /** Raw lines added to the config object, e.g. `tabTitle: false,`. */
   configExtra?: string;
+  /** The fake tracker has `thread`, so a prep writes `.slice-refs.md`. */
+  threads?: boolean;
   /** The config's `startPrompt`; `"x"` when absent. */
   startPrompt?: string;
   /**
@@ -264,7 +270,7 @@ const CLOSE_FAILS = ${JSON.stringify(join(root, "close-fails"))};
 const unreachable = (what: string): never => {
   throw new TrackerUnavailable(\`gh \${what} failed:\\nPost "https://api.github.com/graphql": EOF\`);
 };
-type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[]; blockedBy?: string[] };
+type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[]; blockedBy?: string[]; comments?: { author: string; at: string; body: string }[]; unreadable?: boolean };
 const all = (): Record<string, Fake> => JSON.parse(readFileSync(TICKETS, "utf8"));
 const ticket = (id: string) => ({
   title: ${JSON.stringify(opts.title ?? "t")},
@@ -305,7 +311,16 @@ const tracker: Tracker = {
     if (existsSync(DOWN)) unreachable(\`issue view \${id}\`);
     return ticket(id).body;
   },
-  children: (id) => ticket(id).children ?? [],
+  children: (id) => ticket(id).children ?? [],${
+    opts.threads
+      ? `
+  thread: (id) => {
+    const t = ticket(id);
+    if (t.unreadable) throw new Error(\`gh issue view \${id} failed:\\nHTTP 404: Not Found\`);
+    return { title: t.title, url: "", body: t.body, comments: t.comments ?? [] };
+  },`
+      : ""
+  }
   parentClaims: () =>
     Object.keys(all())
       .map((id) => ({ id, state: ticket(id).state, body: ticket(id).body }))

@@ -17,6 +17,10 @@ why the ticket exists and for decisions the ticket does not repeat. Where the tw
 disagree, the parent decides; say so in your final message. A requirement only the
 parent states is another slice's, not yours.
 
+When the ticket points at another ticket, or at a comment, what it names is in
+`.slice-refs.md`, with this ticket's own comments. Read what the ticket points you to,
+not the whole file. A requirement only those state is not yours either.
+
 ## 2. Build it
 
 Only what the ticket asks. A slice that also fixes an unrelated thing it noticed is

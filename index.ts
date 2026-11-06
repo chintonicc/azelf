@@ -36,6 +36,7 @@ export type {
   TicketId,
   TicketInfo,
   TicketState,
+  TicketThread,
   Tracker,
 } from "./scripts/slice-tracker";
 export { TrackerUnavailable, github } from "./scripts/slice-tracker";

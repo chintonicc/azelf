@@ -1174,6 +1174,124 @@ describe("the spec review and the parent spec", () => {
     expect(readFileSync(join(fx.root, "dirs"), "utf8")).toMatch(/\/extra\n/);
   });
 
+  describe("a read dir is only as fresh as its last run", () => {
+    /** A review that logs its prompt, its directories and what it found there. */
+    const LOG_REVIEW = [
+      "bash",
+      "-c",
+      `printf "%s\\n=====\\n" "$1" >> ../prompts
+shift
+printf "%s\\n" "$#" >> ../dir-counts
+for d in "$@"; do
+  printf "%s\\n" "$d" >> ../dirs
+  [[ -f "$d/new.txt" ]] && echo found >> ../found
+done
+echo "VERDICT: PASS"`,
+      "reviewer",
+    ];
+
+    /** A consumer whose read dir `../frontend` is a clone of a bare origin. */
+    const withClone = () => {
+      const fx = makeConsumer({
+        worktrees: [40],
+        remote: true,
+        review: LOG_REVIEW,
+        configExtra: 'reviewReadDirs: ["../frontend"],',
+      });
+      c = fx;
+      const origin = join(fx.root, "frontend.git");
+      const seed = join(fx.root, "frontend-seed");
+      git(fx.root, "init", "-q", "--bare", "-b", "main", origin);
+      git(fx.root, "clone", "-q", origin, seed);
+      commitIn(seed, "old.txt", "old\n", "old");
+      git(seed, "push", "-q", "origin", "HEAD:main");
+      git(fx.root, "clone", "-q", origin, join(fx.root, "frontend"));
+      commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+      sh(fx.wt(40), "./scripts/slice-done.sh");
+      return { fx, seed, origin };
+    };
+    const dirsOf = (fx: Consumer) =>
+      readFileSync(join(fx.root, "dirs"), "utf8").trim().split("\n");
+    const land = (fx: Consumer) =>
+      runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+
+    it("one behind origin reaches the agent as an export of origin's head, removed at the end", () => {
+      const { fx, seed } = withClone();
+      commitIn(seed, "new.txt", "new\n", "new");
+      git(seed, "push", "-q", "origin", "HEAD:main");
+      const originHead = git(seed, "rev-parse", "HEAD");
+
+      const r = land(fx);
+      expect(r.out).toContain("landing #40");
+
+      const [dir] = dirsOf(fx);
+      expect(dir).toMatch(
+        new RegExp(`azelf-read-\\d+/frontend-${originHead.slice(0, 12)}$`),
+      );
+      // It had the file the checkout lacks, when the reviewer read it.
+      expect(readFileSync(join(fx.root, "found"), "utf8")).toBe("found\n");
+      expect(specPrompt(fx)).toContain(
+        `${dir} is origin's head (${originHead.slice(0, 12)})`,
+      );
+      expect(r.out).toContain(`read dir: ${dir} is origin's head`);
+      // The checkout did not move, and the export is gone.
+      expect(existsSync(join(fx.root, "frontend", "new.txt"))).toBe(false);
+      expect(existsSync(dir as string)).toBe(false);
+    }, 60_000);
+
+    it("one level with origin reaches the agent as itself", () => {
+      const { fx } = withClone();
+      expect(land(fx).out).toContain("landing #40");
+
+      expect(dirsOf(fx)).toEqual([join(fx.root, "frontend")]);
+      expect(specPrompt(fx)).toMatch(
+        /\/frontend has origin's head \([0-9a-f]{12}\)\./,
+      );
+    }, 60_000);
+
+    it("one that cannot be fetched is used as it is, and the prompt says it may be behind", () => {
+      const { fx, origin } = withClone();
+      rmSync(origin, { recursive: true, force: true });
+      expect(land(fx).out).toContain("landing #40");
+
+      expect(dirsOf(fx)).toEqual([join(fx.root, "frontend")]);
+      expect(specPrompt(fx)).toContain(
+        "/frontend may be behind origin (the fetch failed)",
+      );
+    }, 60_000);
+
+    it("the standards review gets no directories, and is told of none", () => {
+      const { fx } = withClone();
+      expect(land(fx).out).toContain("landing #40");
+      // Spec, then standards.
+      expect(
+        readFileSync(join(fx.root, "dir-counts"), "utf8").trim().split("\n"),
+      ).toEqual(["1", "0"]);
+    }, 60_000);
+  });
+
+  it("the spec review is told of .slice-refs.md only when the worktree has it", () => {
+    const review = [
+      "bash",
+      "-c",
+      'printf "%s\\n=====\\n" "$1" >> ../prompts; echo "VERDICT: PASS"',
+      "reviewer",
+    ];
+    const SENTENCE =
+      "The tickets and comments this ticket names are in .slice-refs.md in the worktree";
+    const reviewed = (withFile: boolean) => {
+      const fx = makeConsumer({ worktrees: [40], remote: true, review });
+      c = fx;
+      commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+      if (withFile) writeFileSync(join(fx.wt(40), ".slice-refs.md"), "refs\n");
+      sh(fx.wt(40), "./scripts/slice-done.sh");
+      runDispatcher(fx, ["--review", "-y", "--interval", "1", "40"]);
+      return specPrompt(fx);
+    };
+    expect(reviewed(true)).toContain(SENTENCE);
+    expect(reviewed(false)).not.toContain(SENTENCE);
+  }, 60_000);
+
   it("the config refuses a directory that is not there", () => {
     c = makeConsumer({ configExtra: 'reviewReadDirs: ["../nope"],' });
     const r = runDispatcher(c, ["--plan"]);
@@ -1626,6 +1744,99 @@ describe("new tests run against the base", () => {
     );
     expect(specPrompt(fx)).not.toContain("NEW TESTS");
     noThrowaway(fx);
+  }, 60_000);
+});
+
+describe("slice-session.sh and .slice-refs.md", () => {
+  const SENTENCE =
+    "The tickets and comments this ticket names are in .slice-refs.md in this worktree";
+  const refsFile = (fx: Consumer) => join(fx.wt(40), ".slice-refs.md");
+  /** A session of #40 whose agent writes its prompt next to the worktree. */
+  const session = (threads: boolean) => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      threads,
+      agent: ["bash", "-c", 'printf "%s" "$0" > ../prompt.txt'],
+    });
+    c = fx;
+    return fx;
+  };
+  const start = (fx: Consumer) => {
+    const out = sh(fx.main, "./scripts/slice-session.sh 40");
+    return { out, prompt: readFileSync(join(fx.root, "prompt.txt"), "utf8") };
+  };
+
+  it("writes what the ticket names, and the prompt says so", () => {
+    const fx = session(true);
+    fx.setTicket("40", {
+      body: "See #7 and other/repo#8.",
+      comments: [{ author: "alex", at: "then", body: "OWN-COMMENT" }],
+    });
+    fx.setTicket("7", { title: "Seven", body: "SEVEN-BODY" });
+    fx.setTicket("other/repo#8", { title: "Eight", body: "EIGHT-BODY" });
+
+    const { out, prompt } = start(fx);
+
+    expect(out).toContain("✓ wrote .slice-refs.md");
+    const refs = readFileSync(refsFile(fx), "utf8");
+    expect(refs).toContain("OWN-COMMENT");
+    expect(refs).toContain("SEVEN-BODY");
+    expect(refs).toContain("EIGHT-BODY");
+    expect(prompt).toContain(SENTENCE);
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+
+  it("a name that cannot be read does not stop the prep", () => {
+    const fx = session(true);
+    fx.setTicket("40", { body: "See #7 and #9." });
+    fx.setTicket("7", { unreadable: true });
+    fx.setTicket("9", { title: "Nine", body: "NINE-BODY" });
+
+    start(fx);
+
+    const refs = readFileSync(refsFile(fx), "utf8");
+    expect(refs).toContain("could not be read: HTTP 404: Not Found");
+    expect(refs).toContain("NINE-BODY");
+  }, 60_000);
+
+  it("a tracker without thread: no file, and no sentence", () => {
+    const fx = session(false);
+    fx.setTicket("40", { body: "See #7." });
+
+    const { prompt } = start(fx);
+
+    expect(existsSync(refsFile(fx))).toBe(false);
+    expect(prompt).not.toContain(".slice-refs.md");
+  }, 60_000);
+
+  it("nothing named: an old file goes, and no sentence", () => {
+    const fx = session(true);
+    fx.setTicket("40", { body: "Just build." });
+    writeFileSync(refsFile(fx), "stale\n");
+
+    const { prompt } = start(fx);
+
+    expect(existsSync(refsFile(fx))).toBe(false);
+    expect(prompt).not.toContain(".slice-refs.md");
+  }, 60_000);
+
+  it("where git does not ignore it: no file, and the hint", () => {
+    const fx = session(true);
+    fx.setTicket("40", { body: "See #7." });
+    fx.setTicket("7", { title: "Seven" });
+    const exclude = join(fx.main, ".git", "info", "exclude");
+    writeFileSync(
+      exclude,
+      readFileSync(exclude, "utf8").replace(".slice-refs.md\n", ""),
+    );
+
+    const { out, prompt } = start(fx);
+
+    expect(existsSync(refsFile(fx))).toBe(false);
+    expect(out).toContain("no .slice-refs.md: git does not ignore it here yet");
+    expect(prompt).not.toContain(".slice-refs.md");
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
   }, 60_000);
 });
 

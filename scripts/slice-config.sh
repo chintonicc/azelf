@@ -15,6 +15,7 @@
 #   slice_tracker_open_blockers 42  # → 0
 #   slice_tracker_brief 42          # → the .slice-ticket.md text
 #   slice_tracker_parent 42         # → the .slice-parent.md text, or nothing
+#   slice_tracker_refs 42           # → the .slice-refs.md text, or nothing
 #   slice_tracker_close 42 "why"    # closes it; non-zero with the reason on stderr
 #
 # Exports, from slice.config.ts via scripts/slice-config.ts:
@@ -159,6 +160,10 @@ slice_tracker_brief() {
 
 slice_tracker_parent() {
   bun "$SLICE_AZELF_DIR/scripts/slice-config.ts" --tracker parent "$1"
+}
+
+slice_tracker_refs() {
+  bun "$SLICE_AZELF_DIR/scripts/slice-config.ts" --tracker refs "$1"
 }
 
 slice_tracker_tab_title() {

@@ -136,7 +136,7 @@ every slice.
 It also does the two things a README would otherwise ask you to do by hand and you
 would skip:
 
-- writes fourteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
+- writes fifteen marker patterns to **`.git/info/exclude`**, never `.gitignore`
   (which `@expo/fingerprint` hashes raw, so an entry there moves an Expo app's
   runtime version and strands OTA updates until the next production build);
 - writes shims into `scripts/` so `./scripts/session-commit.sh` and friends work
@@ -169,7 +169,7 @@ saying so.
 | `scripts/azelf` | the launcher — `./scripts/azelf run --plan` and every other verb |
 | `.claude/commands/azelf.md` | the `/azelf` command |
 | `.claude/skills/slice/SKILL.md` | the `slice` skill |
-| `.git/info/exclude` | fourteen marker patterns, in a delimited block |
+| `.git/info/exclude` | fifteen marker patterns, in a delimited block |
 
 Shims resolve the package at run time via `$AZELF_DIR`, else
 `node_modules/@chintonicc/azelf` in the **main checkout** — also from inside a slice
@@ -445,7 +445,7 @@ re-added by hand with `git worktree add`, which has the branch and nothing else.
 re-adds the worktree from the branch if git no longer lists it, copies the
 `provisionCopy` files that are missing (and names the ones already there, which it
 never overwrites), runs the install step (`install`, or what the lockfile says), and
-rewrites `.slice-ticket.md` and `.slice-parent.md`. It skips the ticket checks and
+rewrites `.slice-ticket.md`, `.slice-parent.md` and `.slice-refs.md`. It skips the ticket checks and
 writes no `.slice-flags`. It works under a hold, and refuses while a session is
 running in the worktree, or when there is neither a worktree nor a branch (`azelf run
 <ticket>` starts it).
@@ -1096,6 +1096,13 @@ is found there counts as checked. On consumer-b a ticket that placed half its fa
 the backend repo got `UNVERIFIED:` for all of it, and a person compared field names by
 hand. The standards and plan reviews are about this repo and are not widened.
 
+Such a directory is usually someone's checkout, and only that repo's own runs move it. So
+before each spec review it is fetched. A checkout that has origin's head is read as it is;
+one behind is left alone, and the reviewer reads an export of origin's head from a temp
+directory, removed when the run ends. The prompt says which commit it is reading. If the
+fetch or the export fails, the checkout is used as it is and the prompt says it may be
+behind. A directory outside git, or with no origin, is simply read.
+
 An agent can have the first without the others. `codex()` declares no headless mode
 unless you pass `headless: true`, because its non-interactive invocation has not been
 run against these review prompts — and a review that returns prose with no parseable
@@ -1171,6 +1178,15 @@ left as written when there is a parent, and gets one sentence appended when ther
 is none: "This ticket hangs under no spec: there is no .slice-parent.md in this
 worktree, and nothing takes precedence over .slice-ticket.md." The relaunch and
 self-land sentences come after it either way.
+
+**What a ticket names is there too.** A session cannot fetch issues, and a ticket can put
+deciding facts in a comment on another one. `.slice-refs.md` holds this ticket's own
+comments, then every ticket its body names (`#7`, `other/repo#8`) with theirs, except its
+parent, at most 30 tickets and 256 KB. It is rewritten on every prep and read only when the
+ticket points at it, so over-fetching costs a few tracker calls and no context. The start
+prompt and the spec review name it only when it exists. A requirement only those tickets
+state is not this slice's. It needs the tracker's optional `thread(id)`, which `github()`
+has, and, like `.slice-parent.md`, a pattern `azelf init` adds to `.git/info/exclude`.
 
 ## The exclusive lock
 
