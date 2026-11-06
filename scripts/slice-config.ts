@@ -62,6 +62,7 @@ import {
   parentFromBody,
   refFor,
   refsBrief,
+  ticketText,
 } from "./slice-tracker";
 import { ownRoot } from "./slice-version";
 
@@ -1035,8 +1036,12 @@ function trackerCli(args: string[]): never {
         break;
       case "brief": {
         const t = tracker.get(id);
-        const body = tracker.body(id) || "(no body)";
-        console.log(`# ${ref(id)} — ${t.title}\n\n${t.url}\n\n---\n\n${body}`);
+        console.log(
+          `# ${ref(id)} — ${t.title}\n\n${t.url}\n\n---\n\n${ticketText(
+            tracker,
+            id,
+          )}`,
+        );
         break;
       }
       case "parent": {

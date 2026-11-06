@@ -17,6 +17,7 @@ import {
   patient,
   refFor,
   refsBrief,
+  ticketText,
 } from "@/scripts/slice-tracker";
 import { describe, expect, it } from "vitest";
 
@@ -1115,18 +1116,34 @@ describe("refsBrief", () => {
     expect(refsBrief(without as Tracker, "1")).toBe("");
   });
 
+  it("is empty when the ticket only has comments of its own: those are in the brief", () => {
+    expect(
+      refsBrief(
+        tracker({
+          "1": thread({
+            body: "Just build.",
+            comments: [{ author: "alex", at: "then", body: "OWN-COMMENT" }],
+          }),
+        }),
+        "1",
+      ),
+    ).toBe("");
+  });
+
   it("is empty when the ticket has no comments and names nothing", () => {
     expect(
       refsBrief(tracker({ "1": thread({ body: "Just build." }) }), "1"),
     ).toBe("");
   });
 
-  it("has this ticket's comments, then each ticket the body names, with theirs", () => {
+  it("has each ticket the body or a comment names, with its comments, and not this ticket's own", () => {
     const out = refsBrief(
       tracker({
         "1": thread({
           body: "See #7 and other/repo#8.",
-          comments: [{ author: "alex", at: "then", body: "OWN-COMMENT" }],
+          comments: [
+            { author: "alex", at: "then", body: "OWN-COMMENT, see #9" },
+          ],
         }),
         "7": thread({
           title: "Seven",
@@ -1135,16 +1152,16 @@ describe("refsBrief", () => {
           comments: [{ author: "sam", at: "now", body: "SEVEN-COMMENT" }],
         }),
         "other/repo#8": thread({ title: "Eight", body: "EIGHT-BODY" }),
+        "9": thread({ title: "Nine", body: "NINE-BODY" }),
       }),
       "1",
     );
     expect(out).toContain("# What #1 names");
-    expect(out).toContain("## #1 — the comments on this ticket");
-    expect(out).toContain("### alex, then\n\nOWN-COMMENT");
     expect(out).toContain("## #7 — Seven\n\nhttps://x/7\n\nSEVEN-BODY");
     expect(out).toContain("### sam, now\n\nSEVEN-COMMENT");
     expect(out).toContain("## other/repo#8 — Eight\n\nEIGHT-BODY");
-    expect(out.indexOf("OWN-COMMENT")).toBeLessThan(out.indexOf("SEVEN-BODY"));
+    expect(out).toContain("## #9 — Nine\n\nNINE-BODY");
+    expect(out).not.toContain("OWN-COMMENT");
   });
 
   it("leaves out the ticket itself and its parent", () => {
@@ -1202,5 +1219,62 @@ describe("refsBrief", () => {
     expect(out).toContain("(cut at 256 KB)");
     expect(out).toContain("(not read, over the limit: #4)");
     expect(Buffer.byteLength(out)).toBeLessThan(257 * 1024);
+  });
+});
+
+describe("ticketText", () => {
+  const withThread = (t: TicketThread | Error, body = "THE-BODY"): Tracker =>
+    ({
+      body: () => body,
+      thread: () => {
+        if (t instanceof Error) throw t;
+        return t;
+      },
+    }) as unknown as Tracker;
+
+  it("is the body for a tracker without thread", () => {
+    expect(ticketText({ body: () => "B" } as unknown as Tracker, "1")).toBe(
+      "B",
+    );
+    expect(ticketText({ body: () => "" } as unknown as Tracker, "1")).toBe(
+      "(no body)",
+    );
+  });
+
+  it("is the body when there are no comments", () => {
+    expect(
+      ticketText(
+        withThread({ title: "t", url: "", body: "B", comments: [] }),
+        "1",
+      ),
+    ).toBe("B");
+  });
+
+  it("puts the comments after the body, and says they are part of the ticket", () => {
+    const out = ticketText(
+      withThread({
+        title: "t",
+        url: "",
+        body: "B",
+        comments: [
+          { author: "alex", at: "1", body: "FIRST" },
+          { author: "sam", at: "2", body: "SECOND" },
+        ],
+      }),
+      "1",
+    );
+    expect(out).toMatch(/^B\n\n## Comments on this ticket\n\n/);
+    expect(out).toContain("They are part of the ticket");
+    expect(out).toContain("### alex, 1\n\nFIRST\n\n### sam, 2\n\nSECOND");
+  });
+
+  it("keeps the body when the comments cannot be read, and says so", () => {
+    const out = ticketText(
+      withThread(new Error("gh issue view 1 failed:\nHTTP 502: Bad Gateway")),
+      "1",
+    );
+    expect(out).toBe(
+      "THE-BODY\n\n(this ticket's comments could not be read: HTTP 502: Bad Gateway)",
+    );
   });
 });

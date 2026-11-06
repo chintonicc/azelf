@@ -1859,11 +1859,30 @@ describe("slice-session.sh and .slice-refs.md", () => {
 
     expect(out).toContain("✓ wrote .slice-refs.md");
     const refs = readFileSync(refsFile(fx), "utf8");
-    expect(refs).toContain("OWN-COMMENT");
+    expect(refs).not.toContain("OWN-COMMENT");
     expect(refs).toContain("SEVEN-BODY");
     expect(refs).toContain("EIGHT-BODY");
     expect(prompt).toContain(SENTENCE);
     expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+
+  it("the ticket's own comments go in .slice-ticket.md, with no file when it names nothing", () => {
+    const fx = session(true);
+    fx.setTicket("40", {
+      body: "Just build.",
+      comments: [
+        { author: "alex", at: "then", body: "DO-NOT-TOUCH-THAT-FILE" },
+      ],
+    });
+
+    const { prompt } = start(fx);
+
+    const ticket = readFileSync(join(fx.wt(40), ".slice-ticket.md"), "utf8");
+    expect(ticket).toContain("Just build.");
+    expect(ticket).toContain("## Comments on this ticket");
+    expect(ticket).toContain("### alex, then\n\nDO-NOT-TOUCH-THAT-FILE");
+    expect(existsSync(refsFile(fx))).toBe(false);
+    expect(prompt).not.toContain(".slice-refs.md");
   }, 60_000);
 
   it("a name that cannot be read does not stop the prep", () => {
@@ -3458,6 +3477,51 @@ git status --porcelain > ../status-seen`;
     expect(report).toMatch(
       /## Attempt 1 — [\d-]+ \d\d:\d\d\n\n### Spec\n[\s\S]*VERDICT: BLOCK[\s\S]*## Attempt 2 — [\d-]+ \d\d:\d\d\n\n### Spec\n[\s\S]*VERDICT: PASS/,
     );
+  }, 60_000);
+
+  it("a new comment after a BLOCK counts as an edit, and both the session and the review read it", async () => {
+    const review = `printf "%s" "$1" >> ../review-prompts
+case "$1" in *CORRECTED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; esac`;
+    const { c, d } = parkedRun(
+      {
+        review: ["bash", "-c", review, "reviewer"],
+        agent: ["bash", "-c", "cp .slice-ticket.md ../ticket-seen", "agent"],
+        launch: true,
+        threads: true,
+        body: "build a",
+      },
+      ["--auto"],
+    );
+    await d.until("sent back to a session when the ticket is edited");
+
+    c.setTicket("40", {
+      comments: [{ author: "alex", at: "then", body: "CORRECTED: as it is" }],
+    });
+    await d.until(
+      "#40: the ticket was edited since the BLOCK — sending it back",
+    );
+    await d.until(LANDED);
+
+    expect(readFileSync(join(c.root, "ticket-seen"), "utf8")).toContain(
+      "CORRECTED: as it is",
+    );
+    expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("comments that cannot be read do not read as an edit", async () => {
+    const { c, d } = parkedRun(
+      {
+        review: ["bash", "-c", 'echo "VERDICT: BLOCK"', "reviewer"],
+        threads: true,
+        body: "build a",
+      },
+      ["--auto"],
+    );
+    await d.until("sent back to a session when the ticket is edited");
+
+    c.setTicket("40", { unreadable: true });
+    await d.until(seen("[round", 3));
+    expect(d.output()).not.toContain("the ticket was edited since the BLOCK");
   }, 60_000);
 
   it("a review that could not run has no finding: an edited ticket reviews again", async () => {

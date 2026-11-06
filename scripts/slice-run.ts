@@ -168,6 +168,7 @@ import {
   isTrackerUnavailable,
   openBlockers,
   parentFromBody,
+  ticketText,
 } from "./slice-tracker";
 // Which azelf this is, read again every round: see the version check below.
 import { installedVersion, ownRoot } from "./slice-version";
@@ -2095,13 +2096,14 @@ const REVIEW_DIR = join(repoRoot, ".slice-reviews");
 const SMELLS = `Mysterious Name · Duplicated Code · Feature Envy · Data Clumps · Primitive Obsession · Repeated Switches · Shotgun Surgery · Divergent Change · Speculative Generality · Message Chains · Middle Man · Refused Bequest`;
 
 /**
- * The ticket body is the spec. Fetched on demand rather than carried on
- * Ticket: only the review needs it, and loadTickets already makes two tracker
- * calls per ticket without it.
+ * The ticket is the spec, its comments with it (`ticketText`), which is what
+ * the session was given. Fetched on demand rather than carried on Ticket: only
+ * the review needs it, and loadTickets already makes two tracker calls per
+ * ticket without it.
  */
 function ticketBody(n: TicketId): string {
   try {
-    return tracker.body(n) || "(no body)";
+    return ticketText(tracker, n);
   } catch {
     return "(ticket body unavailable)";
   }
@@ -4611,7 +4613,13 @@ function mergeBase(id: TicketId): string | null {
  */
 function bodyHash(id: TicketId): string | null {
   try {
-    return createHash("sha256").update(tracker.body(id)).digest("hex");
+    // A correction is usually a comment, so it counts as an edit.
+    const text = tracker.thread
+      ? JSON.stringify(
+          (({ body, comments }) => ({ body, comments }))(tracker.thread(id)),
+        )
+      : tracker.body(id);
+    return createHash("sha256").update(text).digest("hex");
   } catch {
     return null;
   }

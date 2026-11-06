@@ -1184,14 +1184,18 @@ is none: "This ticket hangs under no spec: there is no .slice-parent.md in this
 worktree, and nothing takes precedence over .slice-ticket.md." The relaunch and
 self-land sentences come after it either way.
 
-**What a ticket names is there too.** A session cannot fetch issues, and a ticket can put
-deciding facts in a comment on another one. `.slice-refs.md` holds this ticket's own
-comments, then every ticket its body names (`#7`, `other/repo#8`) with theirs, except its
-parent, at most 30 tickets and 256 KB. It is rewritten on every prep and read only when the
-ticket points at it, so over-fetching costs a few tracker calls and no context. The start
-prompt and the spec review name it only when it exists. A requirement only those tickets
-state is not this slice's. It needs the tracker's optional `thread(id)`, which `github()`
-has, and, like `.slice-parent.md`, a pattern `azelf init` adds to `.git/info/exclude`.
+**A ticket's comments are part of it.** A session cannot fetch issues, so `.slice-ticket.md`
+ends with the ticket's comments, oldest first, and the spec review reads the same text. A new
+comment counts as an edit of the ticket. It needs the tracker's optional `thread(id)`, which
+`github()` has; without it the ticket is its body.
+
+**What a ticket names is there too.** A ticket can put deciding facts in a comment on another
+one. `.slice-refs.md` holds every other ticket its body or comments name (`#7`,
+`other/repo#8`), with their comments, except its parent, at most 30 tickets and 256 KB. It is
+rewritten on every prep and read only when the ticket points at it, so over-fetching costs a
+few tracker calls and no context. The start prompt and the spec review name it only when it
+exists. A requirement only those tickets state is not this slice's. Like `.slice-parent.md`, it
+needs a pattern `azelf init` adds to `.git/info/exclude`.
 
 ## The exclusive lock
 
@@ -1657,7 +1661,7 @@ exactly those:
 | --- | --- |
 | **its branch moves** — you committed a fix in the worktree | anything |
 | **the base branch moves**, at most twice per branch head | red gates, or `slice-land.sh` refusing |
-| **the ticket body changes** on the tracker | a spec review that could not run, or a BLOCK under `--auto` (below) |
+| **the ticket's body or comments change** on the tracker | a spec review that could not run, or a BLOCK under `--auto` (below) |
 | **`azelf retry <ticket>`**, next round | anything |
 
 Under `--auto`, editing the ticket after a BLOCK that was a verdict does not re-review the

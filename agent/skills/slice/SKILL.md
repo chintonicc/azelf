@@ -10,16 +10,18 @@ ticket. Nobody is watching this session.
 ## 1. Read the ticket
 
 `.slice-ticket.md` in this worktree is your ticket, written by the dispatcher. It is
-the whole brief. You cannot fetch it yourself — do not go looking for the issue.
+the whole brief, comments on the ticket included, at the end of the file. They are part of
+the ticket, and a later one can correct what is above it. You cannot fetch it yourself — do
+not go looking for the issue.
 
 When the ticket hangs under a spec, that spec is in `.slice-parent.md`. Read it for
 why the ticket exists and for decisions the ticket does not repeat. Where the two
 disagree, the parent decides; say so in your final message. A requirement only the
 parent states is another slice's, not yours.
 
-When the ticket points at another ticket, or at a comment, what it names is in
-`.slice-refs.md`, with this ticket's own comments. Read what the ticket points you to,
-not the whole file. A requirement only those state is not yours either.
+When the ticket names another ticket, that ticket and its comments are in
+`.slice-refs.md`. Read what the ticket points you to, not the whole file. A requirement only
+those state is not yours either.
 
 ## 2. Build it
 

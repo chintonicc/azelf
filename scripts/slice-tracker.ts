@@ -299,14 +299,51 @@ function idsIn(text: string, idPattern: string): TicketId[] {
   ];
 }
 
+/** A ticket's comments, one section each, oldest first as the tracker gives them. */
+const commentSections = (t: TicketThread): string[] =>
+  t.comments.map((c) => `### ${c.author}, ${c.at}\n\n${c.body.trim()}`);
+
+/**
+ * The ticket as a session and a review read it: its body, then its comments.
+ *
+ * A comment is part of the ticket. On consumer-b's Backend #196 the working
+ * assumptions and a lock on one file stood only in the ticket's own comment, and
+ * its body did not point there; a session cannot fetch the issue, and the spec
+ * review was never shown it. Comments that cannot be read cost a line and not
+ * the brief, since the body is what the ticket mostly is.
+ *
+ * Throws when the body cannot be read, as `Tracker.body` does.
+ */
+export function ticketText(tracker: Tracker, id: TicketId): string {
+  if (!tracker.thread) return tracker.body(id) || "(no body)";
+  let thread: TicketThread;
+  try {
+    thread = tracker.thread(id);
+  } catch (e) {
+    return `${
+      tracker.body(id) || "(no body)"
+    }\n\n(this ticket's comments could not be read: ${errorLine(e)})`;
+  }
+  const body = thread.body || "(no body)";
+  if (!thread.comments.length) return body;
+  return [
+    body,
+    "## Comments on this ticket",
+    "Oldest first. They are part of the ticket, and a later one can correct what is above it.",
+    ...commentSections(thread),
+  ].join("\n\n");
+}
+
 /** At most this many tickets in one `.slice-refs.md`, and this many bytes. */
 const REFS_MAX_TICKETS = 30;
 const REFS_MAX_BYTES = 256 * 1024;
 
 /**
- * What goes in `.slice-refs.md`: this ticket's own comments, then every ticket
- * its body names, each with its comments. Empty when there is nothing, which is
- * no file. Its parent is left out, since `.slice-parent.md` has that one.
+ * What goes in `.slice-refs.md`: every OTHER ticket this one names, in its body
+ * or its comments, each with its comments. Empty when it names none, which is no
+ * file. Its parent is left out, since `.slice-parent.md` has that one, and its
+ * own comments are in `.slice-ticket.md` (`ticketText`), because a file that
+ * says "a requirement only these state is not yours" is no place for them.
  *
  * On consumer-b's Backend #180 a ticket put deciding facts in a comment on
  * another issue, and a session cannot fetch issues. Over-fetching costs a few
@@ -319,8 +356,6 @@ export function refsBrief(tracker: Tracker, id: TicketId): string {
   const thread = tracker.thread.bind(tracker);
   const ref = (t: TicketId) =>
     t.includes("/") ? t : refFor(tracker.refTemplate, t);
-  const commentsOf = (t: TicketThread) =>
-    t.comments.map((c) => `### ${c.author}, ${c.at}\n\n${c.body.trim()}`);
 
   let own: TicketThread;
   try {
@@ -331,21 +366,14 @@ export function refsBrief(tracker: Tracker, id: TicketId): string {
     )} could not be read, so neither could what it names: ${errorLine(e)})`;
   }
   const parent = parentFromBody(own.body, tracker.idPattern);
-  const named = idsIn(own.body, tracker.idPattern).filter(
-    (t) => t !== id && t !== parent,
-  );
+  const named = idsIn(
+    [own.body, ...own.comments.map((c) => c.body)].join("\n"),
+    tracker.idPattern,
+  ).filter((t) => t !== id && t !== parent);
   const reading = named.slice(0, REFS_MAX_TICKETS);
 
   const sections: string[] = [];
-  const ownComments = commentsOf(own);
-  if (ownComments.length) {
-    sections.push(
-      [`## ${ref(id)} — the comments on this ticket`, ...ownComments].join(
-        "\n\n",
-      ),
-    );
-  }
-  let size = Buffer.byteLength(sections.join("\n\n"));
+  let size = 0;
   const unread: TicketId[] = named.slice(REFS_MAX_TICKETS);
   for (const [i, t] of reading.entries()) {
     if (size >= REFS_MAX_BYTES) {
@@ -359,7 +387,7 @@ export function refsBrief(tracker: Tracker, id: TicketId): string {
         `## ${ref(t)} — ${th.title}`,
         ...(th.url ? [th.url] : []),
         th.body.trim() || "(no body)",
-        ...commentsOf(th),
+        ...commentSections(th),
       ].join("\n\n");
     } catch (e) {
       section = `## ${ref(t)}\n\n(could not be read: ${errorLine(e)})`;

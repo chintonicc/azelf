@@ -321,6 +321,12 @@ If it is built, what the thinking so far has settled:
 - **A side benefit:** a suite on the stack catches what is green alone and red together, the
   shared-budget case, which `stale-base-plan.md` declined as a separate probe merge.
 
+## Corrected since
+
+- **Phase 4 put the ticket's own comments in `.slice-refs.md`.** Its wording ("read what the ticket
+  points you to", "a requirement only they state is not yours") would have lost Backend #196's
+  binding comment. `comments-gate-log-next-land-plan.md` Phase 1 moves them into `.slice-ticket.md`.
+
 ## Not in this plan
 
 - **Backend #195, the suite red through a linked `.env`.** Fixed on the consumer's side on
