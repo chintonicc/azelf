@@ -85,11 +85,11 @@ after the heading. Line numbers are as of `0b5c108`.
 
 ## Phase 2 — a red gate keeps its output
 
-- [ ] 2a. `GateResult.output?`, set by the gates that run a command.
-- [ ] 2b. `gatesPass`: on red, when `output` has more lines than `detail`, writes
+- [x] 2a. `GateResult.output?`, set by the gates that run a command.
+- [x] 2b. `gatesPass`: on red, when `output` has more lines than `detail`, writes
   `.slice-reviews/last-gate.log` and names it. Only where git ignores it; `last-block.md` gets the same
   guard. The repair round's failure text names it too.
-- [ ] 2c. Tests: a long red output is saved whole and named; a short one writes no file; the tree stays
+- [x] 2c. Tests: a long red output is saved whole and named; a short one writes no file; the tree stays
   clean; a not-ignored path writes nothing and the gate still reports.
 
 ## Phase 3 — one land at a time across runs

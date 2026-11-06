@@ -2858,6 +2858,30 @@ fi`;
       ).toContain("ACCEPTED: a.txt edited and committed");
     });
 
+    it("tells the repair where the gate's whole output is", () => {
+      const fx = conflicting(
+        'bash "$(dirname "$PWD")/resolver.sh" "$1"',
+        ["a.txt"],
+        {
+          gate: [
+            "bash",
+            "-c",
+            'for i in $(seq 40); do echo "row $i"; done; grep -qx fixed a.txt',
+          ],
+        },
+      );
+      writeFileSync(join(fx.root, "resolver.sh"), logged(fx.root, REPAIR));
+      c = fx;
+
+      const r = runDispatcher(c, auto);
+
+      expect(r.code).toBe(0);
+      expect(readFileSync(join(c.root, "prompts"), "utf8")).toMatch(
+        /The whole output is in \S+\/\.slice-reviews\/last-gate\.log\./,
+      );
+      expect(readFileSync(join(c.main, "a.txt"), "utf8")).toBe("fixed\n");
+    });
+
     it("rejects a repair that strays, resets the branch, and parks", () => {
       c = redUntilFixed(`if [[ "$1" == *"WHAT THE GATES SAID"* ]]; then
   echo fixed > a.txt; echo x > other.txt
@@ -3863,6 +3887,65 @@ const azelfRelaunch = (fx: Consumer, ...args: string[]) => {
   );
   return { code: r.status, out: `${r.stdout}${r.stderr}` };
 };
+
+describe("a red gate's whole output", () => {
+  /** A gate that prints the red part first and a long table after it. */
+  const LONG = [
+    "bash",
+    "-c",
+    'echo "RED-PART-NAME"; for i in $(seq 40); do echo "row $i"; done; exit 1',
+  ];
+  const gateRun = (gate: string[]) => {
+    const fx = makeConsumer({ worktrees: [40], gate });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    return { fx, r: runDispatcher(fx, ["--gates", "40"]) };
+  };
+  const logOf = (fx: Consumer) =>
+    join(fx.wt(40), ".slice-reviews", "last-gate.log");
+
+  it("is kept and named when the lines shown are not all of it, and the tree stays clean", () => {
+    const { fx, r } = gateRun(LONG);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("row 40");
+    // Not among the lines shown; the gate's name is its script, which has it.
+    expect(r.out).not.toMatch(/^ *RED-PART-NAME$/m);
+    expect(r.out).toContain(`whole output: ${logOf(fx)}`);
+    const log = readFileSync(logOf(fx), "utf8");
+    expect(log).toContain("RED-PART-NAME");
+    expect(log).toContain("row 40");
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+
+  it("writes nothing when it was all shown", () => {
+    const { fx, r } = gateRun(["bash", "-c", 'echo "short"; exit 1']);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("short");
+    expect(r.out).not.toContain("whole output");
+    expect(existsSync(logOf(fx))).toBe(false);
+  }, 60_000);
+
+  it("writes nothing where git does not ignore it, and the gate still reports", () => {
+    const fx = makeConsumer({ worktrees: [40], gate: LONG });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    const exclude = join(fx.main, ".git", "info", "exclude");
+    writeFileSync(
+      exclude,
+      readFileSync(exclude, "utf8").replace(".slice-reviews/\n", ""),
+    );
+
+    const r = runDispatcher(fx, ["--gates", "40"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("row 40");
+    expect(r.out).not.toContain("whole output");
+    expect(existsSync(logOf(fx))).toBe(false);
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+});
 
 describe("azelf relaunch", () => {
   /** Two attempts on file for #40, in the review's own shape. */

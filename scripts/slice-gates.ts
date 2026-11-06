@@ -88,6 +88,13 @@ export type GateResult =
       why: string;
       /** Supporting lines: the errors introduced, the tail of a failing run. */
       detail?: string[];
+      /**
+       * Everything the command printed, when `detail` is only its tail. The
+       * dispatcher keeps it in a file: a runner that prints the red part first
+       * and a table of everything after it has the one line that matters
+       * outside any tail.
+       */
+      output?: string;
     };
 
 export type Gate = {
@@ -156,6 +163,7 @@ export function exitCode(cmd: string[], opts: GateOptions = {}): Gate {
         ok: false,
         why: withHint(`\`${name}\` failed`, opts.hint),
         detail: tail(out),
+        output: out,
       };
     },
   };
@@ -187,6 +195,7 @@ export function exitCodeOverFiles(cmd: string[], opts: GateOptions = {}): Gate {
         ok: false,
         why: withHint(`\`${name}\` failed on the changed files`, opts.hint),
         detail: tail(out),
+        output: out,
       };
     },
   };
@@ -280,6 +289,7 @@ export function baselineDiff(opts: BaselineDiffOptions): Gate {
           ok: false,
           why: `\`${name}\` exited non-zero in the slice without reporting a single error — did it crash?`,
           detail: tail(candidate.out),
+          output: candidate.out,
         };
       }
       const introduced = multisetDifference(baseline.errors, candidate.errors);

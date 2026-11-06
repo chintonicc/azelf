@@ -82,6 +82,8 @@ describe("exitCode", () => {
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.why).toBe("`bun run test` failed (the unit suite is red)");
+    // All of it, for the file a long run is kept in; `detail` is the tail.
+    expect(r.output).toBe("1 failed\n\nFAIL lib/a.test.ts");
     expect(r.detail).toEqual(["1 failed", "FAIL lib/a.test.ts"]);
   });
 });

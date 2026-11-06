@@ -688,6 +688,10 @@ counts as changed. A slice that touches none of them skips the gate, and says so
   running 2 gate(s) for #142 (3 files) …
 ```
 
+A red gate shows its last ten lines. When that is not all of it, the whole output goes to
+`.slice-reviews/last-gate.log` in the worktree, and the red line names the file, so a runner
+that prints the failure first and a long table after it costs a look and not a second run.
+
 `azelf run --gates` and `azelf gates` print the same line. The reviews are told
 which gates ran and passed and, separately, which were skipped, so a skipped build
 is never read as a passed one. A scoped gate that does run holds the

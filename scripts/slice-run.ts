@@ -3399,7 +3399,15 @@ function gatesPass(
 
   const DETAIL_LINES = 10;
   const detail = result.detail ?? [];
-  gateFailures.set(n, [result.why, ...detail].join("\n"));
+  const whole = keepGateOutput(wt, result.output, detail);
+  gateFailures.set(
+    n,
+    [
+      result.why,
+      ...detail,
+      ...(whole ? [`The whole output is in ${whole}.`] : []),
+    ].join("\n"),
+  );
   if (detail.length) {
     console.log(
       detail
@@ -3411,7 +3419,43 @@ function gatesPass(
       console.log(`      … ${detail.length - DETAIL_LINES} more`);
     }
   }
+  if (whole) console.log(`      whole output: ${whole}`);
   return fail(result.why);
+}
+
+/**
+ * Does git ignore this path in this worktree? A file it does not ignore is an
+ * untracked change, and a slice with one is not clean and does not land. So
+ * anything azelf writes into a worktree asks first: the exclude block is
+ * whatever `azelf init` last wrote there.
+ */
+function ignoredIn(wt: string, path: string): boolean {
+  return run(["git", "check-ignore", "-q", path], {
+    cwd: wt,
+    allowFail: true,
+  }).ok;
+}
+
+/**
+ * All of a red gate's output, kept when the lines shown are not all of it. Its
+ * path, or null. On consumer-b's Frontend #148 the runner printed the red part
+ * first and a table of about 130 lines after it, so the tail held no name, and
+ * finding out which part was red took a second full run: eight minutes at load 35.
+ */
+function keepGateOutput(
+  wt: string,
+  output: string | undefined,
+  shown: string[],
+): string | null {
+  if (!output) return null;
+  const lines = output.split("\n").filter((l) => l.trim()).length;
+  if (lines <= shown.length) return null;
+  const dir = ".slice-reviews";
+  if (!ignoredIn(wt, `${dir}/last-gate.log`)) return null;
+  mkdirSync(join(wt, dir), { recursive: true });
+  const path = join(wt, dir, "last-gate.log");
+  writeFileSync(path, output.endsWith("\n") ? output : `${output}\n`);
+  return path;
 }
 
 /**
@@ -4838,7 +4882,7 @@ function markForRelaunch(id: TicketId): {
 
   const block = lastBlock(id);
   const finding = join(wt, LAST_BLOCK_DIR, LAST_BLOCK_FILE);
-  if (block) {
+  if (block && ignoredIn(wt, `${LAST_BLOCK_DIR}/${LAST_BLOCK_FILE}`)) {
     mkdirSync(join(wt, LAST_BLOCK_DIR), { recursive: true });
     writeFileSync(finding, block);
   } else {
@@ -4853,7 +4897,7 @@ function markForRelaunch(id: TicketId): {
   const ended =
     /^[0-9]+$/.test(pid) && isSessionOf(id, Number(pid)) ? Number(pid) : null;
   const stuck = ended !== null && !endAgentUnder(ended);
-  return { finding: block ? finding : null, ended, stuck };
+  return { finding: existsSync(finding) ? finding : null, ended, stuck };
 }
 
 /** The old session's fate, for the line after a relaunch. Empty when there was none. */
