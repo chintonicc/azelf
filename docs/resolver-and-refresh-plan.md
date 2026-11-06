@@ -127,8 +127,12 @@ after the heading. Line numbers are as of `547714a`.
   consumer-b leaves `.slice-reviews/repair-<n>.md` in the main checkout: read it (did
   it run the allowed command? did it fix the merge and not the test?) and record what
   it did here, or in the friction log if it went wrong.
-- **A real `reviewReadDirs` review**: the same, for an `UNVERIFIED:` line that should
-  no longer appear once the reviewer can read the other repo.
+- **A real `reviewReadDirs` review: seen.** On consumer-b, Frontend #136's review
+  (2026-11-02) compared lists in the backend clone, and its `UNVERIFIED:` line narrowed to
+  the commit hash, since a reviewer cannot run git. Backend #190's (2026-11-06) kept one: the
+  frontend clone stood four days behind origin, and a screen the ticket names was not in it.
+  The reader works; the checkout it reads can be stale.
+  `relaunch-and-blips-plan.md` Phase 4 takes that.
 
 ## Order and cost
 
