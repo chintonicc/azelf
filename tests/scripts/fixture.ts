@@ -255,14 +255,14 @@ export function makeConsumer(opts: {
     join(main, "slice.config.ts"),
     `import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { custom, exitCode, type SliceConfig, type Tracker } from ${JSON.stringify(
+import { custom, exitCode, type SliceConfig, type Tracker, TrackerUnavailable } from ${JSON.stringify(
       join(AZELF, "index.ts"),
     )};
 const TICKETS = ${JSON.stringify(ticketsFile)};
 const DOWN = ${JSON.stringify(join(root, "tracker-down"))};
 const CLOSE_FAILS = ${JSON.stringify(join(root, "close-fails"))};
 const unreachable = (what: string): never => {
-  throw new Error(\`gh \${what} failed:\\nPost "https://api.github.com/graphql": EOF\`);
+  throw new TrackerUnavailable(\`gh \${what} failed:\\nPost "https://api.github.com/graphql": EOF\`);
 };
 type Fake = { title?: string; body?: string; state?: "open" | "closed"; labels?: string[]; ready?: boolean; children?: string[]; blockedBy?: string[] };
 const all = (): Record<string, Fake> => JSON.parse(readFileSync(TICKETS, "utf8"));

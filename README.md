@@ -354,6 +354,24 @@ started again, even if the close after its land failed. The dispatcher retries t
 close every round, and a run that ends with it still unconfirmed lists it under
 `landed, not seen closed`.
 
+Below that, a network failure is tried again where it happens: every `gh` call of the
+GitHub adapter (after 2, 8 and 20 seconds, then one attempt per call for a minute), the
+`ciRuns` gate's first look and its push, and `slice-land.sh`'s fetch and push (after 5 and
+15 seconds, before anything is undone). What counts is one list in `scripts/slice-net.ts`:
+a 404, a sign-in problem and a rate limit are not on it. When the retries run out, the
+message says origin could not be reached, not that it refused.
+
+An outage while the plan is being read is waited out under `-y`, a read a minute up to the
+same 30 minutes, and without `-y` it is said at once. Either way it ends in one line and exit
+75, which a wrapper that restarts a run can read as "try again later":
+
+```
+  ✗ tracker unreachable: gh issue view 179 --json title,state,labels,url (read tcp …: i/o timeout)
+```
+
+A tracker of your own can throw `TrackerUnavailable` (exported) to get the same. Anything
+else thrown at that point is a bug, and keeps its stack.
+
 A run that stops with work left (everything parked, the disk below `minFreeDiskGb`,
 the tracker gone, or an error in a round) ends with the command that picks it up
 again: the same flags minus `--once`, and the tickets it left open. A restart adopts
@@ -1446,6 +1464,7 @@ findings: whether one is a ticket, three, or none is yours to decide.
 | 1 | work is left: something is parked, or the dispatch was refused |
 | 2 | every ticket landed, and the plan-level review has findings or no result |
 | 64 | a flag was wrong |
+| 75 | the tracker could not be reached while the plan was read: try again later |
 
 ### Letting an agent resolve a rebase conflict
 

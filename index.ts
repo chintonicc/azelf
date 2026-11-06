@@ -38,7 +38,7 @@ export type {
   TicketState,
   Tracker,
 } from "./scripts/slice-tracker";
-export { github } from "./scripts/slice-tracker";
+export { TrackerUnavailable, github } from "./scripts/slice-tracker";
 
 export type { Launcher, Session, Spawn } from "./scripts/slice-launcher";
 export { manual, tmux, warp } from "./scripts/slice-launcher";

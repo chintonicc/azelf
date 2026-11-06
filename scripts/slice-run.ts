@@ -162,6 +162,7 @@ import {
   bodyOnlyBlockers,
   compareIds,
   findEpics,
+  isTrackerUnavailable,
   openBlockers,
   parentFromBody,
 } from "./slice-tracker";
@@ -6296,8 +6297,48 @@ if (flag("--gates")) {
 }
 
 console.log(`── reading the plan from ${tracker.name} ──────────────────────`);
+
+/**
+ * How a read of the plan outlives an outage. Mid-run a failed read is forgiven
+ * (`noteUnreadable`); here it used to be a stack trace and an exit, on consumer-b
+ * for an `i/o timeout` that had cleared a minute later.
+ *
+ * A retried call has already failed for half a minute by the time it throws. So
+ * under -y, where nobody is there to run it again, the wait is the mid-run
+ * ceiling and a read a minute. A person at the prompt gets the line at once. In
+ * both cases the exit is 75, EX_TEMPFAIL as slice-land.sh uses it, and no stack:
+ * this is not a bug. Everything else that throws is one, and keeps its stack.
+ */
+function loadPlan(ids: TicketId[]): ReturnType<typeof loadTickets> {
+  // A quarter of the ceiling when that is shorter, so a test's two seconds work.
+  const waitMs = Math.min(60_000, trackerOutageMs / 4);
+  const since = Date.now();
+  let told = false;
+  for (;;) {
+    try {
+      return loadTickets(ids);
+    } catch (e) {
+      if (!isTrackerUnavailable(e)) throw e;
+      const said = (e as Error).message
+        .split("\n")[0]
+        ?.replace(/ failed:$/, "");
+      const line = `tracker unreachable: ${said} (${errorLine(e)})`;
+      if (!assumeYes || Date.now() - since >= trackerOutageMs) {
+        console.error(`\n  ✗ ${line}`);
+        process.exit(75);
+      }
+      if (!told) {
+        console.log(
+          `  ${line} — trying again for up to ${duration(trackerOutageMs)}`,
+        );
+        told = true;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+    }
+  }
+}
 const { tickets, epics, namedEpics, unlabelled, missingEdges } =
-  loadTickets(explicit);
+  loadPlan(explicit);
 // Before the empty check, not after: if every ready ticket turned out to be a
 // heading over the others, "nothing to run" is true and useless. The reason has
 // to come first or the run looks broken.

@@ -1,5 +1,6 @@
 import {
   type GhRunner,
+  TrackerUnavailable,
   blockerLine,
   blockersFromBody,
   bodyOnlyBlockers,
@@ -8,8 +9,10 @@ import {
   github,
   idFromBranch,
   idPatternProblem,
+  isTrackerUnavailable,
   openBlockers,
   parentFromBody,
+  patient,
   refFor,
 } from "@/scripts/slice-tracker";
 import { describe, expect, it } from "vitest";
@@ -892,5 +895,149 @@ describe("bodyOnlyBlockers — what the prose claims and the tracker has not got
     expect(
       B("## Blocked by\n\n#18, #19 and #20\n", [{ id: "19", state: "open" }]),
     ).toEqual(["18", "20"]);
+  });
+});
+
+/**
+ * A network failure is tried again in the transport, so every call has it, and
+ * only a network failure. The sleep is a list, so nothing here waits.
+ */
+describe("github() and a network that comes and goes", () => {
+  const TIMEOUT = "read tcp 1.1.1.1:1->2.2.2.2:443: i/o timeout";
+  const NOT_FOUND = "HTTP 404: Not Found";
+  const ISSUE = JSON.stringify({
+    number: 7,
+    title: "t",
+    state: "OPEN",
+    labels: [],
+    url: "",
+  });
+
+  /** `gh` answering `answers` in turn; the last repeats. */
+  const inTurn = (answers: Answer[]) => {
+    let calls = 0;
+    const gh: GhRunner = () => {
+      const a = answers[Math.min(calls++, answers.length - 1)] as Answer;
+      return {
+        ok: a.ok ?? true,
+        stdout: a.stdout ?? "",
+        stderr: a.stderr ?? "",
+      };
+    };
+    return { gh, calls: () => calls };
+  };
+  const down = { ok: false, stderr: TIMEOUT };
+
+  it("passes when the third try does, having waited 2 and 8 seconds", () => {
+    const { gh, calls } = inTurn([down, down, { stdout: ISSUE }]);
+    const slept: number[] = [];
+    const t = github({ gh, sleep: (ms) => slept.push(ms) });
+
+    expect(t.get("7").title).toBe("t");
+    expect(calls()).toBe(3);
+    expect(slept).toEqual([2000, 8000]);
+  });
+
+  it("gives up after 2, 8 and 20 seconds, and throws TrackerUnavailable with the usual message", () => {
+    const { gh, calls } = inTurn([down]);
+    const slept: number[] = [];
+    const t = github({ gh, sleep: (ms) => slept.push(ms) });
+
+    let thrown: unknown;
+    try {
+      t.get("7");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(TrackerUnavailable);
+    expect(isTrackerUnavailable(thrown)).toBe(true);
+    expect((thrown as Error).message).toMatch(
+      /^gh issue view 7 .* failed:\nread tcp .*: i\/o timeout$/,
+    );
+    expect(calls()).toBe(4);
+    expect(slept).toEqual([2000, 8000, 20000]);
+  });
+
+  it("does not retry a 404, and a 404 is no TrackerUnavailable", () => {
+    const { gh, calls } = inTurn([{ ok: false, stderr: NOT_FOUND }]);
+    const slept: number[] = [];
+    const t = github({ gh, sleep: (ms) => slept.push(ms) });
+
+    let thrown: unknown;
+    try {
+      t.get("7");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect(isTrackerUnavailable(thrown)).toBe(false);
+    expect(calls()).toBe(1);
+    expect(slept).toEqual([]);
+  });
+
+  it("stops retrying when the failure stops being the network", () => {
+    const { gh, calls } = inTurn([down, { ok: false, stderr: NOT_FOUND }]);
+    const t = github({ gh, sleep: () => {} });
+
+    expect(() => t.get("7")).toThrow(NOT_FOUND);
+    expect(calls()).toBe(2);
+  });
+
+  it("the breaker: one attempt per call for a minute after a run of failures, and a success closes it", () => {
+    const { gh, calls } = inTurn([down]);
+    let now = 1_000_000;
+    const slept: number[] = [];
+    const runner = patient(gh, {
+      sleep: (ms) => slept.push(ms),
+      now: () => now,
+    });
+
+    expect(runner(["a"]).ok).toBe(false);
+    expect(calls()).toBe(4);
+    expect(slept.length).toBe(3);
+
+    // Inside the minute: one attempt, no sleep.
+    now += 59_000;
+    expect(runner(["b"]).ok).toBe(false);
+    expect(calls()).toBe(5);
+    expect(slept.length).toBe(3);
+
+    // After it: retries again.
+    now += 2_000;
+    expect(runner(["c"]).ok).toBe(false);
+    expect(calls()).toBe(9);
+    expect(slept.length).toBe(6);
+  });
+
+  it("a success inside the breaker's minute closes it", () => {
+    let up = false;
+    let calls = 0;
+    const gh: GhRunner = () => {
+      calls += 1;
+      return up
+        ? { ok: true, stdout: "{}", stderr: "" }
+        : { ok: false, stdout: "", stderr: TIMEOUT };
+    };
+    const slept: number[] = [];
+    const runner = patient(gh, { sleep: (ms) => slept.push(ms), now: () => 1 });
+
+    runner(["a"]);
+    up = true;
+    expect(runner(["b"]).ok).toBe(true);
+    up = false;
+    const before = calls;
+    runner(["c"]);
+    expect(calls - before).toBe(4);
+  });
+
+  it("close and addBlocker are retried too, and report the outage as what it is", () => {
+    const close = inTurn([down, { stdout: "" }]);
+    github({ gh: close.gh, sleep: () => {} }).close("7", "done");
+    expect(close.calls()).toBe(2);
+
+    const closeDown = inTurn([down]);
+    expect(() =>
+      github({ gh: closeDown.gh, sleep: () => {} }).close("7", "done"),
+    ).toThrow(TrackerUnavailable);
   });
 });

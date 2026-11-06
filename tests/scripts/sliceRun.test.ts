@@ -302,6 +302,49 @@ describe("a tracker that stops answering", () => {
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
   }, 60_000);
 
+  describe("at the start", () => {
+    const UNREACHABLE =
+      /tracker unreachable: gh issue view 40 \(Post "https:\/\/api\.github\.com\/graphql": EOF\)/;
+
+    it("under -y waits for it, says so once, and goes on", async () => {
+      c = makeConsumer({ worktrees: [40] });
+      sessions.push(fakeSession(c, 40));
+      c.trackerDown(true);
+      d = startDispatcher(c, ["--once", "-y", "40"], {
+        env: { SLICE_TRACKER_OUTAGE_SECONDS: "20" },
+      });
+      await d.until("— trying again for up to 20 seconds");
+      expect(d.output()).toMatch(UNREACHABLE);
+
+      c.trackerDown(false);
+      await d.until("--once: stopping here.");
+      expect(await d.exited).toBe(0);
+      expect(count(d.output(), "tracker unreachable")).toBe(1);
+    }, 60_000);
+
+    it("under -y stops at the ceiling with one line and exit 75, no stack", () => {
+      c = makeConsumer({ worktrees: [40] });
+      c.trackerDown(true);
+      const r = runDispatcher(c, ["--once", "-y", "40"], {
+        env: { SLICE_TRACKER_OUTAGE_SECONDS: "1" },
+      });
+      expect(r.code).toBe(75);
+      expect(r.out).toMatch(UNREACHABLE);
+      expect(r.out).toContain("✗ tracker unreachable");
+      expect(r.out).not.toMatch(/^\s+at /m);
+    }, 60_000);
+
+    it("without -y says it at once, exit 75", () => {
+      c = makeConsumer({ worktrees: [40] });
+      c.trackerDown(true);
+      const r = runDispatcher(c, ["--plan", "40"]);
+      expect(r.code).toBe(75);
+      expect(r.out).toMatch(UNREACHABLE);
+      expect(r.out).not.toContain("trying again");
+      expect(r.out).not.toMatch(/^\s+at /m);
+    }, 60_000);
+  });
+
   it("stops after the outage ceiling, names what is still running, and says how to resume", async () => {
     c = makeConsumer({ worktrees: [40] });
     sessions.push(fakeSession(c, 40));

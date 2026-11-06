@@ -162,28 +162,41 @@ stale, and only that repo's own dispatcher moves it.
 
 ## Phase 3 — a network blip is not a failure
 
-- [ ] 3a. A small module with `isNetworkError(text)`: `i/o timeout`, `connection reset`,
+- [x] 3a. A small module with `isNetworkError(text)`: `i/o timeout`, `connection reset`,
   `TLS handshake`, `EOF`, `no such host`, `Could not resolve host`, `network is unreachable`,
   `connection refused`, `can't assign requested address` (any case), `HTTP 50[234]`,
   `The remote end hung up`, `RPC failed`. Not `rate limit`.
-- [ ] 3b. `github()`: `patient(gh)` around the runner: delays 2, 8, 20 s, through a `sleep`
+- [x] 3b. `github()`: `patient(gh)` around the runner: delays 2, 8, 20 s, through a `sleep`
   option for the tests; after a run of failures, one attempt per call for 60 s. `call`
   throws `TrackerUnavailable` (exported, same message shape, so `errorLine` still works).
   Reposting is safe: `addBlocker` treats "already been taken" as success, `close` is
   idempotent, and a doubled close comment after a lost response is accepted.
-- [ ] 3c. `slice-run.ts:6101`: around `loadTickets`: `TrackerUnavailable` under `assumeYes`
+- [x] 3c. `slice-run.ts:6101`: around `loadTickets`: `TrackerUnavailable` under `assumeYes`
   says `tracker unreachable: <command> — trying again for up to 30 minutes` once, tries each
   60 s up to `trackerOutageMs`, then that line and exit 75. Without `-y`, the line and exit
   75 at once. No stack. README.
-- [ ] 3d. `ciRuns`: the first `look()` and the push retry on `isNetworkError` (`ctx.exec`
+- [x] 3d. `ciRuns`: the first `look()` and the push retry on `isNetworkError` (`ctx.exec`
   sleep). The final wording says "could not reach origin", not "refused".
-- [ ] 3e. `slice-land.sh`: `git push` at `:326` and the fetch in `sync_base_with_origin` go
+- [x] 3e. `slice-land.sh`: `git push` at `:326` and the fetch in `sync_base_with_origin` go
   through a `net_retry` helper, before the undo: two more tries, 5 and 15 s, on the same list.
   A network failure after that says so instead of "refused". Exit codes as they are.
-- [ ] 3f. Tests: one table of samples run against both the TS and the bash list, so they
+- [x] 3f. Tests: one table of samples run against both the TS and the bash list, so they
   cannot drift; a scripted `gh` failing twice then passing; a 404 not retried; the breaker;
   `--once -y` with the fixture's tracker down at the start, then up; ditto never up, exit 75;
   `ciRuns` with a failing first push; `slice-land.sh` with a PATH `git` that fails one push.
+
+### What building it found
+
+- **One list, not two.** `slice-land.sh` asks `scripts/slice-net.ts` on stdin instead of
+  carrying a bash copy, so there is nothing to drift, and the table of samples runs against
+  both ways of asking. It starts bun only after a failure.
+- **The list grew by git's own wording for the same failures:** `Failed to connect to`,
+  `Operation timed out`, `Connection timed out`, `SSL_ERROR_SYSCALL`. `Could not resolve to an
+  Issue` is GraphQL's not-found, and is not `Could not resolve host`.
+- **`isTrackerUnavailable` asks by name**, because the config imports the adapter through the
+  package and the dispatcher imports the file directly, which can be two copies of the module.
+- **A wait of a quarter of the ceiling when that is under a minute**, so a test's ceiling of a
+  second or two can be crossed. At 30 minutes it is the minute the plan names.
 
 ## Phase 4 — a session reads what its ticket names, and a review reads what is current
 

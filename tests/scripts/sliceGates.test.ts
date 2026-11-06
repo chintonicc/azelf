@@ -545,9 +545,12 @@ describe("ciRuns", () => {
     branch?: string;
     origin?: string;
     push?: { ok: boolean; out: string };
+    /** What the push answers in turn, before `push` takes over. */
+    pushes?: { ok: boolean; out: string }[];
   }) {
     const calls: Call[] = [];
     let listed = 0;
+    let pushed = 0;
     const exec: Exec = (cmd, cwd) => {
       calls.push({ cmd, cwd });
       const line = cmd.join(" ");
@@ -565,7 +568,7 @@ describe("ciRuns", () => {
         const deleting = (cmd.at(-1) ?? "").startsWith(":");
         // Deleting a branch that is not there fails, and the gate ignores it.
         if (deleting) return { ok: false, out: "remote ref does not exist" };
-        return o.push ?? { ok: true, out: "" };
+        return o.pushes?.[pushed++] ?? o.push ?? { ok: true, out: "" };
       }
       if (cmd[0] === "gh") {
         const answer = o.lists[Math.min(listed++, o.lists.length - 1)];
@@ -685,6 +688,58 @@ describe("ciRuns", () => {
     });
     expect(w.count("sleep")).toBe(0);
     expect(w.count("gh")).toBe(1);
+  });
+
+  const NO_ROUTE = {
+    ok: false,
+    out: "fatal: unable to access 'https://github.com/acme/app.git/': Failed to connect to github.com port 443: Can't assign requested address",
+  };
+
+  it("tries a push that failed on the network again, and goes on", () => {
+    const w = ciWorld({
+      lists: [[], [green(11, "Tests"), green(12, "Docker-Gate")]],
+      pushes: [NO_ROUTE, { ok: true, out: "" }],
+    });
+    expect(gate().run(ctxWith(w.exec))).toEqual({ ok: true });
+    expect(w.count(`git push -q origin HEAD:${CI_REF}`)).toBe(2);
+    expect(w.count("sleep 2")).toBe(2); // the retry's, and the first poll's 20
+  });
+
+  it("says it could not reach origin when the retries run out, not that the push was refused", () => {
+    const w = ciWorld({ lists: [[]], push: NO_ROUTE });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r).toEqual({
+      ok: false,
+      why: "CI: could not reach origin to push 0123456 to azelf-ci/ticket-40-0123456789ab",
+      detail: [NO_ROUTE.out],
+    });
+    expect(w.count(`git push -q origin HEAD:${CI_REF}`)).toBe(4);
+    expect(w.lines().filter((l) => l.startsWith("sleep"))).toEqual([
+      "sleep 2",
+      "sleep 8",
+      "sleep 20",
+    ]);
+  });
+
+  it("does not retry a push origin refused", () => {
+    const w = ciWorld({
+      lists: [[]],
+      push: { ok: false, out: "! [remote rejected] (permission denied)" },
+    });
+    gate().run(ctxWith(w.exec));
+    expect(w.count(`git push -q origin HEAD:${CI_REF}`)).toBe(1);
+  });
+
+  it("tries the first look at the runs again when it failed on the network", () => {
+    const w = ciWorld({
+      lists: [
+        { ok: false, out: "dial tcp: i/o timeout" },
+        [green(5, "Tests"), green(6, "Docker-Gate")],
+      ],
+    });
+    expect(gate().run(ctxWith(w.exec))).toEqual({ ok: true });
+    expect(w.count("gh")).toBe(2);
+    expect(w.count("git push")).toBe(0);
   });
 
   it("deletes a branch a killed run left behind before it pushes, so the push starts CI", () => {

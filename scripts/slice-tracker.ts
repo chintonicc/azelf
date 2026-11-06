@@ -73,6 +73,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { NET_RETRY_SECONDS, isNetworkError } from "./slice-net";
 
 export type TicketId = string;
 
@@ -526,6 +527,8 @@ export type GhRunner = (args: string[]) => {
 export type GithubOptions = {
   /** Scripted in tests; the real binary otherwise. */
   gh?: GhRunner;
+  /** How a retry waits (see `patient`). Scripted in tests; a blocking sleep otherwise. */
+  sleep?: (ms: number) => void;
   /**
    * Where `gh` runs — it resolves `{owner}/{repo}` from the git remote there.
    * Any checkout of the repo will do, the slice worktrees included; defaults
@@ -533,6 +536,72 @@ export type GithubOptions = {
    */
   cwd?: string;
 };
+
+/**
+ * The tracker could not be reached: the network, not the ticket. Named so a
+ * caller can wait it out where any other failure is a bug, which it asks through
+ * `isTrackerUnavailable`, and a tracker of your own may throw it too. Its message
+ * has the shape every adapter failure has, a header and `gh`'s own output below.
+ */
+export class TrackerUnavailable extends Error {
+  override name = "TrackerUnavailable";
+}
+
+/**
+ * By name rather than `instanceof`: the config imports the adapter through the
+ * package, the dispatcher imports this file directly, and those can be two
+ * copies of the module.
+ */
+export const isTrackerUnavailable = (e: unknown): boolean =>
+  e instanceof Error && e.name === "TrackerUnavailable";
+
+const syncSleep = (ms: number): void => {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+};
+
+/** How long a run of failed retries leaves later calls at one attempt each. */
+const BREAKER_MS = 60_000;
+
+/**
+ * A runner that tries again when the failure is the network, and only then.
+ *
+ * In the transport, so every call has it. Reposting is safe: `addBlocker` reads
+ * "already been taken" as success, `close` is idempotent, and a close comment
+ * doubled after a lost response is an accepted cost.
+ *
+ * A breaker, because a run reads every ticket every round: with the network gone
+ * for good, thirty seconds per ticket would hold up the round for as long as
+ * the plan is wide. After one call has used up its retries, the rest get one
+ * attempt each for a minute. The first success closes it.
+ */
+export function patient(
+  gh: GhRunner,
+  opts: { sleep?: (ms: number) => void; now?: () => number } = {},
+): GhRunner {
+  const sleep = opts.sleep ?? syncSleep;
+  const now = opts.now ?? Date.now;
+  let openUntil = 0;
+  const failedOnNetwork = (r: ReturnType<GhRunner>) =>
+    !r.ok && isNetworkError(`${r.stderr}\n${r.stdout}`);
+  return (args) => {
+    let r = gh(args);
+    if (!failedOnNetwork(r)) {
+      if (r.ok) openUntil = 0;
+      return r;
+    }
+    if (now() < openUntil) return r;
+    for (const seconds of NET_RETRY_SECONDS) {
+      sleep(seconds * 1000);
+      r = gh(args);
+      if (!failedOnNetwork(r)) {
+        if (r.ok) openUntil = 0;
+        return r;
+      }
+    }
+    openUntil = now() + BREAKER_MS;
+    return r;
+  };
+}
 
 function realGh(cwd?: string): GhRunner {
   return (args) => {
@@ -578,15 +647,20 @@ const READY_QUERY = `query($owner: String!, $repo: String!, $label: String!, $en
  * schedule, and "0 blockers" from a failed call would be the wrong reading.
  */
 export function github(opts: GithubOptions = {}): Tracker {
-  const gh = opts.gh ?? realGh(opts.cwd);
+  const gh = patient(opts.gh ?? realGh(opts.cwd), { sleep: opts.sleep });
+
+  /** Every failure of `gh`, as what it was: `header`, and what `gh` said below. */
+  const failure = (header: string, r: ReturnType<GhRunner>): Error => {
+    const said = (r.stderr || r.stdout).trim();
+    const message = `${header}\n${said}`;
+    return isNetworkError(said)
+      ? new TrackerUnavailable(message)
+      : new Error(message);
+  };
 
   const call = <T>(args: string[]): T => {
     const r = gh(args);
-    if (!r.ok) {
-      throw new Error(
-        `gh ${args.join(" ")} failed:\n${(r.stderr || r.stdout).trim()}`,
-      );
-    }
+    if (!r.ok) throw failure(`gh ${args.join(" ")} failed:`, r);
     try {
       return JSON.parse(r.stdout) as T;
     } catch {
@@ -653,10 +727,9 @@ export function github(opts: GithubOptions = {}): Tracker {
       ];
       const r = gh(args);
       if (!r.ok) {
-        throw new Error(
-          `gh api graphql (open issues labelled ${label}) failed:\n${(
-            r.stderr || r.stdout
-          ).trim()}`,
+        throw failure(
+          `gh api graphql (open issues labelled ${label}) failed:`,
+          r,
         );
       }
       // --paginate with --jq prints one number per line, across all pages.
@@ -825,21 +898,18 @@ export function github(opts: GithubOptions = {}): Tracker {
       // GitHub reports it as a 422 rather than a no-op; the contract above
       // says that is success, so that two runs of --sync-edges do not differ.
       if (/already been taken/i.test(r.stderr || r.stdout)) return;
-      throw new Error(
+      throw failure(
         `could not record #${id} as blocked by ${
           other ? blockerId : `#${blockerId}`
-        }:\n${(r.stderr || r.stdout).trim()}`,
+        }:`,
+        r,
       );
     },
 
     close(id, comment) {
       // `gh issue close` prints a confirmation, not JSON — so not `call`.
       const r = gh(["issue", "close", id, "--comment", comment]);
-      if (!r.ok) {
-        throw new Error(
-          `gh issue close ${id} failed:\n${(r.stderr || r.stdout).trim()}`,
-        );
-      }
+      if (!r.ok) throw failure(`gh issue close ${id} failed:`, r);
     },
   };
 }

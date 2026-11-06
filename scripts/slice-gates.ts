@@ -45,6 +45,7 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { NET_RETRY_SECONDS, isNetworkError } from "./slice-net";
 import { ignores } from "./slice-overlap";
 
 // ─── the seam ─────────────────────────────────────────────────────────────
@@ -502,7 +503,29 @@ export function ciRuns(opts: CiRunsOptions): Gate {
           : { kind: "green" };
       };
 
-      const first = look();
+      /**
+       * `attempt` again while what `failed` reads from its answer is the
+       * network. On consumer-b's Backend #190 one `Can't assign requested
+       * address` read as "the push was refused", and parked a green slice.
+       */
+      const patiently = <T>(
+        attempt: () => T,
+        failed: (r: T) => string | null,
+      ): T => {
+        let r = attempt();
+        for (const seconds of NET_RETRY_SECONDS) {
+          const said = failed(r);
+          if (said === null || !isNetworkError(said)) break;
+          ctx.log?.(`CI: could not reach GitHub — trying again in ${seconds}s`);
+          ctx.exec(["sleep", String(seconds)], ctx.worktree);
+          r = attempt();
+        }
+        return r;
+      };
+
+      const first = patiently(look, (r) =>
+        "error" in r ? r.error.join("\n") : null,
+      );
       if ("error" in first) {
         return red(`gh could not list the runs on ${short}`, first.error);
       }
@@ -516,10 +539,15 @@ export function ciRuns(opts: CiRunsOptions): Gate {
       const ciBranch = ciRef.slice("refs/heads/".length);
       const remove = () => git("push", "-q", "origin", `:${ciRef}`);
       remove();
-      const pushed = git("push", "-q", "origin", `HEAD:${ciRef}`);
+      const pushed = patiently(
+        () => git("push", "-q", "origin", `HEAD:${ciRef}`),
+        (r) => (r.ok ? null : r.out),
+      );
       if (!pushed.ok) {
         return red(
-          `the push of ${short} to ${ciBranch} was refused`,
+          isNetworkError(pushed.out)
+            ? `could not reach origin to push ${short} to ${ciBranch}`
+            : `the push of ${short} to ${ciBranch} was refused`,
           tail(pushed.out),
         );
       }

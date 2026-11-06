@@ -762,6 +762,100 @@ git push -q origin main
 });
 
 /**
+ * A push that fails on the network is tried again before anything is undone. A
+ * `git` first on PATH fails the first `push` it sees (or every one), as a real
+ * one does when the network is gone, and passes everything else through.
+ */
+describe("slice-land.sh and a network that comes and goes", () => {
+  let c: Consumer;
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  /** The command line for a land under a `git` that fails `failures` pushes. */
+  const landWithFlakyGit = (failures: number) => {
+    const bin = join(c.root, "bin");
+    mkdirSync(bin);
+    const real = spawnSync("which", ["git"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    writeFileSync(
+      join(bin, "git"),
+      `#!/usr/bin/env bash
+if [[ "$1" == "push" ]]; then
+  n=$(cat ${JSON.stringify(join(c.root, "pushes"))} 2>/dev/null || echo 0)
+  echo $((n + 1)) > ${JSON.stringify(join(c.root, "pushes"))}
+  if [[ $n -lt ${failures} ]]; then
+    echo "fatal: unable to access 'x': Failed to connect to github.com port 443: Can't assign requested address" >&2
+    exit 128
+  fi
+fi
+exec ${JSON.stringify(real)} "$@"
+`,
+      { mode: 0o755 },
+    );
+    return spawnSync("./scripts/slice-land.sh", ["40"], {
+      cwd: c.main,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        SLICE_NET_RETRY_SECONDS: "0 0",
+      },
+    });
+  };
+
+  const sliced = () => {
+    c = makeConsumer({ worktrees: [40], remote: true });
+    writeFileSync(join(c.wt(40), "a.txt"), "a\n");
+    git(c.wt(40), "add", "a.txt");
+    git(c.wt(40), "commit", "-qm", "feat: a");
+  };
+
+  it("lands when a later try reaches origin, with nothing undone", () => {
+    sliced();
+    const r = landWithFlakyGit(2);
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect(r.status, out).toBe(0);
+    expect(out).toContain("couldn't reach origin — trying again in 0s");
+    expect(out).toContain("✓ pushed");
+    expect(out).not.toContain("undoing the fast-forward");
+    expect(readFileSync(join(c.root, "pushes"), "utf8").trim()).toBe("3");
+    expect(git(c.main, "rev-parse", "main")).toBe(
+      git(c.main, "rev-parse", "origin/main"),
+    );
+  });
+
+  it("says origin could not be reached when the tries run out, and undoes the fast-forward", () => {
+    sliced();
+    const before = git(c.main, "rev-parse", "main");
+    const r = landWithFlakyGit(99);
+    const out = `${r.stdout}${r.stderr}`;
+
+    expect(r.status, out).toBe(1);
+    expect(out).toContain("✗ couldn't reach origin to push");
+    expect(out).toContain("origin could not be reached");
+    expect(out).not.toContain("refused");
+    expect(readFileSync(join(c.root, "pushes"), "utf8").trim()).toBe("3");
+    expect(git(c.main, "rev-parse", "main")).toBe(before);
+    expect(existsSync(c.wt(40))).toBe(true);
+    expect(existsSync(c.closeFile)).toBe(false);
+  });
+
+  it("does not retry a push origin refused", () => {
+    sliced();
+    writeFileSync(
+      join(c.main, ".git", "hooks", "pre-push"),
+      "#!/usr/bin/env bash\necho 'not today' >&2\nexit 1\n",
+      { mode: 0o755 },
+    );
+    const r = shResult(c.main, "./scripts/slice-land.sh 40");
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("✗ origin refused the push");
+    expect(r.out).not.toContain("trying again");
+  });
+});
+
+/**
  * What slice-done.sh counts. A slice cut from origin, in a checkout whose
  * local base is behind it, has origin's commits in `base..HEAD`; on
  * consumer-b that read as seven commits to land for one commit of work.

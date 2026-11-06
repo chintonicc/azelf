@@ -216,6 +216,29 @@ elif [[ -f "$worktree_path/.slice-live" ]]; then
   session_declared_done=false
 fi
 
+# A git command that talks to origin, tried again when it fails on the network:
+# on consumer-b a `Can't assign requested address` read as origin refusing the
+# push, undid the fast-forward and parked a slice that was fine. The list of what
+# counts is slice-net.ts's, asked only after a failure. git's output is left in
+# net_out, and the status is the last try's. The delays are a variable so a test
+# can stop the clock, as the dispatcher's are.
+net_out=""
+is_network_error() {
+  printf '%s' "$1" | bun "$SLICE_AZELF_DIR/scripts/slice-net.ts"
+}
+net_retry() {
+  local status=0 delay
+  net_out=$("$@" 2>&1) || status=$?
+  for delay in ${SLICE_NET_RETRY_SECONDS:-5 15}; do
+    [[ $status -ne 0 ]] && is_network_error "$net_out" || break
+    echo "  couldn't reach origin — trying again in ${delay}s" >&2
+    sleep "$delay"
+    status=0
+    net_out=$("$@" 2>&1) || status=$?
+  done
+  return "$status"
+}
+
 # The local base brought level with origin's. Fetched; fast-forwarded onto
 # `origin/<base>` when it is strictly behind; left alone when it is level or
 # ahead (slices are cut from a local base that is ahead, and this land pushes
@@ -228,10 +251,10 @@ fi
 # pull by hand — slice-run.ts does the same at the start of every round, and
 # this covers a hand land and the window between the round's sync and the push.
 sync_base_with_origin() {
-  local fetch_err remote behind
-  fetch_err=$(git fetch origin "$SLICE_BASE_BRANCH" 2>&1) || {
+  local remote behind
+  net_retry git fetch origin "$SLICE_BASE_BRANCH" || {
     echo "error: couldn't fetch origin/$SLICE_BASE_BRANCH:" >&2
-    echo "$fetch_err" >&2
+    echo "$net_out" >&2
     exit 1
   }
   remote="refs/remotes/origin/$SLICE_BASE_BRANCH"
@@ -323,9 +346,19 @@ else
   # hand merge from another checkout — is the ordinary case, and the one a
   # rebase fixes: the base is brought onto origin's new head and this exits
   # 75. Anything else (a hook, credentials) is 1; a rebase would change nothing.
-  if ! push_out=$(git push origin "$SLICE_BASE_BRANCH" 2>&1); then
+  # A network failure has had its retries by then, and is 1 too, saying so.
+  push_status=0
+  net_retry git push origin "$SLICE_BASE_BRANCH" || push_status=$?
+  push_out=$net_out
+  if [[ $push_status -ne 0 ]]; then
+    push_unreachable=false
+    if is_network_error "$push_out"; then push_unreachable=true; fi
     [[ -n "$push_out" ]] && echo "$push_out" >&2
-    echo "✗ origin refused the push — undoing the fast-forward: $SLICE_BASE_BRANCH back to $(git rev-parse --short "$base_before")" >&2
+    if $push_unreachable; then
+      echo "✗ couldn't reach origin to push — undoing the fast-forward: $SLICE_BASE_BRANCH back to $(git rev-parse --short "$base_before")" >&2
+    else
+      echo "✗ origin refused the push — undoing the fast-forward: $SLICE_BASE_BRANCH back to $(git rev-parse --short "$base_before")" >&2
+    fi
     if ! git reset -q --keep "$base_before"; then
       echo "error: couldn't move $SLICE_BASE_BRANCH back — it is still on $branch, and nothing was pushed." >&2
       echo "       Move it by hand from the main checkout: git reset --keep $base_before" >&2
@@ -337,6 +370,10 @@ else
       echo "error: origin/$SLICE_BASE_BRANCH moved while $ticket_ref was landing — $SLICE_BASE_BRANCH is now at its head, $(git rev-parse --short HEAD)." >&2
       echo "       rebase $branch onto $SLICE_BASE_BRANCH from its worktree, then retry." >&2
       exit 75
+    fi
+    if $push_unreachable; then
+      echo "error: origin could not be reached, and a retry of this land will try again — see git's message above. Nothing landed." >&2
+      exit 1
     fi
     echo "error: the push was refused for a reason a rebase would not change — see git's message above. Nothing landed." >&2
     exit 1
