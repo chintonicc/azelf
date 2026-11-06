@@ -1,6 +1,6 @@
 # A ticket's comments are part of it, a red gate keeps its output, one land at a time across runs, and an adopted session can see the run's mode
 
-**Status:** built 2026-11-06 on branch `comments-gate-log-next-land`, not on `main` yet · Phase 1 dca95f3, Phase 2 61702bc, Phase 3 ef4be5a, Phase 4 cb9a300 · see "Unobserved"
+**Status:** complete · landed 2026-11-06 · Phase 1 dca95f3, Phase 2 61702bc, Phase 3 ef4be5a, Phase 4 cb9a300 · see "Unobserved"
 **Written:** 2026-11-06
 **Companion:** the consumer-b friction entries of 2026-11-06 that came after
 `relaunch-and-blips-plan.md` was written: Backend #196, twice (binding assumptions only in an
