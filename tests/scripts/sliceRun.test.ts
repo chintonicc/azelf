@@ -3947,6 +3947,109 @@ describe("a red gate's whole output", () => {
   }, 60_000);
 });
 
+describe("--gates --keep-going", () => {
+  const FIRST =
+    'echo FIRST-RED; for i in $(seq 40); do echo "row $i"; done; exit 1';
+  const SECOND = "echo SECOND-RED; exit 1";
+  /** A consumer whose two gates are both red, the first with a long output. */
+  const twoRed = (first = FIRST) => {
+    const fx = makeConsumer({ worktrees: [40], gate: ["true"] });
+    c = fx;
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    const config = join(fx.main, "slice.config.ts");
+    const gate = (script: string) =>
+      `exitCode(["bash", "-c", ${JSON.stringify(script)}])`;
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[.*\],/,
+        `gates: [${gate(first)}, ${gate(SECOND)}],`,
+      ),
+    );
+    return fx;
+  };
+  const logOf = (fx: Consumer) =>
+    join(fx.wt(40), ".slice-reviews", "last-gate.log");
+
+  it("stops at the first red gate without it", () => {
+    const fx = twoRed();
+    const r = runDispatcher(fx, ["--gates", "40"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).not.toContain("SECOND-RED");
+    expect(readFileSync(logOf(fx), "utf8")).not.toContain("SECOND-RED");
+  }, 60_000);
+
+  it("reports every red gate, and the tree stays clean", () => {
+    const fx = twoRed();
+    const r = runDispatcher(fx, ["--gates", "--keep-going", "40"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("SECOND-RED");
+    expect(r.out).toMatch(/✗ `bash -c echo FIRST-RED.*` failed/);
+    expect(r.out).toContain("✗ `bash -c echo SECOND-RED; exit 1` failed");
+    expect(r.out).toContain("✗ #40 not landed — 2 gates are red");
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  }, 60_000);
+
+  it("keeps each red gate's output under its name", () => {
+    const fx = twoRed();
+    const r = runDispatcher(fx, ["--gates", "--keep-going", "40"]);
+
+    expect(r.out).toContain(`whole output: ${logOf(fx)}`);
+    const log = readFileSync(logOf(fx), "utf8");
+    expect(log).toMatch(/`bash -c echo FIRST-RED.*`\n/);
+    expect(log).toContain("FIRST-RED\n");
+    expect(log).toContain("`bash -c echo SECOND-RED; exit 1`\n");
+    expect(log).toContain("SECOND-RED\n");
+  }, 60_000);
+
+  it("writes no file when every red gate was shown whole", () => {
+    const fx = twoRed("echo SHORT-RED; exit 1");
+    const r = runDispatcher(fx, ["--gates", "--keep-going", "40"]);
+
+    expect(r.code).toBe(1);
+    expect(r.out).toContain("SHORT-RED");
+    expect(r.out).toContain("SECOND-RED");
+    expect(r.out).not.toContain("whole output");
+    expect(existsSync(logOf(fx))).toBe(false);
+  }, 60_000);
+
+  it("is what `azelf gates` passes on, and a flag it does not know is still refused", () => {
+    const fx = twoRed();
+    const verb = (...args: string[]) =>
+      spawnSync("bun", [join(AZELF, "bin", "azelf.ts"), "gates", ...args], {
+        cwd: fx.main,
+        encoding: "utf8",
+        env: { ...process.env, SLICE_REPO_ROOT: fx.main },
+      });
+
+    const r = verb("40", "--keep-going");
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("2 gates are red");
+
+    expect(verb("--keep-going", "40").stdout).toContain("2 gates are red");
+    expect(verb("40", "--bogus").stdout).not.toContain("gate(s) for #40");
+    expect(verb("40", "41").stdout).not.toContain("gate(s) for #40");
+  }, 60_000);
+
+  it("is what the skill's slice-gates.sh passes on, from inside the worktree", () => {
+    const fx = twoRed();
+    const r = spawnSync(
+      "bash",
+      [join(AZELF, "scripts", "slice-gates.sh"), "--keep-going"],
+      {
+        cwd: fx.wt(40),
+        encoding: "utf8",
+        env: { ...process.env, SLICE_REPO_ROOT: fx.main },
+      },
+    );
+
+    expect(r.status).toBe(1);
+    expect(r.stdout).toContain("2 gates are red");
+  }, 60_000);
+});
+
 /**
  * One slice at a time goes from rebase to land, across runs. Under the old rule
  * each land threw away another run's rebase, gates and review.

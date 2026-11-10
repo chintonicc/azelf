@@ -78,6 +78,8 @@ export type GateContext = {
    * reports that command's output in `detail` instead.
    */
   log?: (line: string) => void;
+  /** Go on after a red gate and report them all. See `runGates`. */
+  keepGoing?: boolean;
 };
 
 export type GateResult =
@@ -639,19 +641,26 @@ const dirtyPaths = (ctx: GateContext): string[] | null => {
     .filter(Boolean);
 };
 
-const unreadable = (worktree: string): GateResult => ({
-  ok: false,
-  why: `could not read the worktree's git status at ${worktree} — refusing to judge what cannot be seen`,
-});
+const unreadable = (worktree: string) =>
+  `could not read the worktree's git status at ${worktree} — refusing to judge what cannot be seen`;
 
 /** A gate that failed and then passed: `retry` is the run that passed, 1-based. */
 export type Flaky = { gate: string; retry: number };
 
+type Red = Extract<GateResult, { ok: false }>;
+
+/** One red gate of a run; `gate` is "worktree" when no gate could be asked. */
+export type GateFailure = Omit<Red, "ok"> & { gate: string };
+
 /**
  * What `runGates` answers: the verdict, which gates passed only on a retry,
- * and which were skipped because the diff touches none of their paths.
+ * and which were skipped because the diff touches none of their paths. A red
+ * run is its first failure, with `failures` holding every one.
  */
-export type GatesResult = GateResult & { flaky: Flaky[]; skipped: string[] };
+export type GatesResult = { flaky: Flaky[]; skipped: string[] } & (
+  | { ok: true }
+  | (Red & { failures: GateFailure[] })
+);
 
 /**
  * Whether `gate` judges a diff that changed `changedFiles`: always without
@@ -682,20 +691,40 @@ export function gateApplies(gate: Gate, changedFiles: string[]): boolean {
  *
  * A gate whose `when` matches none of `ctx.changedFiles` is not run, and is
  * named in `skipped`. Skipped is not passed: the caller says which is which.
+ *
+ * With `ctx.keepGoing` a red gate does not end the run. It is for a session
+ * about to say it is stuck, where a person has to decide on what was red:
+ * on consumer-b's Backend #197 the first gate was red and that run said nothing
+ * about the suite. Not the default, because a session fixing a lint finding
+ * would pay for the whole suite every time, and not at a land, where a red slice
+ * does not land whatever the rest say. A gate that wrote still ends it: what
+ * follows would be judging a tree that gate changed.
  */
 export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
   const flaky: Flaky[] = [];
   const skipped: string[] = [];
+  const failures: GateFailure[] = [];
+  const verdict = (): GatesResult => {
+    const [first] = failures;
+    if (!first) return { ok: true, flaky, skipped };
+    const { why, detail, output } = first;
+    return { ok: false, why, detail, output, flaky, skipped, failures };
+  };
+  const stop = (failure: GateFailure): GatesResult => {
+    failures.push(failure);
+    return verdict();
+  };
+
   const before = dirtyPaths(ctx);
-  if (before === null) return { ...unreadable(ctx.worktree), flaky, skipped };
+  if (before === null) {
+    return stop({ gate: "worktree", why: unreadable(ctx.worktree) });
+  }
   if (before.length) {
-    return {
-      ok: false,
+    return stop({
+      gate: "worktree",
       why: "worktree is dirty before any gate ran — commit or revert first",
       detail: before,
-      flaky,
-      skipped,
-    };
+    });
   }
   for (const gate of gates) {
     if (!gateApplies(gate, ctx.changedFiles)) {
@@ -707,34 +736,35 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
       const result = gate.run(ctx);
       const after = dirtyPaths(ctx);
       if (after === null) {
-        return { ...unreadable(ctx.worktree), flaky, skipped };
+        return stop({ gate: gate.name, why: unreadable(ctx.worktree) });
       }
       if (after.length) {
-        return {
-          ok: false,
+        return stop({
+          gate: gate.name,
           why: `gate \`${gate.name}\` modified the worktree — gates must be read-only (scripts/slice-gates.ts). Revert it, then fix the gate.`,
           detail: after,
-          flaky,
-          skipped,
-        };
+        });
       }
       if (result.ok) {
         if (attempt > 0) flaky.push({ gate: gate.name, retry: attempt });
         break;
       }
       if (attempt >= retries) {
-        return {
-          ...result,
+        const failure: GateFailure = {
+          gate: gate.name,
           why: attempt
             ? `${result.why}, and again on ${attempt} retr${
                 attempt === 1 ? "y" : "ies"
               }`
             : result.why,
-          flaky,
-          skipped,
+          detail: result.detail,
+          output: result.output,
         };
+        if (!ctx.keepGoing) return stop(failure);
+        failures.push(failure);
+        break;
       }
     }
   }
-  return { ok: true, flaky, skipped };
+  return verdict();
 }

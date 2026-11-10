@@ -97,7 +97,13 @@ import {
 // The gates themselves are in slice.config.ts too, as three shapes from
 // slice-gates.ts; this file only runs them. See that file for the read-only
 // contract every gate is held to.
-import { type Flaky, type Gate, gateApplies, runGates } from "./slice-gates";
+import {
+  type Flaky,
+  type Gate,
+  type GateFailure,
+  gateApplies,
+  runGates,
+} from "./slice-gates";
 // Worktrees held for work by hand, which nothing here lands, relaunches or
 // rebases; see noteHolds.
 import {
@@ -3320,8 +3326,9 @@ type GateRun = { ran: string[]; skipped: Gate[] };
  * How `--gates` differs from a land's gate run: no land follows, so a gate
  * that judges the pushed commit (`landOnly`) is skipped; and a session
  * checking itself (`azelf gates`, `--no-lock`) does not wait for the gate lock.
+ * `--keep-going` goes on after a red gate; see `runGates`.
  */
-type GatesByHand = { byHand?: boolean; lock?: boolean };
+type GatesByHand = { byHand?: boolean; lock?: boolean; keepGoing?: boolean };
 /** Set by `gatesPass` when it passes; read by the reviews through `alreadyRan`. */
 const gateRuns = new Map<TicketId, GateRun>();
 /** The failing gate's output, from the last `gatesPass` that failed on a gate. */
@@ -3442,6 +3449,7 @@ function gatesPass(
       changedFiles: changed,
       exec: (cmd, cwd) => run(cmd, { cwd, allowFail: true }),
       log: (line) => console.log(`    ${line}`),
+      keepGoing: opts.keepGoing,
     });
   } finally {
     if (lock) release(gatesLock(), process.pid);
@@ -3462,7 +3470,7 @@ function gatesPass(
 
   const DETAIL_LINES = 10;
   const detail = result.detail ?? [];
-  const whole = keepGateOutput(wt, result.output, detail);
+  const whole = keepGateOutput(wt, result.failures);
   gateFailures.set(
     n,
     [
@@ -3471,19 +3479,26 @@ function gatesPass(
       ...(whole ? [`The whole output is in ${whole}.`] : []),
     ].join("\n"),
   );
-  if (detail.length) {
-    console.log(
-      detail
-        .slice(0, DETAIL_LINES)
-        .map((l) => `      ${l}`)
-        .join("\n"),
-    );
-    if (detail.length > DETAIL_LINES) {
-      console.log(`      … ${detail.length - DETAIL_LINES} more`);
+  // One red gate is named by the line `fail` prints. After `--keep-going`
+  // each gets its own, with its lines under it.
+  const several = result.failures.length > 1;
+  for (const f of result.failures) {
+    if (several) console.log(`  ✗ ${f.why}`);
+    const lines = f.detail ?? [];
+    if (lines.length) {
+      console.log(
+        lines
+          .slice(0, DETAIL_LINES)
+          .map((l) => `      ${l}`)
+          .join("\n"),
+      );
+      if (lines.length > DETAIL_LINES) {
+        console.log(`      … ${lines.length - DETAIL_LINES} more`);
+      }
     }
   }
   if (whole) console.log(`      whole output: ${whole}`);
-  return fail(result.why);
+  return fail(several ? `${result.failures.length} gates are red` : result.why);
 }
 
 /**
@@ -3504,20 +3519,30 @@ function ignoredIn(wt: string, path: string): boolean {
  * path, or null. On consumer-b's Frontend #148 the runner printed the red part
  * first and a table of about 130 lines after it, so the tail held no name, and
  * finding out which part was red took a second full run: eight minutes at load 35.
+ * After `--keep-going` each red gate's output is there under its name.
  */
-function keepGateOutput(
-  wt: string,
-  output: string | undefined,
-  shown: string[],
-): string | null {
-  if (!output) return null;
-  const lines = output.split("\n").filter((l) => l.trim()).length;
-  if (lines <= shown.length) return null;
+function keepGateOutput(wt: string, red: GateFailure[]): string | null {
+  const cut = red.some(
+    (f) =>
+      f.output &&
+      f.output.split("\n").filter((l) => l.trim()).length >
+        (f.detail ?? []).length,
+  );
+  if (!cut) return null;
   const dir = ".slice-reviews";
   if (!ignoredIn(wt, `${dir}/last-gate.log`)) return null;
   mkdirSync(join(wt, dir), { recursive: true });
   const path = join(wt, dir, "last-gate.log");
-  writeFileSync(path, output.endsWith("\n") ? output : `${output}\n`);
+  const text =
+    red.length === 1
+      ? red[0]?.output ?? ""
+      : red
+          .map(
+            (f) =>
+              `── \`${f.gate}\`\n${f.output ?? (f.detail ?? []).join("\n")}`,
+          )
+          .join("\n\n");
+  writeFileSync(path, text.endsWith("\n") ? text : `${text}\n`);
   return path;
 }
 
@@ -6588,6 +6613,7 @@ if (flag("--gates")) {
       gatesPass(n, worktreeChanges(n), {
         byHand: true,
         lock: !flag("--no-lock"),
+        keepGoing: flag("--keep-going"),
       })
     ) {
       console.log(`  ✓ ${ref(n)} passes every gate`);

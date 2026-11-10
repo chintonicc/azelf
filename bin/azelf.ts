@@ -8,7 +8,7 @@
  *   azelf hold <id> [--by <who>] [--why <text>]   hold a worktree for work by hand
  *   azelf release <id>    give the hold back
  *   azelf provision <id>  re-provision a worktree, launching nothing
- *   azelf gates [<id>]    run the landing gates on a worktree, land nothing
+ *   azelf gates [<id>] [--keep-going]   run the landing gates on a worktree, land nothing
  *   azelf push-main       push the base branch from the main checkout, under the land lock
  *   azelf hook            print the shell block, for pasting by hand
  *
@@ -64,10 +64,11 @@ const usage = (asked = false): never => {
       "  azelf provision <ticket>",
       "        copy what a worktree is missing, install, rewrite the ticket brief;",
       "        launches nothing (for a worktree re-added by hand)",
-      "  azelf gates [<ticket>]",
+      "  azelf gates [<ticket>] [--keep-going]",
       "        run the landing gates on a slice's worktree as it sits, and exit",
       "        with their verdict; from inside a worktree the ticket is its own.",
-      "        No land, no rebase; a gate that waits for CI runs at the land",
+      "        No land, no rebase; a gate that waits for CI runs at the land.",
+      "        --keep-going goes on after a red gate and reports every one",
       "  azelf push-main",
       "        push the base branch from the main checkout, under the land lock,",
       "        once it is a fast-forward of origin's: for merges made by hand",
@@ -120,14 +121,17 @@ if (verb === "init") {
     usage();
   }
   if (verb === "hold" && !holdFlags(rest)) usage();
-  // At most one ticket, and no flags: the verb is the whole instruction. The
-  // session's own check does not wait for the gate lock; see gatesPass.
-  if (verb === "gates" && (rest.length > 0 || id?.startsWith("-"))) usage();
+  // At most one ticket, and --keep-going the only flag. The session's own
+  // check does not wait for the gate lock; see gatesPass.
+  const gateIds = argv.slice(1).filter((a) => a !== "--keep-going");
+  if (verb === "gates" && (gateIds.length > 1 || gateIds[0]?.startsWith("-"))) {
+    usage();
+  }
   const args =
     verb === "run"
       ? argv.slice(1)
       : verb === "gates"
-        ? ["--gates", "--no-lock", ...(id ? [id] : [])]
+        ? ["--gates", "--no-lock", ...argv.slice(1)]
         : [`--${verb}`, id as string, ...rest];
   const proc = spawnSync(
     "bun",

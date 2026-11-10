@@ -7,6 +7,7 @@
 #
 #   ./scripts/slice-gates.sh          # the slice this worktree is on
 #   ./scripts/slice-gates.sh 42       # a slice by ticket, from any checkout
+#   ./scripts/slice-gates.sh --keep-going   # every red gate, not only the first
 #
 # The verdict is the exit code. No land, no rebase, no tracker call; a gate
 # that judges the pushed commit (`ciRuns`) is skipped and said to run at the

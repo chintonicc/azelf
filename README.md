@@ -260,6 +260,7 @@ Installs into the repo you are standing in.
 | `--once` | one round only: land what is ready, then stop |
 | `--gates [ids…]` | run only the landing gates against existing worktrees, and exit; without ids, the worktree you are in |
 | `--no-lock` | with `--gates`: do not wait for the gate lock (what `azelf gates` passes) |
+| `--keep-going` | with `--gates`: go on after a red gate and report every one; a land always stops at the first |
 | `--sync-edges [-y]` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
 | `--ignore-body-blockers` | dispatch although a body names an open blocker the tracker has no edge for |
 | `--max <n>` | cap concurrent slices (default: the widest wave in the plan) |
@@ -450,7 +451,7 @@ writes no `.slice-flags`. It works under a hold, and refuses while a session is
 running in the worktree, or when there is neither a worktree nor a branch (`azelf run
 <ticket>` starts it).
 
-### `azelf gates [<ticket>]`
+### `azelf gates [<ticket>] [--keep-going]`
 
 Runs the landing gates on a slice's worktree as it sits, and exits with their
 verdict: 0 when every gate that applies passes, 1 otherwise. From inside a worktree
@@ -465,6 +466,12 @@ gate the diff does not reach is skipped as at a land. It does not wait for the
 [gate lock](#two-dispatchers-on-one-repo): a session's own check would otherwise sit
 behind a land's gates, CI included, for nothing it needs. `azelf run --gates <ids…>`
 is the by-hand form from the main checkout, and that one does wait.
+
+It stops at the first red gate, as a land does. `--keep-going` goes on and reports
+every one, which is what a session runs once before it says it is stuck, so that
+whoever decides sees all of what is red. `.slice-reviews/last-gate.log` then holds
+each red gate's output under its name. A gate that writes to the tree still ends the
+run.
 
 ### `azelf push-main`
 
@@ -505,6 +512,7 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/slice-finished.sh --stuck -m "<what is in the way>"  # the same, for red gates or a held lock
 ./scripts/slice-done.sh --hand-over "<what to do>"         # not done: hold it for a person, with the reason
 ./scripts/slice-gates.sh                                   # the landing gates on this worktree, as the land will run them
+./scripts/slice-gates.sh --keep-going                      # the same, past the first red gate: once before --stuck
 ./scripts/format.sh                                        # the write half, by hand
 ./scripts/format.sh --check path/to/file                   # the same, writing nothing
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths

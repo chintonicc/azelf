@@ -163,8 +163,11 @@ on in this tab, or finish the work by hand.
 
 ## If the gates will not go green
 
-Leave the worktree exactly as it is. Do **not** run `slice-done.sh`. Say what is
-failing where the dispatcher can see it, and exit:
+Leave the worktree exactly as it is. Do **not** run `slice-done.sh`. Run
+`./scripts/slice-gates.sh --keep-going` once: it goes on past the first red gate, so
+whoever picks this up sees all of them. It needs a clean tree like any gate run; if
+yours is not, say that instead. Then say what is failing where the dispatcher can see
+it, naming every red gate, and exit:
 
 ```sh
 ./scripts/slice-finished.sh --stuck -m "<what fails, and where your work is>"

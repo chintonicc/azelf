@@ -26,6 +26,7 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --gates 12       run the landing gates on slice 12, land nothing
   azelf run --gates          the same for the slice whose worktree you are in
   azelf run --gates --no-lock    without waiting for the gate lock (azelf gates)
+  azelf run --gates --keep-going   go on after a red gate and report every one
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
   azelf run --relaunch 12    send slice 12 back to a session, with the review's
                              finding (azelf relaunch)
@@ -70,6 +71,7 @@ const FLAGS = new Set([
   "--no-auto-resolve",
   "--gates",
   "--no-lock",
+  "--keep-going",
   "--sync-edges",
   "--ignore-body-blockers",
 ]);

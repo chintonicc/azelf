@@ -335,6 +335,106 @@ describe("runGates", () => {
 });
 
 /**
+ * `keepGoing`: what a session runs before it says it is stuck. On consumer-b's
+ * Backend #197 the first gate was red, so that run said nothing about the suite,
+ * and whoever decides a `--stuck` should not have to run it to find out.
+ */
+describe("runGates with keepGoing", () => {
+  const clean = { ok: true, out: "" };
+  const going = (exec: Exec): GateContext => ({
+    ...ctxWith(exec),
+    keepGoing: true,
+  });
+  const three = [exitCode(["one"]), exitCode(["two"]), exitCode(["three"])];
+  const ran = (calls: Call[]) =>
+    calls.map((c) => c.cmd[0]).filter((w) => w !== "git");
+
+  it("goes on after a red gate and names every red one", () => {
+    const { exec, calls } = fakeExec({
+      git: clean,
+      one: { ok: false, out: "bad one" },
+      three: { ok: false, out: "bad three" },
+    });
+    const r = runGates(three, going(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(ran(calls)).toEqual(["one", "two", "three"]);
+    expect(r.failures.map((f) => f.gate)).toEqual(["one", "three"]);
+    expect(r.failures[1]?.detail).toEqual(["bad three"]);
+  });
+
+  it("keeps the first red gate as the run's result", () => {
+    const { exec } = fakeExec({
+      git: clean,
+      one: { ok: false, out: "bad one" },
+      two: { ok: false, out: "bad two" },
+    });
+    const r = runGates(three, going(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toBe("`one` failed");
+    expect(r.detail).toEqual(["bad one"]);
+    expect(r.output).toBe("bad one");
+  });
+
+  it("still passes when nothing is red, and has no failures to report", () => {
+    const { exec } = fakeExec({ git: clean });
+    expect(runGates(three, going(exec))).toEqual({
+      ok: true,
+      flaky: [],
+      skipped: [],
+    });
+  });
+
+  it("stops at once for a gate that wrote to the tree, and keeps what was red before it", () => {
+    const dirty = { ok: true, out: " M lib/a.ts" };
+    const seen: string[] = [];
+    let statusCalls = 0;
+    // Clean before the run and after `one`; dirty after `two`.
+    const exec: Exec = (cmd) => {
+      if (cmd[0] === "git") return ++statusCalls < 3 ? clean : dirty;
+      seen.push(cmd[0] as string);
+      return { ok: cmd[0] !== "one", out: "" };
+    };
+    const r = runGates(three, going(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(seen).toEqual(["one", "two"]);
+    expect(r.why).toBe("`one` failed");
+    expect(r.failures.map((f) => f.gate)).toEqual(["one", "two"]);
+    expect(r.failures[1]?.why).toMatch(/^gate `two` modified the worktree/);
+  });
+
+  it("spends a gate's retries before it counts, then goes on", () => {
+    const { exec, calls } = fakeExec({
+      git: clean,
+      one: { ok: false, out: "" },
+    });
+    const r = runGates(
+      [exitCode(["one"], { retries: 1 }), exitCode(["two"])],
+      going(exec),
+    );
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(ran(calls)).toEqual(["one", "one", "two"]);
+    expect(r.failures).toHaveLength(1);
+    expect(r.why).toBe("`one` failed, and again on 1 retry");
+  });
+
+  it("is off by default: one failure, and the run stops there", () => {
+    const { exec, calls } = fakeExec({
+      git: clean,
+      one: { ok: false, out: "" },
+    });
+    const r = runGates(three, ctxWith(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(ran(calls)).toEqual(["one"]);
+    expect(r.failures.map((f) => f.gate)).toEqual(["one"]);
+  });
+});
+
+/**
  * `when`: a gate that judges one part of the tree runs only for a diff that
  * touches it. A native build is minutes; a slice that changed a locale file
  * should not wait for it, and should not be told it passed.
