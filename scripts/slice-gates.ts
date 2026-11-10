@@ -80,6 +80,12 @@ export type GateContext = {
   log?: (line: string) => void;
   /** Go on after a red gate and report them all. See `runGates`. */
   keepGoing?: boolean;
+  /**
+   * Judge a tree with changes in progress: the state before is the reference,
+   * and a gate is named only if it changed that state. For the run after a
+   * commit (`atCommit`). See `runGates`.
+   */
+  dirtyOk?: boolean;
 };
 
 export type GateResult =
@@ -116,6 +122,8 @@ export type Gate = {
    * `azelf gates`, `azelf run --gates` — skips it and says it runs at the land.
    */
   landOnly?: true;
+  /** It also runs after each commit of a slice session, as a warning. See `GateOptions`. */
+  atCommit?: true;
 };
 
 /** What every gate shape takes besides its command. */
@@ -132,12 +140,26 @@ export type GateOptions = {
    * part of the tree: a native build, `["ios/**", "android/**"]`.
    */
   when?: string[];
+  /**
+   * Run it after every commit in a slice worktree too (`session-commit.sh`),
+   * so a red is seen when it is made and not at the end of the build. A
+   * warning only: the commit stands, and the land's run is the verdict. For a
+   * gate that is cheap and judges commits, not files in progress: it runs on a
+   * tree with the session's next changes in it. Not with `ciRuns`, which needs
+   * a push. From consumer-b's Backend #197, whose zone gate found a file from the
+   * slice's first commit at the end of a finished build.
+   */
+  atCommit?: boolean;
 };
 
 // ─── the three shapes ─────────────────────────────────────────────────────
 
 const withHint = (why: string, hint?: string) =>
   hint ? `${why} (${hint})` : why;
+
+/** `{ atCommit: true }` when asked for, and no key at all otherwise. */
+const atCommitOf = (opts: GateOptions): Pick<Gate, "atCommit"> =>
+  opts.atCommit ? { atCommit: true } : {};
 
 /** The last few lines of a run, for a failure that would otherwise be just "exited non-zero". */
 const tail = (out: string, n = 10): string[] =>
@@ -158,6 +180,7 @@ export function exitCode(cmd: string[], opts: GateOptions = {}): Gate {
     name,
     retries: opts.retries,
     when: opts.when,
+    ...atCommitOf(opts),
     run(ctx) {
       const { ok, out } = ctx.exec(cmd, ctx.worktree);
       if (ok) return { ok: true };
@@ -186,6 +209,7 @@ export function exitCodeOverFiles(cmd: string[], opts: GateOptions = {}): Gate {
     name,
     retries: opts.retries,
     when: opts.when,
+    ...atCommitOf(opts),
     run(ctx) {
       const files = ctx.changedFiles.filter((f) =>
         existsSync(join(ctx.worktree, f)),
@@ -283,6 +307,7 @@ export function baselineDiff(opts: BaselineDiffOptions): Gate {
     name,
     retries: opts.retries,
     when: opts.when,
+    ...atCommitOf(opts),
     run(ctx) {
       const baseline = errorsIn(ctx, ctx.baselineDir);
       const candidate = errorsIn(ctx, ctx.worktree);
@@ -443,6 +468,9 @@ export function ciRuns(opts: CiRunsOptions): Gate {
     retries: opts.retries,
     when: opts.when,
     landOnly: true,
+    // Carried, not dropped, so the config refuses it by name: a gate that waits
+    // for CI on a push has nothing to judge right after a local commit.
+    ...atCommitOf(opts),
     run(ctx) {
       const red = (why: string, detail?: string[]): GateResult => ({
         ok: false,
@@ -699,6 +727,12 @@ export function gateApplies(gate: Gate, changedFiles: string[]): boolean {
  * would pay for the whole suite every time, and not at a land, where a red slice
  * does not land whatever the rest say. A gate that wrote still ends it: what
  * follows would be judging a tree that gate changed.
+ *
+ * With `ctx.dirtyOk` a dirty tree is judged as it is, for the run after a
+ * commit, where the session's next files are in progress. What `git status`
+ * said before is the reference, and a gate is named for any line it added or
+ * took away. A gate that writes to a file already changed adds no line, and is
+ * not seen here; the land's run on a clean tree sees it.
  */
 export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
   const flaky: Flaky[] = [];
@@ -719,7 +753,7 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
   if (before === null) {
     return stop({ gate: "worktree", why: unreadable(ctx.worktree) });
   }
-  if (before.length) {
+  if (before.length && !ctx.dirtyOk) {
     return stop({
       gate: "worktree",
       why: "worktree is dirty before any gate ran — commit or revert first",
@@ -738,11 +772,15 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
       if (after === null) {
         return stop({ gate: gate.name, why: unreadable(ctx.worktree) });
       }
-      if (after.length) {
+      const wrote = [
+        ...after.filter((l) => !before.includes(l)),
+        ...before.filter((l) => !after.includes(l)),
+      ];
+      if (wrote.length) {
         return stop({
           gate: gate.name,
           why: `gate \`${gate.name}\` modified the worktree — gates must be read-only (scripts/slice-gates.ts). Revert it, then fix the gate.`,
-          detail: after,
+          detail: wrote,
         });
       }
       if (result.ok) {

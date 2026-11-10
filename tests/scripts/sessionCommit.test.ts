@@ -7,7 +7,14 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type Consumer, git, makeConsumer, sh, shResult } from "./fixture";
+import {
+  AZELF,
+  type Consumer,
+  git,
+  makeConsumer,
+  sh,
+  shResult,
+} from "./fixture";
 
 /**
  * session-commit.sh and the DB lock: a commit that touches an exclusive path
@@ -274,5 +281,147 @@ describe("session-commit.sh -F", () => {
     expect(r.out).toContain("no such message file: ../nope.txt");
     expect(git(c.main, "diff", "--cached", "--name-only")).toBe("");
     expect(existsSync(join(c.main, ".git", "session-commit.lock"))).toBe(false);
+  });
+});
+
+/**
+ * A gate marked `atCommit` runs after a slice session's commit, as advice: red
+ * or not, the commit stands, and the exit is the commit's. From consumer-b's
+ * Backend #197, whose zone gate went red on a file from the slice's first
+ * commit, at the end of a finished build.
+ */
+describe("session-commit.sh and atCommit gates", () => {
+  let c: Consumer;
+  /** The common git dir: a gate's marks go there, out of the tree it judges. */
+  const D = 'd="$(git rev-parse --path-format=absolute --git-common-dir)"';
+  const mark = (name: string) => join(c.main, ".git", name);
+  const slice = (script: string, atCommit: unknown = true) => {
+    c = makeConsumer({
+      worktrees: [40],
+      gate: ["bash", "-c", `${D}; ${script}`],
+      gateAtCommit: atCommit,
+    });
+    writeFileSync(join(c.wt(40), ".slice-ticket.md"), "# 40\n");
+  };
+  const commitA = (cwd = c.wt(40)) => {
+    writeFileSync(join(cwd, "a.txt"), "a\n");
+    return commit(cwd, "feat: a", "a.txt");
+  };
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("warns on a red gate, and the commit stands with exit 0", () => {
+    slice("echo ZONE-RED; exit 1");
+    const r = commitA();
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("✓ committed:");
+    expect(r.out).toMatch(/⚠ `bash -c .*` failed/);
+    expect(r.out).toContain("      ZONE-RED");
+    expect(r.out).toContain(
+      "The commit stands. The land runs this gate too, and refuses the slice while it is red",
+    );
+    expect(git(c.wt(40), "log", "--format=%s", "main..HEAD")).toBe("feat: a");
+  });
+
+  it("says nothing on a green one", () => {
+    slice('touch "$d/ran"');
+    const r = commitA();
+
+    expect(r.code).toBe(0);
+    expect(existsSync(mark("ran"))).toBe(true);
+    expect(r.out).not.toContain("⚠");
+  });
+
+  it("runs with the commit lock released", () => {
+    slice(
+      'if [ -d "$d/session-commit.lock" ]; then echo held; else echo free; fi > "$d/lockstate"',
+    );
+    commitA();
+
+    expect(readFileSync(mark("lockstate"), "utf8")).toBe("free\n");
+    expect(existsSync(mark("session-commit.lock"))).toBe(false);
+  });
+
+  it("does not run in the main checkout", () => {
+    slice('touch "$d/ran"');
+    const r = commitA(c.main);
+
+    expect(r.ok).toBe(true);
+    expect(existsSync(mark("ran"))).toBe(false);
+  });
+
+  it("starts no second bun in a config without one", () => {
+    slice('touch "$d/ran"', false);
+    const log = join(c.root, "bun.log");
+    const realBun = sh(c.root, "command -v bun").trim();
+    mkdirSync(join(c.root, "bin"));
+    writeFileSync(
+      join(c.root, "bin", "bun"),
+      `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(
+        log,
+      )}\nexec ${JSON.stringify(realBun)} "$@"\n`,
+      { mode: 0o755 },
+    );
+    writeFileSync(join(c.wt(40), "a.txt"), "a\n");
+    const r = shResult(
+      c.wt(40),
+      `PATH=${JSON.stringify(
+        join(c.root, "bin"),
+      )}:"$PATH" ./scripts/session-commit.sh -y -m "feat: a" a.txt`,
+    );
+
+    expect(r.ok).toBe(true);
+    const calls = readFileSync(log, "utf8");
+    expect(calls).toContain("--sh");
+    expect(calls).not.toContain("--at-commit");
+    expect(existsSync(mark("ran"))).toBe(false);
+  });
+
+  it("runs on a tree with work in progress, and leaves it", () => {
+    slice("echo ZONE-RED; exit 1");
+    writeFileSync(join(c.wt(40), "wip.txt"), "wip\n");
+    const r = commitA();
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("ZONE-RED");
+    expect(r.out).not.toContain("dirty");
+    expect(readFileSync(join(c.wt(40), "wip.txt"), "utf8")).toBe("wip\n");
+  });
+
+  it("names a gate that writes to the tree", () => {
+    slice("touch written.txt");
+    const r = commitA();
+
+    expect(r.code).toBe(0);
+    expect(r.out).toMatch(/⚠ gate `bash -c .*` modified the worktree/);
+    expect(r.out).toContain("      ?? written.txt");
+  });
+
+  it("azelf run --gates --at-commit exits 0 on its own, red or not", () => {
+    slice("echo ZONE-RED; exit 1");
+    commitA();
+    const r = shResult(c.wt(40), "./scripts/azelf run --gates --at-commit");
+
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("ZONE-RED");
+  });
+
+  it("the config refuses atCommit together with landOnly", () => {
+    c = makeConsumer({ worktrees: [40] });
+    const config = join(c.main, "slice.config.ts");
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[.*\],/,
+        `gates: [{ name: "ci", run: () => ({ ok: true }), landOnly: true, atCommit: true }],`,
+      ),
+    );
+    const r = shResult(
+      c.main,
+      `bun ${JSON.stringify(join(AZELF, "scripts", "slice-config.ts"))} --sh`,
+    );
+
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("gates[0] (`ci`): atCommit and landOnly");
   });
 });

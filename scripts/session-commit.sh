@@ -373,3 +373,19 @@ if $do_push; then
   git fetch origin "$branch" 2>/dev/null || true
   push_branch
 fi
+
+# ─── Commit-time gates ──────────────────────────────────────────────────
+# The gates slice.config.ts marks `atCommit`, on what was just committed, so a
+# red one is seen when it is made and not at the end of the build (consumer-b's
+# Backend #197). Only in a slice worktree: the main checkout has no diff
+# against its base. Advice only, so `|| true`: the commit stands, and this exit
+# is the commit's. The land runs the same gates, and that is the verdict.
+#
+# With the commit lock released first: every other session's commit waits on
+# it, and gives up after LOCK_WAIT_SECONDS. The trap goes before the lock, or
+# it would remove another session's lock at exit, once that one had taken it.
+if [[ -f .slice-ticket.md && -n "${SLICE_HAS_AT_COMMIT_GATES:-}" ]]; then
+  trap - EXIT
+  rmdir "$lock_dir" 2>/dev/null || true
+  bun "$SLICE_AZELF_DIR/scripts/slice-run.ts" --gates --at-commit || true
+fi

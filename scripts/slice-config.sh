@@ -29,6 +29,7 @@
 #     each one the main checkout has untracked and the worktree lacks)
 #   SLICE_INSTALL[] SLICE_INSTALL_WHY (the prep's install step, and why)
 #   SLICE_AFTER_LAND[] (slice-land.sh's last step; empty when none)
+#   SLICE_HAS_AT_COMMIT_GATES (`1` when a gate is `atCommit`, else empty)
 #
 # The tracker's METHODS are not exported — they are functions, like the gates.
 # The four slice_tracker_* helpers each spawn bun once and ask the loader to

@@ -261,6 +261,7 @@ Installs into the repo you are standing in.
 | `--gates [ids…]` | run only the landing gates against existing worktrees, and exit; without ids, the worktree you are in |
 | `--no-lock` | with `--gates`: do not wait for the gate lock (what `azelf gates` passes) |
 | `--keep-going` | with `--gates`: go on after a red gate and report every one; a land always stops at the first |
+| `--at-commit` | with `--gates`: only the [`atCommit`](#gates) gates of the slice you are in, on the tree as it is, as a warning that always exits 0 (what `session-commit.sh` runs) |
 | `--sync-edges [-y]` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
 | `--ignore-body-blockers` | dispatch although a body names an open blocker the tracker has no edge for |
 | `--max <n>` | cap concurrent slices (default: the widest wave in the plan) |
@@ -504,7 +505,7 @@ not have `--hook` edit your rc file.
 Generated into `scripts/`, these are what a session inside a worktree uses:
 
 ```sh
-./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths
+./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths; then the atCommit gates, as a warning
 ./scripts/session-commit.sh -y -F message.txt path/to/file # the message from a file (-F - reads stdin)
 ./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
 ./scripts/slice-done.sh                                    # mark ready to land — the act that lands and pushes (you, or the session under --auto)
@@ -695,6 +696,30 @@ counts as changed. A slice that touches none of them skips the gate, and says so
   skipped `bun run test:native` — #142 touches none of ios/**, scripts/encode-verify.swift
   running 2 gate(s) for #142 (3 files) …
 ```
+
+Every shape but `ciRuns` also takes `atCommit`. The gate then runs after each commit a
+slice session makes with `session-commit.sh` too, so a red one is seen when it is made
+and not at the end of the build:
+
+```ts
+exitCodeOverFiles(["./scripts/zone-check.sh"], { atCommit: true })
+```
+
+It is a warning. The commit stands and the script exits as the commit did; the land runs
+the gate again, and that run is the verdict. It runs once the commit lock is released, so
+other sessions' commits do not wait for it, and only in a slice worktree. The tree may
+hold the session's next changes, so it is for a gate that is cheap and judges what was
+committed, not files in progress. A red one prints after the commit:
+
+```
+✓ committed: 4e1c9a0 feat: refund a partial order
+⚠ `./scripts/zone-check.sh` failed on the changed files
+      src/billing/charge.ts is in a forbidden zone
+  The commit stands. The land runs this gate too, and refuses the slice while it is red: fix it now, or say so with ./scripts/slice-finished.sh --stuck.
+```
+
+A config without an `atCommit` gate pays nothing for it. The config refuses `atCommit`
+on a gate that is `landOnly` (`ciRuns`): that one judges a push.
 
 A red gate shows its last ten lines. When that is not all of it, the whole output goes to
 `.slice-reviews/last-gate.log` in the worktree, and the red line names the file, so a runner

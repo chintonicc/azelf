@@ -6590,6 +6590,80 @@ function sliceHere(): TicketId {
   return id;
 }
 
+/**
+ * `--gates --at-commit`: what `session-commit.sh` runs after a commit in a
+ * slice worktree whose config has an `atCommit` gate. Those gates only, on the
+ * tree as it is, the session's changes in progress included (`dirtyOk`), and
+ * every red one (`keepGoing`). A warning and nothing more: no gate lock, since a
+ * commit does not wait behind a land; no `last-gate.log`, which belongs to the
+ * gates the session runs to finish; and exit 0 whatever it found, so a commit's
+ * exit stays the commit's. The land runs the same gates on a clean tree, and
+ * that run is the verdict. Silent when green, and outside a slice branch.
+ */
+function atCommitGates(): never {
+  const here = (cmd: string[]) =>
+    run(cmd, { cwd: process.cwd(), allowFail: true }).out.trim();
+  const branch = here(["git", "branch", "--show-current"]);
+  const gates = config.gates.filter((g) => g.atCommit);
+  if (!branch || ticketFromBranch(branch) === null || !gates.length) {
+    process.exit(0);
+  }
+  const wt = here(["git", "rev-parse", "--show-toplevel"]);
+  const changed = here(["git", "diff", "--name-only", `${baseBranch}...HEAD`])
+    .split("\n")
+    .filter(Boolean);
+  if (!wt || !changed.length) process.exit(0);
+
+  let result: ReturnType<typeof runGates>;
+  try {
+    result = runGates(gates, {
+      worktree: wt,
+      baselineDir: repoRoot,
+      changedFiles: changed,
+      exec: (cmd, cwd) => run(cmd, { cwd, allowFail: true }),
+      keepGoing: true,
+      dirtyOk: true,
+    });
+  } catch (e) {
+    console.log(
+      `⚠ the commit-time gates could not run: ${
+        e instanceof Error ? e.message : String(e)
+      } — the commit stands`,
+    );
+    process.exit(0);
+  }
+  if (result.ok) process.exit(0);
+
+  const DETAIL_LINES = 10;
+  for (const f of result.failures) {
+    console.log(`⚠ ${f.why}`);
+    const lines = f.detail ?? [];
+    for (const l of lines.slice(0, DETAIL_LINES)) console.log(`      ${l}`);
+    if (lines.length > DETAIL_LINES) {
+      console.log(`      … ${lines.length - DETAIL_LINES} more`);
+    }
+  }
+  const one = result.failures.length === 1;
+  console.log(
+    `  The commit stands. The land runs ${
+      one ? "this gate" : "these gates"
+    } too, and refuses the slice while ${
+      one ? "it is" : "one is"
+    } red: fix it now, or say so with ./scripts/slice-finished.sh --stuck.`,
+  );
+  process.exit(0);
+}
+
+if (flag("--at-commit")) {
+  if (!flag("--gates") || explicit.length) {
+    console.error(
+      "--at-commit goes with --gates, and judges the slice whose worktree you are in: azelf run --gates --at-commit",
+    );
+    process.exit(64);
+  }
+  atCommitGates();
+}
+
 // `--gates [n…]`: the landing gates, and nothing else — no tracker, no
 // rebase, no land. The worktree is judged exactly as it sits. This is how to
 // check a slice by hand, and how the gate shapes were proven against real

@@ -142,6 +142,8 @@ export function makeConsumer(opts: {
   gateRetries?: number;
   /** The gate's `when`, written as given: a bad value is for the config check. */
   gateWhen?: unknown;
+  /** The gate's `atCommit`, written as given. */
+  gateAtCommit?: unknown;
   /** What the fake tracker answers for every ticket, or by id. */
   title?: string;
   titles?: Record<string, string>;
@@ -346,6 +348,7 @@ export default {
       ? `[exitCode(${JSON.stringify(opts.gate)}, ${JSON.stringify({
           retries: opts.gateRetries,
           when: opts.gateWhen,
+          atCommit: opts.gateAtCommit,
         })})]`
       : "[]"
   },

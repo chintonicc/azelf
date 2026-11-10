@@ -606,6 +606,17 @@ function validate(c: SliceConfig): SliceConfig {
         `gates[${i}] (\`${g.name}\`): when must be a non-empty array of path patterns, like ["ios/**"]`,
       );
     }
+    const atCommit: unknown = g.atCommit;
+    if (atCommit !== undefined && typeof atCommit !== "boolean") {
+      bad(`gates[${i}] (\`${g.name}\`): atCommit must be true or false`);
+    }
+    // A gate that waits for CI on the pushed commit has nothing to judge right
+    // after a local one: it would push, or wait out its deadline, per commit.
+    if (atCommit && g.landOnly) {
+      bad(
+        `gates[${i}] (\`${g.name}\`): atCommit and landOnly do not go together — this gate judges the pushed commit, and runs at the land only`,
+      );
+    }
   }
   // Deliberately NOT rejected: `gates: []`. It means "land whatever is
   // committed", which is a legitimate choice for a repo with no toolchain, and
@@ -980,6 +991,11 @@ export function shellAssignments(): string {
     shArray("SLICE_INSTALL", install.argv),
     `SLICE_INSTALL_WHY=${shq(install.why)}`,
     shArray("SLICE_AFTER_LAND", config.afterLand ?? []),
+    // Whether session-commit.sh asks for the `atCommit` gates after a commit:
+    // `1` or empty. Without one, a commit starts no second bun.
+    `SLICE_HAS_AT_COMMIT_GATES=${shq(
+      config.gates.some((g) => g.atCommit) ? "1" : "",
+    )}`,
     // A slice's ports (`ports`): empty `from` is none. The prep picks the
     // block, because it is the prep that knows the other worktrees.
     `SLICE_PORTS_FROM=${shq(String(config.ports?.from ?? ""))}`,

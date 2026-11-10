@@ -1,6 +1,6 @@
 # A stuck session can see every red, and a cheap gate can warn at the commit
 
-**Status:** Phase 1 landed 2026-11-10 (its hash goes after its heading with Phase 2) · Phase 2 open
+**Status:** complete — Phase 1 landed 2026-11-10 (cfdd627) · Phase 2 landed 2026-11-10
 **Written:** 2026-11-09
 **Companion:** the consumer-b friction entry of 2026-11-08, Backend #197, the only one since
 `comments-gate-log-next-land-plan.md` was written. consumer-a's log has no open entry.
@@ -41,7 +41,7 @@ after the heading. Line numbers are as of `d937fdd`.
   therefore judge commits and not the working tree, and the option's comment says so.
 - **No marker and no memory.** Every commit asks again, so a red stays visible until it is fixed.
 
-## Phase 1 — every red at once
+## Phase 1 — every red at once · cfdd627
 
 - [x] 1a. `GateContext.keepGoing`. `runGates` collects failures in `failures: {gate, why, detail,
   output}[]`, on a red result only, and goes on; the first failure stays the result's `why`,
@@ -64,22 +64,32 @@ after the heading. Line numbers are as of `d937fdd`.
 
 ## Phase 2 — a cheap gate can warn at the commit
 
-- [ ] 2a. `atCommit?: true` on `Gate` and `GateOptions`, carried by `exitCode`, `exitCodeOverFiles` and
+- [x] 2a. `atCommit?: true` on `Gate` and `GateOptions`, carried by `exitCode`, `exitCodeOverFiles` and
   `baselineDiff`. `slice-config.ts` refuses it together with `landOnly`.
-- [ ] 2b. `GateContext.dirtyOk`: `runGates` takes the state before as its reference and names a gate only
+- [x] 2b. `GateContext.dirtyOk`: `runGates` takes the state before as its reference and names a gate only
   if the state changed.
-- [ ] 2c. `azelf run --gates --at-commit`: the `atCommit` gates of the slice here, `dirtyOk` and
+- [x] 2c. `azelf run --gates --at-commit`: the `atCommit` gates of the slice here, `dirtyOk` and
   `keepGoing`, no gate lock, no `last-gate.log`, not through `gatesPass` (which refuses a dirty tree).
   Prints the gate, its reason and that the commit stands and the land runs this gate too. Always exits 0.
-- [ ] 2d. `SLICE_HAS_AT_COMMIT_GATES` from `--sh` (`slice-config.ts:972`), so a commit in a config without
+- [x] 2d. `SLICE_HAS_AT_COMMIT_GATES` from `--sh` (`slice-config.ts:972`), so a commit in a config without
   such a gate starts no second `bun`.
-- [ ] 2e. `session-commit.sh`, last step: with `.slice-ticket.md` and the variable, release the lock, then
+- [x] 2e. `session-commit.sh`, last step: with `.slice-ticket.md` and the variable, release the lock, then
   run it, `|| true`. After the optional push.
-- [ ] 2f. README: the gate options and the `session-commit.sh` row. The skill, one line: a warning after a
+- [x] 2f. README: the gate options and the `session-commit.sh` row. The skill, one line: a warning after a
   commit means the land will refuse this; fix it now, or say so with `--stuck`.
-- [ ] 2g. Tests: a red gate warns, the commit stands, exit 0; the lock is free while the gate runs; a main
+- [x] 2g. Tests: a red gate warns, the commit stands, exit 0; the lock is free while the gate runs; a main
   checkout does not run it; a config without `atCommit` does not start it; it runs on a dirty tree; a gate
   that writes is named; `atCommit` with `landOnly` is refused.
+
+### What building it found
+
+- **The trap goes before the lock.** `session-commit.sh` releases the lock early, so its exit trap is
+  cleared first: otherwise the exit would remove a lock another session had taken in between.
+- **The worktree is the one it runs in** (`--show-toplevel`), not `worktreeFor` of the branch's ticket.
+  It is silent when green, outside a slice branch, and with no `atCommit` gate.
+- **A gate that writes to a file already changed adds no `git status` line**, so `dirtyOk` does not see
+  it. The land's run on a clean tree does.
+- **`ciRuns` carries `atCommit`** instead of dropping it, so the config refuses it by name.
 
 ## Unobserved, once built
 

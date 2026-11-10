@@ -435,6 +435,89 @@ describe("runGates with keepGoing", () => {
 });
 
 /**
+ * `dirtyOk`: the run after a commit, where the session's next files are still
+ * in progress. The state before is the reference; a gate is named only when it
+ * changed that state.
+ */
+describe("runGates with dirtyOk", () => {
+  const before = { ok: true, out: " M lib/wip.ts\n?? notes.md" };
+  const lax = (exec: Exec): GateContext => ({
+    ...ctxWith(exec),
+    dirtyOk: true,
+  });
+
+  it("runs on a dirty tree, and passes when no gate changed it", () => {
+    const { exec, calls } = fakeExec({ git: before });
+    const r = runGates([exitCode(["one"]), exitCode(["two"])], lax(exec));
+    expect(r.ok).toBe(true);
+    expect(calls.map((c) => c.cmd[0]).filter((w) => w !== "git")).toEqual([
+      "one",
+      "two",
+    ]);
+  });
+
+  it("names a gate that wrote, by what it changed and nothing else", () => {
+    let statusCalls = 0;
+    const exec: Exec = (cmd) => {
+      if (cmd[0] !== "git") return { ok: true, out: "" };
+      return ++statusCalls === 1
+        ? before
+        : { ok: true, out: `${before.out}\n?? written.txt` };
+    };
+    const r = runGates([exitCode(["one"])], lax(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toMatch(/^gate `one` modified the worktree/);
+    expect(r.detail).toEqual(["?? written.txt"]);
+  });
+
+  it("names a gate that undid a change in progress", () => {
+    let statusCalls = 0;
+    const exec: Exec = (cmd) => {
+      if (cmd[0] !== "git") return { ok: true, out: "" };
+      return ++statusCalls === 1 ? before : { ok: true, out: "?? notes.md" };
+    };
+    const r = runGates([exitCode(["one"])], lax(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.detail).toEqual(["M lib/wip.ts"]);
+  });
+
+  it("still refuses a dirty tree without it", () => {
+    const { exec } = fakeExec({ git: before });
+    const r = runGates([exitCode(["one"])], ctxWith(exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toMatch(/^worktree is dirty before any gate ran/);
+  });
+});
+
+describe("atCommit", () => {
+  it("is carried by the three local shapes, and absent unless asked for", () => {
+    const re = /x/;
+    const norm = (l: string) => l;
+    expect(exitCode(["t"], { atCommit: true }).atCommit).toBe(true);
+    expect(exitCodeOverFiles(["t"], { atCommit: true }).atCommit).toBe(true);
+    expect(
+      baselineDiff({
+        cmd: ["t"],
+        errorMatch: re,
+        normalize: norm,
+        atCommit: true,
+      }).atCommit,
+    ).toBe(true);
+    expect(exitCode(["t"]).atCommit).toBeUndefined();
+    expect(exitCode(["t"], { atCommit: false }).atCommit).toBeUndefined();
+  });
+
+  it("is carried by ciRuns too, so the config can refuse it there", () => {
+    const g = ciRuns({ workflows: ["Tests"], atCommit: true });
+    expect(g.landOnly).toBe(true);
+    expect(g.atCommit).toBe(true);
+  });
+});
+
+/**
  * `when`: a gate that judges one part of the tree runs only for a diff that
  * touches it. A native build is minutes; a slice that changed a locale file
  * should not wait for it, and should not be told it passed.

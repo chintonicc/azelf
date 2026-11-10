@@ -67,6 +67,10 @@ Never `git add -A` or `git add .`. Other worktrees share this repo's git dir, an
 pathspec-less commit is how another session's in-flight work gets committed under
 your message.
 
+A `⚠` after `✓ committed` is a gate this project runs at each commit. The commit
+stands, but the land will refuse this slice while that gate is red: fix it now, or
+say so with `--stuck` (below).
+
 ## 5. Run the gates yourself before declaring done
 
 ```sh
