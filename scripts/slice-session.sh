@@ -201,23 +201,77 @@ if $provision; then
   fi
 fi
 
+# ─── Claim the slice ─────────────────────────────────────────────────────
 # A session is running here already: refused, for a session as for a provision,
-# because the marker below would overwrite the live one and two agents would
-# work the same uncommitted files. Frontend #136 on consumer-b came to that
-# from the other side, an old tab deleting a newer marker; this is the door a
-# hand-started session walks through.
+# because two agents would work the same uncommitted files. Frontend #136 on
+# consumer-b came to that from the other side, an old tab deleting a newer
+# marker; this is the door a hand-started session walks through.
 #
 # The same test the dispatcher makes (isSessionOf in slice-run.ts): the marker's
 # pid must still be a slice-session.sh with this ticket on its command line,
 # because a crash leaves the marker behind and a pid can be reused by anything,
 # another ticket's session included. Before anything in the worktree is touched.
-live_pid="$(head -n 1 "$worktree_path/.slice-live" 2>/dev/null | tr -d '[:space:]' || true)"
-if [[ "$live_pid" =~ ^[0-9]+$ && "$live_pid" != "$$" ]]; then
-  live_cmd="$(ps -ww -o command= -p "$live_pid" 2>/dev/null || true)"
-  if [[ "$live_cmd" == *slice-session* && " $live_cmd " == *" $ticket "* ]]; then
-    echo "error: a session is running in $worktree_path (pid $live_pid) — its files would change under it. End it first." >&2
-    exit 1
+#
+# The check and the marker are ONE step: this run writes .slice-live with its
+# pid right here, created only if it is not there (`set -C`), before the ticket
+# checks. They used to be four hundred lines apart, with five calls through the
+# tracker in between. On consumer-b's Backend #227 the Mac slept on battery
+# right after a run passed the check, sixteen minutes went by before it wrote
+# its marker, and a second run that started in that time found none. Both
+# started an agent in the same worktree. Now the second finds the first's pid
+# and is refused. A run that is refused later (the ticket is closed, a blocker
+# is open), and every --prep-only, leaves no marker: the trap goes with the
+# claim. --provision is not a session and claims nothing.
+#
+# A worktree that does not exist yet is claimed right after `git worktree add`
+# below: no session can be in a worktree that is not there.
+live_marker="$worktree_path/.slice-live"
+remove_own_live_marker() {
+  if [[ "$(head -n 1 "$live_marker" 2>/dev/null | tr -d '[:space:]')" == "$$" ]]; then
+    rm -f "$live_marker"
   fi
+}
+refuse_if_live() {
+  local pid cmd
+  pid="$(head -n 1 "$live_marker" 2>/dev/null | tr -d '[:space:]' || true)"
+  if [[ "$pid" =~ ^[0-9]+$ && "$pid" != "$$" ]]; then
+    cmd="$(ps -ww -o command= -p "$pid" 2>/dev/null || true)"
+    if [[ "$cmd" == *slice-session* && " $cmd " == *" $ticket "* ]]; then
+      echo "error: a session is running in $worktree_path (pid $pid) — its files would change under it. End it first." >&2
+      exit 1
+    fi
+  fi
+}
+# A marker whose session is gone is taken over, and once more if it comes back
+# without one. Its pid goes to .slice-interrupted first, which is what the
+# dispatcher writes when it finds one: a run that is refused after this must
+# not take the evidence of a crash with it. A session that starts clears it,
+# as below.
+claimed=false
+claim_slice() {
+  local stale
+  for _ in 1 2; do
+    if (set -C; printf '%s\n' "$$" >"$live_marker") 2>/dev/null; then
+      claimed=true
+      trap remove_own_live_marker EXIT
+      return 0
+    fi
+    [[ -e "$live_marker" ]] || continue
+    refuse_if_live
+    stale="$(head -n 1 "$live_marker" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [[ "$stale" =~ ^[0-9]+$ && ! -e "$worktree_path/.slice-interrupted" ]]; then
+      printf '%s\n' "$stale" >"$worktree_path/.slice-interrupted"
+    fi
+    rm -f "$live_marker"
+  done
+  refuse_if_live
+  echo "error: couldn't claim $worktree_path for this session: $live_marker could not be written. Run it again." >&2
+  exit 1
+}
+if $provision; then
+  refuse_if_live
+elif git worktree list --porcelain | grep -qx "worktree $worktree_path" && [[ -d "$worktree_path" ]]; then
+  claim_slice
 fi
 
 # ─── Validate the ticket ────────────────────────────────────────────────
@@ -344,6 +398,10 @@ else
     git worktree add "$worktree_path" -b "$branch" "$cut_from"
     echo "✓ created worktree at $worktree_path on new branch $branch$cut_note"
   fi
+fi
+# The claim the worktree could not take at the top, because it was not there.
+if ! $claimed && ! $provision; then
+  claim_slice
 fi
 
 # ─── Provision ───────────────────────────────────────────────────────────
@@ -632,14 +690,9 @@ fi
 # said done and kept its tab, a second started and wrote its pid, and closing the
 # old tab deleted that marker. The next round saw no session on an uncommitted
 # tree and opened a third, two agents on the same files.
-live_marker="$worktree_path/.slice-live"
-echo "$$" >"$live_marker"
-remove_own_live_marker() {
-  if [[ "$(head -n 1 "$live_marker" 2>/dev/null | tr -d '[:space:]')" == "$$" ]]; then
-    rm -f "$live_marker"
-  fi
-}
-trap remove_own_live_marker EXIT
+#
+# The marker and its trap are set by the claim near the top ("Claim the
+# slice"), before the ticket checks: this run has held the slice since then.
 
 # A previous session of this slice may have exited on a refused DB-lock claim
 # and left .slice-lock-wait, which parks the ticket in the dispatcher while the

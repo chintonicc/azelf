@@ -309,6 +309,132 @@ describe("a tab removes only its own marker, and a session does not start over a
 });
 
 /**
+ * consumer-b's Backend #227: a run passed the guard, the Mac slept before it
+ * wrote `.slice-live`, and a second run found no marker. Both started an
+ * agent. A run claims its slice first now, before its tracker calls, which are
+ * the slow part: the fixture's tracker holds them here, as a sleep did.
+ */
+describe("a run claims its slice before anything slow", () => {
+  const markerOf = (c: Consumer) => join(c.wt(40), ".slice-live");
+  const read = (path: string) =>
+    existsSync(path) ? readFileSync(path, "utf8") : "";
+
+  it("a run held in its tracker calls has claimed already, and a second run is refused", async () => {
+    const c = setup();
+    c.trackerHeld(true);
+    const s = startSession(c);
+    const marker = markerOf(c);
+    await until("the claim", () => read(marker) === `${s.child.pid}\n`);
+    expect(s.output()).toContain("── checking ticket #40");
+    expect(agentRunning()).toBe(false);
+
+    // With a timeout: if it were not refused, it would wait on the tracker too.
+    const again = spawnSync(
+      "./scripts/slice-session.sh",
+      ["40", "--self-land"],
+      { cwd: c.main, encoding: "utf8", timeout: 20_000 },
+    );
+    expect(again.status, `${again.stdout}${again.stderr}`).toBe(1);
+    expect(again.stderr).toContain(
+      `a session is running in ${c.wt(40)} (pid ${s.child.pid})`,
+    );
+    expect(read(marker)).toBe(`${s.child.pid}\n`);
+
+    c.trackerHeld(false);
+    await until(
+      `the agent — session output so far:\n${s.output()}`,
+      agentRunning,
+    );
+    expect(read(marker)).toBe(`${s.child.pid}\n`);
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    await s.exited;
+    expect(existsSync(marker)).toBe(false);
+  }, 60_000);
+
+  it("a marker whose session is gone is taken over at the claim, and kept as .slice-interrupted", async () => {
+    const c = setup();
+    const marker = markerOf(c);
+    writeFileSync(marker, "999999\n");
+    c.trackerHeld(true);
+    const s = startSession(c);
+    await until("the claim", () => read(marker) === `${s.child.pid}\n`);
+    expect(read(join(c.wt(40), ".slice-interrupted"))).toBe("999999\n");
+
+    c.trackerHeld(false);
+    await until(
+      `the agent — session output so far:\n${s.output()}`,
+      agentRunning,
+    );
+    // The session that picks the work up clears it, as it always has.
+    expect(existsSync(join(c.wt(40), ".slice-interrupted"))).toBe(false);
+
+    spawnSync("pkill", ["-TERM", "-f", `sleep ${sleepArg}`]);
+    await s.exited;
+  }, 60_000);
+
+  it("a run refused after its claim leaves no marker, and a dead session's stays on record", () => {
+    const c = setup();
+    const marker = markerOf(c);
+    writeFileSync(marker, "999999\n");
+    c.setTicket("40", { state: "closed" });
+
+    const r = shResult(c.main, "./scripts/slice-session.sh 40");
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("#40 is closed, not open");
+    expect(existsSync(marker)).toBe(false);
+    // What the dispatcher would have written on reading the dead marker.
+    expect(read(join(c.wt(40), ".slice-interrupted"))).toBe("999999\n");
+  }, 60_000);
+
+  it("--prep-only claims while it preps, and leaves no marker", async () => {
+    const c = setup();
+    c.trackerHeld(true);
+    const p = startSession(c, ["--prep-only"]);
+    const marker = markerOf(c);
+    await until("the claim", () => read(marker) === `${p.child.pid}\n`);
+
+    c.trackerHeld(false);
+    expect(await p.exited, p.output()).toBe(0);
+    expect(p.output()).toContain("✓ prepped, not launched");
+    expect(existsSync(marker)).toBe(false);
+  }, 60_000);
+
+  it("a new worktree is claimed once it exists", async () => {
+    fx = makeConsumer({ remote: true, agent: ["true"] });
+    const c = fx;
+    // Held in `body`, for the brief: after `git worktree add`.
+    c.trackerHeld("body");
+    const p = startSession(c, ["--prep-only"]);
+    await until("the claim", () => read(markerOf(c)) === `${p.child.pid}\n`);
+    expect(p.output()).toContain("✓ created worktree");
+
+    c.trackerHeld(false);
+    expect(await p.exited, p.output()).toBe(0);
+    expect(existsSync(markerOf(c))).toBe(false);
+  }, 60_000);
+
+  it("--provision neither claims nor writes a marker", async () => {
+    const c = setup();
+    c.trackerHeld(true);
+    const p = startSession(c, ["--provision"]);
+    const marker = markerOf(c);
+    // Held in `body`, for the brief, after the install: well past any claim.
+    await until(`the install — output so far:\n${p.output()}`, () =>
+      /dependencies installed|no install step/.test(p.output()),
+    );
+    await new Promise((r) => setTimeout(r, 500));
+    expect(p.child.exitCode).toBeNull();
+    expect(existsSync(marker)).toBe(false);
+
+    c.trackerHeld(false);
+    expect(await p.exited, p.output()).toBe(0);
+    expect(p.output()).toContain("✓ provisioned");
+    expect(existsSync(marker)).toBe(false);
+  }, 60_000);
+});
+
+/**
  * `azelf relaunch` ends the session it replaces, which exits on a signal; kept
  * as a crash, every relaunch would leave a dead tab behind.
  */

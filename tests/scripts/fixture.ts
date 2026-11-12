@@ -35,7 +35,9 @@ import { EXCLUDE_BLOCK } from "../../scripts/slice-init";
  *
  * Two switches stand in for a network that comes and goes, each a file in
  * the fixture root: while `tracker-down` exists, `get` and `body` throw as
- * the GitHub adapter does; while `close-fails` exists, `close` throws.
+ * the GitHub adapter does; while `close-fails` exists, `close` throws. A
+ * third stands in for a machine that sleeps mid-call: while `tracker-held`
+ * exists, `get` and `body` wait (only the one it names, when it names one).
  */
 export const AZELF = resolve(__dirname, "..", "..");
 
@@ -90,6 +92,8 @@ export type Consumer = {
   trackerDown: (down: boolean) => void;
   /** Make the fake tracker's `close` throw, or work again. */
   closeFails: (fails: boolean) => void;
+  /** Make the fake tracker's reads wait until released (only `get` or only `body` when named), or release them. */
+  trackerHeld: (held: boolean | "get" | "body") => void;
   /** A linked worktree's path, by ticket number. */
   wt: (n: number) => string;
   /** The DB lock's claim dir and log, in the common git dir. */
@@ -269,6 +273,18 @@ import { custom, exitCode, type SliceConfig, type Tracker, TrackerUnavailable } 
 const TICKETS = ${JSON.stringify(ticketsFile)};
 const DOWN = ${JSON.stringify(join(root, "tracker-down"))};
 const CLOSE_FAILS = ${JSON.stringify(join(root, "close-fails"))};
+const HELD = ${JSON.stringify(join(root, "tracker-held"))};
+const held = (call: string) => {
+  try {
+    const only = readFileSync(HELD, "utf8");
+    return only === "" || only === call;
+  } catch {
+    return false;
+  }
+};
+const waitWhileHeld = (call: string) => {
+  while (held(call)) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+};
 const unreachable = (what: string): never => {
   throw new TrackerUnavailable(\`gh \${what} failed:\\nPost "https://api.github.com/graphql": EOF\`);
 };
@@ -292,6 +308,7 @@ const tracker: Tracker = {
       return t.state === "open" && t.ready !== false;
     }),
   get: (id) => {
+    waitWhileHeld("get");
     if (existsSync(DOWN)) unreachable(\`issue view \${id}\`);
     const t = ticket(id);
     return {
@@ -310,6 +327,7 @@ const tracker: Tracker = {
     writeFileSync(TICKETS, JSON.stringify(next));
   },
   body: (id) => {
+    waitWhileHeld("body");
     if (existsSync(DOWN)) unreachable(\`issue view \${id}\`);
     return ticket(id).body;
   },
@@ -404,6 +422,10 @@ export default {
     setTicket,
     trackerDown: toggle("tracker-down"),
     closeFails: toggle("close-fails"),
+    trackerHeld: (on: boolean | "get" | "body") => {
+      if (on === false) rmSync(join(root, "tracker-held"), { force: true });
+      else writeFileSync(join(root, "tracker-held"), on === true ? "" : on);
+    },
     wt,
     lockDir: join(main, ".git", "azelf-db.lock"),
     lockLog: join(main, ".git", "azelf-db.log"),
