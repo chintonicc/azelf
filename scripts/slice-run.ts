@@ -66,6 +66,7 @@ import {
   mkdirSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -1201,8 +1202,82 @@ function isSessionOf(n: TicketId, pid: number): boolean {
     encoding: "utf8",
   });
   if (r.error) return true;
-  const cmd = (r.stdout ?? "").trim();
-  return cmd.includes("slice-session") && cmd.split(/\s+/).includes(n);
+  return runsSliceSession((r.stdout ?? "").trim(), n);
+}
+
+/** A command line of slice-session.sh with the ticket as one of its arguments. */
+const runsSliceSession = (cmd: string, n: TicketId) =>
+  cmd.includes("slice-session") && cmd.split(/\s+/).includes(n);
+
+/**
+ * `ps -ax` read once a round for `startingSession`, as pid and command line.
+ * Null until a round asks; cleared with `sessionAnswers`.
+ */
+let processTable: { pid: number; cmd: string }[] | null = null;
+const startingAnswers = new Map<TicketId, boolean>();
+
+function readProcessTable(): { pid: number; cmd: string }[] {
+  const r = spawnSync("ps", ["-ax", "-ww", "-o", "pid=,command="], {
+    encoding: "utf8",
+  });
+  if (r.error || r.status !== 0) return [];
+  return (r.stdout ?? "").split("\n").flatMap((line) => {
+    const m = /^\s*([0-9]+)\s+(.*)$/.exec(line);
+    return m ? [{ pid: Number(m[1]), cmd: m[2] as string }] : [];
+  });
+}
+
+/** Where a process works: /proc on Linux, lsof on macOS. Null when neither says. */
+function cwdOf(pid: number): string | null {
+  try {
+    return readlinkSync(`/proc/${pid}/cwd`);
+  } catch {
+    // Not Linux, or gone.
+  }
+  const r = spawnSync("lsof", ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+    encoding: "utf8",
+    timeout: 5_000,
+  });
+  if (r.error || r.status !== 0) return null;
+  const line = (r.stdout ?? "").split("\n").find((l) => l.startsWith("n"));
+  return line ? line.slice(1) : null;
+}
+
+/**
+ * Is a slice-session.sh for this ticket running in this repo, with or without
+ * its marker? On consumer-b's Backend #227 the Mac slept right after a tab's
+ * slice-session.sh started, before it wrote `.slice-live`. The dispatcher woke
+ * sixteen minutes later by the wall clock, which runs on in sleep, found its
+ * launch window long gone and no marker, and opened a second tab. A process
+ * that has not claimed its slice yet is still a start on its way, however long
+ * ago it began.
+ *
+ * The same words as `isSessionOf`, and the process must work in this repo's
+ * main checkout or in this ticket's worktree: every launcher starts it in the
+ * worktree, and it moves to the main checkout first thing. Projects on one
+ * machine share ticket numbers, and another project's #40 must not hold this
+ * one's.
+ *
+ * When `ps` or the directory cannot be read, the answer is no and the launch
+ * window decides, as before. The opposite of `isSessionOf`'s rule, because a
+ * second start is now refused at its claim (slice-session.sh, "Claim the
+ * slice"): a wrong no costs a tab that is refused, and a wrong yes would hold
+ * the ticket for as long as the other process runs.
+ */
+function startingSession(n: TicketId): boolean {
+  const known = startingAnswers.get(n);
+  if (known !== undefined) return known;
+  processTable ??= readProcessTable();
+  const here = [repoRoot, worktreeFor(n)].map(canonicalPath);
+  const found = processTable.some(({ pid, cmd }) => {
+    if (!runsSliceSession(cmd, n)) return false;
+    const cwd = cwdOf(pid);
+    if (cwd === null) return false;
+    const at = canonicalPath(cwd);
+    return here.some((dir) => at === dir || at.startsWith(`${dir}/`));
+  });
+  startingAnswers.set(n, found);
+  return found;
 }
 
 /**
@@ -1424,10 +1499,15 @@ const launchedAt = new Map<TicketId, number>();
 // up" report below reads the same number, so it is a diagnostic threshold as
 // much as a timeout — which is why the launcher declares it rather than
 // every launcher sharing whichever value Warp needed.
+//
+// Past the window, a slice-session.sh for the ticket that is still running
+// keeps it occupied: the window is wall-clock time, and a Mac that sleeps
+// right after a start lets it run out (`startingSession`).
 function occupied(n: TicketId): boolean {
   if (hasSession(n)) return true;
   const t = launchedAt.get(n);
-  return t !== undefined && Date.now() - t < launcher.startingGraceMs;
+  if (t !== undefined && Date.now() - t < launcher.startingGraceMs) return true;
+  return startingSession(n);
 }
 
 /**
@@ -7077,6 +7157,8 @@ try {
     if (stoppedBy) break;
     round += 1;
     sessionAnswers.clear();
+    processTable = null;
+    startingAnswers.clear();
     noteAzelfChange();
     if (round > 1) {
       const { failed, allFailed } = refreshOpenState(tickets);
@@ -7280,7 +7362,9 @@ try {
     // Keyed off the launcher's own grace window, so under Warp this means "the
     // tab opened and nothing ran in it — the hook, most likely" and under
     // manual it means "nobody has pasted the command yet"; either way the
-    // launch is retried next round.
+    // launch is retried next round. A slice-session.sh still on its way to its
+    // marker keeps the slice occupied, so it is not idle here and keeps its
+    // launch time until it claims or is gone.
     const idle = idleWorktrees(tickets).filter((t) => launchedAt.has(t.id));
     if (idle.length) {
       console.log(

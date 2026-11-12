@@ -162,8 +162,11 @@ export function makeConsumer(opts: {
    * Start sessions for real: a launcher that spawns each session's command
    * in its worktree, detached, where `manual()` only prints it. For the
    * tests that need `slice-session.sh` itself to run after a prep.
+   *
+   * `"asleep"` spawns the stand-in `asleepSession` runs instead, with the
+   * session's arguments: a start that never gets as far as its claim.
    */
-  launch?: boolean;
+  launch?: boolean | "asleep";
 }): Consumer {
   // Resolved, because git prints worktree paths canonicalized and macOS's
   // tmpdir is a symlink.
@@ -181,6 +184,13 @@ export function makeConsumer(opts: {
     tickets[id] = { title };
   }
   writeFileSync(ticketsFile, JSON.stringify(tickets));
+  mkdirSync(join(root, "asleep"));
+  writeFileSync(
+    asleepScript(root),
+    `while [ -d ${JSON.stringify(root)} ] && [ ! -e ${JSON.stringify(
+      join(root, "wake"),
+    )} ]; do sleep 0.2; done\n`,
+  );
 
   git(root, "init", "-q", "-b", "main", "repo");
   // Repo-local identity, because the scripts under test run plain `git
@@ -258,7 +268,13 @@ export function makeConsumer(opts: {
     problem: () => null,
     open: (ss) =>
       ss.map((s) => {
-        spawn(s.cmd[0], s.cmd.slice(1), { cwd: s.dir, stdio: "ignore", detached: true }).unref();
+        spawn(${
+          opts.launch === "asleep"
+            ? `"bash", [${JSON.stringify(
+                asleepScript(root),
+              )}, ...s.cmd.slice(1)]`
+            : "s.cmd[0], s.cmd.slice(1)"
+        }, { cwd: s.dir, stdio: "ignore", detached: true }).unref();
         return \`started \${s.ref}\`;
       }),
   },`
@@ -451,6 +467,22 @@ export function fakeSession(c: Consumer, n: number): Dispatcher {
   );
   writeFileSync(join(c.wt(n), ".slice-live"), `${s.pid}\n`);
   return s;
+}
+
+const asleepScript = (root: string) => join(root, "asleep", "slice-session.sh");
+
+/**
+ * A `slice-session.sh <n>` that has not claimed its slice and does not get
+ * to: no `.slice-live`, as with the start on consumer-b's Backend #227, whose
+ * Mac slept right after it began. It runs in `cwd` until `wake` is in the
+ * fixture root, or the root is gone.
+ */
+export function asleepSession(c: Consumer, n: number, cwd: string): void {
+  spawn("bash", [asleepScript(c.root), String(n)], {
+    cwd,
+    stdio: "ignore",
+    detached: true,
+  }).unref();
 }
 
 const DISPATCHER = join(AZELF, "scripts", "slice-run.ts");

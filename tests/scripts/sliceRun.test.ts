@@ -19,6 +19,7 @@ import {
   AZELF,
   type Consumer,
   type Dispatcher,
+  asleepSession,
   fakeSession,
   git,
   makeConsumer,
@@ -2309,6 +2310,56 @@ describe("a session that crashed", () => {
     expect(r.out).toContain("landing #40");
     expect(r.code).toBe(0);
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  });
+});
+
+/**
+ * consumer-b's Backend #227: a tab's slice-session.sh started, the Mac slept
+ * before it wrote `.slice-live`, and the dispatcher woke past its launch
+ * window by the wall clock, found no marker and opened a second tab. A
+ * slice-session.sh for the ticket that is still running is a start on its
+ * way, whatever the clock says. The stand-ins never claim; `wake` ends them.
+ */
+describe("a start the Mac slept on", () => {
+  const AUTO = ["--auto", "-y", "--no-review", "--interval", "1", "40"];
+  const starts = () => d?.output().match(/started #40/g)?.length ?? 0;
+
+  it("is not launched again while its slice-session.sh runs, and is once that is gone", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, launch: "asleep" });
+    const fx = c;
+    d = startDispatcher(fx, AUTO);
+    await d.until("started #40");
+    // Past the launcher's 5s window, by several rounds.
+    await new Promise((r) => setTimeout(r, 8_000));
+
+    expect(d.output()).not.toContain("never came up");
+    expect(starts()).toBe(1);
+    expect(existsSync(join(fx.wt(40), ".slice-live"))).toBe(false);
+
+    // Gone without coming up: launched again, as before.
+    writeFileSync(join(fx.root, "wake"), "");
+    await d.until(/started #40[\s\S]*started #40/);
+  }, 60_000);
+
+  it("counts one started by hand in the main checkout", () => {
+    c = makeConsumer({ worktrees: [40], remote: true });
+    asleepSession(c, 40, c.main);
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain("--once: stopping here.");
+    expect(r.out).not.toContain("starting #40");
+  });
+
+  it("does not count one for the same number in another checkout", () => {
+    c = makeConsumer({ worktrees: [40], remote: true });
+    const other = join(c.root, "other");
+    mkdirSync(other);
+    asleepSession(c, 40, other);
+
+    const r = runDispatcher(c, ["--auto", "--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain("starting #40");
   });
 });
 

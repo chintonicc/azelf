@@ -1,6 +1,6 @@
 # A slice has one session, even across a sleep
 
-**Status:** in progress · Phase 1 landed 2026-11-12 · Phase 2 open
+**Status:** complete · Phase 1 and Phase 2 landed 2026-11-12
 **Written:** 2026-11-10
 **Companion:** the consumer-b friction entry of 2026-11-10, Backend #227, the only one since
 `at-commit-gates-plan.md`. consumer-a's log has had no new entry since 2026-10-20.
@@ -54,7 +54,7 @@ Two holes, one on each side:
 - **No awake-time clock.** Whether Bun's monotonic clock stops in sleep on macOS would have to be
   proven per version. The process table answers the question that is actually asked.
 
-## Phase 1 — the session claims its slice before anything slow
+## Phase 1 — the session claims its slice before anything slow (bb73fa2)
 
 - [x] 1a. `slice-session.sh`: the guard (`:204-221`) becomes the claim (`claim_slice`). Write
   `.slice-live` with `set -C`. If the file is there, its pid is a live `slice-session.sh` with this
@@ -78,19 +78,33 @@ Two holes, one on each side:
 
 ## Phase 2 — the dispatcher does not take a sleeping start for a failed one
 
-- [ ] 2a. `startingSession(n)`: is a `slice-session.sh` with `n` on its command line running? One
+- [x] 2a. `startingSession(n)`: is a `slice-session.sh` with `n` on its command line running? One
   `ps -ax -ww -o pid=,command=` per round, read with the same words as `isSessionOf`
-  (`slice-run.ts:1194`).
-- [ ] 2b. `occupied(n)` (`:1427`) is also true while one is running. The "never came up" line
-  (`:7283`) leaves out such a ticket and keeps its `launchedAt`.
-- [ ] 2c. Tests: a ticket whose window has passed, with a `slice-session.sh` for it running and no
-  marker, is not launched again and not reported as never come up; with none running, it is
-  relaunched as today.
+  (`slice-run.ts:1194`, now shared as `runsSliceSession`). The process must also work in this
+  repo's main checkout or in the ticket's worktree (`lsof`, `/proc` on Linux), only asked of the
+  processes that match: both consumers run on one Mac, and their ticket numbers overlap. When `ps`
+  or the directory cannot be read, the answer is no and the window decides, as before; since
+  Phase 1 a wrong no costs only a tab that is refused.
+- [x] 2b. `occupied(n)` (`:1427`) is also true while one is running. The "never came up" line
+  (`:7283`) leaves out such a ticket and keeps its `launchedAt`; both follow from `occupied`, since
+  `idleWorktrees` asks it.
+- [x] 2c. Tests (`sliceRun.test.ts`, "a start the Mac slept on"; the fixture has a stand-in
+  `slice-session.sh` that never claims, `asleepSession` and `launch: "asleep"`): a launched ticket
+  whose window has passed, with its `slice-session.sh` running and no marker, is not launched
+  again; once that process is gone it is, as today. One started by hand in the main checkout
+  keeps the ticket from starting; one for the same number in another checkout does not.
+
+  In this test a relaunch happens at the top of the round in which the window ran out, before the
+  "never came up" line is reached. That line prints only for a ticket that is not started again
+  in the same round (no free slot, held for disk), so it is not what the tests check.
 
 ## Unobserved, once built
 
 Tested with a held tracker call and fake processes. On consumer-b's next run on battery: does a
 DarkWake start still end in one session? Does a refused second tab say clearly why it exits?
+Does `lsof` answer quickly enough on a busy machine? It is asked only of processes that already
+match the ticket. A start stuck before its claim stays "running" with no quiet note, because
+`noteQuiet` reads the marker. Nothing has been seen to stick there while awake.
 
 ## Order and cost
 
@@ -109,5 +123,5 @@ spares the second tab and the wrong "never came up" line. Both small. One commit
 
 ## What the consumer does itself
 
-- consumer-b, consumer-a: pull or bump and run `azelf init` once Phase 1 has landed. Phase 2 needs
-  the dispatcher restarted.
+- consumer-b, consumer-a: pull or bump and run `azelf init`. A dispatcher that is running has to be
+  restarted for Phase 2.
