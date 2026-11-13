@@ -516,6 +516,8 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/session-commit.sh -y -m "message" path/to/file   # commit, explicit paths; then the atCommit gates, as a warning
 ./scripts/session-commit.sh -y -F message.txt path/to/file # the message from a file (-F - reads stdin)
 ./scripts/session-commit.sh --push                         # push what is committed: fetch, fast-forward only
+./scripts/session-commit.sh --amend -y path/to/docs.md      # into the last commit, message kept (slice worktree, not yet handed in or pushed)
+./scripts/session-commit.sh --amend -y -m "message"        # only the last commit's message
 ./scripts/slice-done.sh                                    # mark ready to land — the act that lands and pushes (you, or the session under --auto)
 ./scripts/slice-finished.sh -m "<report>"                  # the session's turn is over (no --auto): the dispatcher shows the report; lands nothing
 ./scripts/slice-finished.sh --stuck -m "<what is in the way>"  # the same, for red gates or a held lock

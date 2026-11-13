@@ -425,3 +425,160 @@ describe("session-commit.sh and atCommit gates", () => {
     expect(r.out).toContain("gates[0] (`ci`): atCommit and landOnly");
   });
 });
+
+/**
+ * `--amend` folds docs into the last commit, or fixes its message — in a slice
+ * worktree only, and only on a commit nobody else has. consumer-b's Backend
+ * #233: behaviour and docs belong in one commit, and without `--amend` the
+ * docs went in as a second one and a wrong message stayed wrong.
+ */
+describe("session-commit.sh --amend", () => {
+  let c: Consumer;
+  let wt: string;
+  const amend = (args: string) =>
+    shResult(wt, `./scripts/session-commit.sh --amend -y ${args}`);
+  const files = (rev = "HEAD") =>
+    git(wt, "show", "--name-only", "--format=", rev).split("\n").sort();
+  const subject = () => git(wt, "log", "-1", "--format=%s");
+  const count = () => git(wt, "rev-list", "--count", "main..HEAD");
+
+  /** A slice worktree with one commit of its own: code.ts. */
+  const slice = (opts: Parameters<typeof makeConsumer>[0] = {}) => {
+    c = makeConsumer({ worktrees: [40], ...opts });
+    wt = c.wt(40);
+    writeFileSync(join(wt, ".slice-ticket.md"), "# 40\n");
+    writeFileSync(join(wt, "code.ts"), "code\n");
+    git(wt, "add", "code.ts");
+    git(wt, "commit", "-qm", "feat: the code");
+  };
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  it("adds a named path to the last commit and keeps its message and changes", () => {
+    slice();
+    const before = git(wt, "rev-parse", "--short", "HEAD");
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+
+    const r = amend("docs.md");
+
+    expect(r.ok).toBe(true);
+    expect(r.out).toMatch(
+      new RegExp(`✓ amended: ${before} → [0-9a-f]+ feat: the code`),
+    );
+    expect(subject()).toBe("feat: the code");
+    expect(files()).toEqual(["code.ts", "docs.md"]);
+    expect(count()).toBe("1");
+  });
+
+  it("with -m and no path changes only the message, and leaves a stray staged file out and staged", () => {
+    slice();
+    writeFileSync(join(wt, "stray.txt"), "stray\n");
+    git(wt, "add", "stray.txt");
+
+    const r = amend('-m "feat: the code, counted right"');
+
+    expect(r.ok).toBe(true);
+    expect(r.out).toContain("✓ amended:");
+    expect(subject()).toBe("feat: the code, counted right");
+    expect(files()).toEqual(["code.ts"]);
+    expect(git(wt, "diff", "--cached", "--name-only")).toBe("stray.txt");
+    expect(count()).toBe("1");
+  });
+
+  it("with -m and a path changes both", () => {
+    slice();
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+
+    const r = amend('-m "feat: the code and its docs" docs.md');
+
+    expect(r.ok).toBe(true);
+    expect(subject()).toBe("feat: the code and its docs");
+    expect(files()).toEqual(["code.ts", "docs.md"]);
+  });
+
+  it("wants paths or a message", () => {
+    slice();
+    const r = amend("");
+    expect(r.code).toBe(64);
+    expect(r.out).toContain("--amend needs paths to add to the last commit");
+  });
+
+  it("is a usage error together with --push", () => {
+    slice();
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+    const r = amend("--push docs.md");
+    expect(r.code).toBe(64);
+    expect(r.out).toContain("--amend and --push together");
+    expect(files()).toEqual(["code.ts"]);
+  });
+
+  const refused = (r: ReturnType<typeof amend>, why: string) => {
+    expect(r.ok).toBe(false);
+    expect(r.out).toContain("--amend refused");
+    expect(r.out).toContain(why);
+    expect(r.out).toContain("Nothing was staged.");
+    expect(git(wt, "diff", "--cached", "--name-only")).toBe("");
+  };
+
+  it("is refused outside a slice worktree", () => {
+    slice();
+    wt = c.main;
+    writeFileSync(join(wt, "x.txt"), "x\n");
+    git(wt, "add", "x.txt");
+    git(wt, "commit", "-qm", "feat: someone's");
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+    refused(amend("docs.md"), "this is not a slice worktree");
+    expect(git(wt, "log", "-1", "--format=%s")).toBe("feat: someone's");
+  });
+
+  it("is refused once the slice has handed itself in", () => {
+    for (const marker of [".slice-ready-to-land", ".slice-finished"]) {
+      slice();
+      writeFileSync(join(wt, marker), "");
+      writeFileSync(join(wt, "docs.md"), "docs\n");
+      refused(amend("docs.md"), `this slice has handed itself in (${marker})`);
+      expect(files()).toEqual(["code.ts"]);
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
+
+  it("is refused on a commit that is on the base branch", () => {
+    c = makeConsumer({ worktrees: [40] });
+    wt = c.wt(40);
+    writeFileSync(join(wt, ".slice-ticket.md"), "# 40\n");
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+    refused(amend("docs.md"), "the last commit is on main");
+  });
+
+  it("is refused on a commit a remote branch has", () => {
+    slice({ remote: true });
+    git(wt, "push", "-q", "origin", "HEAD:refs/heads/ticket/40");
+    git(wt, "fetch", "-q", "origin");
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+    refused(
+      amend("docs.md"),
+      "the last commit is already pushed (origin/ticket/40)",
+    );
+  });
+
+  it("is refused on a merge", () => {
+    slice();
+    git(c.main, "commit", "-q", "--allow-empty", "-m", "chore: on main");
+    git(wt, "merge", "-q", "--no-ff", "-m", "merge main", "main");
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+    refused(amend("docs.md"), "the last commit is a merge");
+  });
+
+  it("runs the atCommit gates after an amend", () => {
+    const D = 'd="$(git rev-parse --path-format=absolute --git-common-dir)"';
+    slice({
+      gate: ["bash", "-c", `${D}; touch "$d/ran"`],
+      gateAtCommit: true,
+    });
+    writeFileSync(join(wt, "docs.md"), "docs\n");
+
+    const r = amend("docs.md");
+
+    expect(r.ok).toBe(true);
+    expect(existsSync(join(c.main, ".git", "ran"))).toBe(true);
+  });
+});

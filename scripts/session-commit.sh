@@ -6,6 +6,8 @@
 #   ./scripts/session-commit.sh -m "message" --push -y path/one.ts
 #   ./scripts/session-commit.sh -F message.txt -y path/one.ts
 #   ./scripts/session-commit.sh --push          # push what is already committed
+#   ./scripts/session-commit.sh --amend -y path/docs.md   # into the last commit
+#   ./scripts/session-commit.sh --amend -y -m "better message"
 #
 # WHY THIS EXISTS
 # ---------------
@@ -25,6 +27,13 @@
 # has looked" is the usual order in a main session, and without this it ended
 # in a bare `git push` that skipped all three.
 #
+# `--amend` folds named paths into the last commit, or rewrites its message,
+# and only in a slice worktree, on a commit nobody else has. consumer-b's rule
+# is behaviour and docs in one commit, and without it the docs written after
+# the code went in as a second commit, and a wrong message stayed wrong
+# (Backend #233). In the shared main checkout another session may have
+# committed between yours and the amend, and `--amend` would rewrite theirs.
+#
 # This does not replace judgement about which files belong to your task —
 # it just makes it impossible to stage more than you named.
 
@@ -38,13 +47,17 @@ message_file=""
 paths=()
 auto_yes=false
 do_push=false
+do_amend=false
 
 usage() {
   echo "usage: ${AZELF_INVOKED_AS:-$0} (-m <message> | -F <file>) [--push] [-y] <path> [<path> ...]" >&2
   echo "       ${AZELF_INVOKED_AS:-$0} --push [-y]" >&2
+  echo "       ${AZELF_INVOKED_AS:-$0} --amend (-m <message> | -F <file>) [-y] [<path> ...]" >&2
+  echo "       ${AZELF_INVOKED_AS:-$0} --amend [-y] <path> [<path> ...]" >&2
   echo "       every path must be named explicitly — no ., no -A" >&2
   echo "       -F - reads the message from stdin, and needs -y" >&2
   echo "       --push alone pushes the commits that already exist" >&2
+  echo "       --amend changes the last commit, in a slice worktree, before it is handed in" >&2
   exit 64
 }
 
@@ -54,6 +67,7 @@ while [[ $# -gt 0 ]]; do
     -F|--file) [[ $# -ge 2 ]] || usage; message_file="$2"; shift 2 ;;
     -y|--yes) auto_yes=true; shift ;;
     --push) do_push=true; shift ;;
+    --amend) do_amend=true; shift ;;
     -h|--help) usage ;;
     --) shift; paths+=("$@"); break ;;
     -*) echo "unknown option: $1" >&2; usage ;;
@@ -66,14 +80,29 @@ if [[ -n "$message" && -n "$message_file" ]]; then
   usage
 fi
 
+if $do_amend && $do_push; then
+  echo "error: --amend and --push together — an amended commit is one nobody has; push it later." >&2
+  usage
+fi
+
 # `--push` and nothing else: no commit is made, the existing ones are pushed.
 push_only=false
 if $do_push && [[ -z "$message" && -z "$message_file" && ${#paths[@]} -eq 0 ]]; then
   push_only=true
 fi
 
-if ! $push_only; then
-  [[ -n "$message" || -n "$message_file" ]] || {
+# `--amend` with a message needs no paths (it rewrites the message), and with
+# paths needs no message (it keeps the old one). With neither it has nothing
+# to do.
+has_message=false
+[[ -n "$message" || -n "$message_file" ]] && has_message=true
+if $do_amend; then
+  if ! $has_message && [[ ${#paths[@]} -eq 0 ]]; then
+    echo "error: --amend needs paths to add to the last commit, or -m/-F for its new message." >&2
+    usage
+  fi
+elif ! $push_only; then
+  $has_message || {
     echo "error: -m/--message or -F/--file is required" >&2
     usage
   }
@@ -83,16 +112,17 @@ if ! $push_only; then
     echo "       pass the exact files/dirs this task touched." >&2
     exit 1
   fi
-
-  for p in "${paths[@]}"; do
-    case "$p" in
-      "."|".."|"-A"|"--all"|"*")
-        echo "error: '$p' looks like a bulk-stage, not a named path. Refusing." >&2
-        exit 1
-        ;;
-    esac
-  done
 fi
+
+# `${paths[@]+…}`: macOS's bash 3.2 calls an empty array unbound under `set -u`.
+for p in ${paths[@]+"${paths[@]}"}; do
+  case "$p" in
+    "."|".."|"-A"|"--all"|"*")
+      echo "error: '$p' looks like a bulk-stage, not a named path. Refusing." >&2
+      exit 1
+      ;;
+  esac
+done
 
 # The message file, checked and read here: before the lock, before anything is
 # staged, and before the `cd` to the repo root below changes what a relative
@@ -169,6 +199,33 @@ cd "$(cd "$_slice_root" && pwd -P)"
 # `set -u` reading the length of an array that hasn't been declared yet is an
 # unbound-variable error, not zero.
 source "scripts/slice-config.sh"
+
+# ─── Amend guards ───────────────────────────────────────────────────────
+# Before the lock and before anything is staged, like every refusal above.
+# Each one is a commit someone else may already have: the dispatcher gating
+# the SHA a slice handed in, a push, the base branch, a merge from it.
+refuse_amend() {
+  echo "error: --amend refused — $1" >&2
+  echo "       Nothing was staged. Make a new commit instead." >&2
+  exit 1
+}
+if $do_amend; then
+  [[ -f .slice-ticket.md ]] ||
+    refuse_amend "this is not a slice worktree (no .slice-ticket.md). In a shared checkout the last commit may be another session's."
+  for marker in .slice-ready-to-land .slice-finished; do
+    [[ ! -e "$marker" ]] ||
+      refuse_amend "this slice has handed itself in ($marker), and the dispatcher may be gating that very commit."
+  done
+  [[ "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" -le 2 ]] ||
+    refuse_amend "the last commit is a merge."
+  ! git merge-base --is-ancestor HEAD "$SLICE_BASE_BRANCH" 2>/dev/null ||
+    refuse_amend "the last commit is on $SLICE_BASE_BRANCH, not this slice's own."
+  on_remote=$(git branch -r --contains HEAD 2>/dev/null | sed 's/^ *//' | head -3 | tr '\n' ' ')
+  [[ -z "$on_remote" ]] ||
+    refuse_amend "the last commit is already pushed (${on_remote% })."
+fi
+amend_from=""
+$do_amend && amend_from=$(git log -1 --format='%h %s')
 
 # ─── Lock ────────────────────────────────────────────────────────────────
 # mkdir is atomic even across processes/sessions, so it doubles as a mutex.
@@ -263,6 +320,9 @@ if $push_only; then
 fi
 
 # ─── Stage + review ─────────────────────────────────────────────────────
+# An amend with a message and no paths stages nothing: everything from here to
+# the question is about paths, so it is skipped.
+if [[ ${#paths[@]} -gt 0 ]]; then
 echo "── working tree status ──────────────────────────"
 git status --short
 echo "──────────────────────────────────────────────────"
@@ -346,26 +406,51 @@ if [[ ${#SLICE_EXCLUSIVE_LOCK_PATHS[@]} -gt 0 ]]; then
     fi
   fi
 fi
+fi # paths given
 
 # The terminal was checked at the top; this is only the question. An abort
 # unstages what this run staged, as the DB-lock refusal above does, so the
 # index is left as it was found (give or take a `git rm` it staged earlier,
 # which comes back as an unstaged deletion).
 if ! $auto_yes; then
-  read -r -p "Commit the ${#paths[@]} path(s) above? [y/N] " reply
+  if ! $do_amend; then
+    question="Commit the ${#paths[@]} path(s) above?"
+  elif [[ ${#paths[@]} -gt 0 ]]; then
+    question="Amend $amend_from with the ${#paths[@]} path(s) above?"
+  else
+    question="Reword $amend_from?"
+  fi
+  read -r -p "$question [y/N] " reply
   if [[ ! "$reply" =~ ^[Yy]$ ]]; then
-    git reset -q -- "${paths[@]}" || true
+    [[ ${#paths[@]} -eq 0 ]] || git reset -q -- "${paths[@]}" || true
     echo "Aborted — nothing committed, and nothing left staged."
     exit 1
   fi
 fi
 
+# The message: -F, -m, or for an amend without one, the old message.
 if [[ -n "$message_file" ]]; then
-  git commit -F "$message_file" -- "${paths[@]}"
+  message_args=(-F "$message_file")
+elif [[ -n "$message" ]]; then
+  message_args=(-m "$message")
 else
-  git commit -m "$message" -- "${paths[@]}"
+  message_args=(--no-edit)
 fi
-echo "✓ committed: $(git log -1 --format='%h %s')"
+if ! $do_amend; then
+  git commit "${message_args[@]}" -- "${paths[@]}"
+  echo "✓ committed: $(git log -1 --format='%h %s')"
+elif [[ ${#paths[@]} -gt 0 ]]; then
+  # A pathspec commits those paths onto the last commit's tree: what it had
+  # stays, and a stray staged entry does not ride along.
+  git commit -q --amend "${message_args[@]}" -- "${paths[@]}"
+else
+  # `--only` with no paths: the tree stays the last commit's, whatever the
+  # index holds. Only the message changes.
+  git commit -q --amend --only "${message_args[@]}"
+fi
+if $do_amend; then
+  echo "✓ amended: ${amend_from%% *} → $(git log -1 --format='%h %s')"
+fi
 
 # ─── Optional push ──────────────────────────────────────────────────────
 if $do_push; then

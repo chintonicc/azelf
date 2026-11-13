@@ -55,6 +55,13 @@ Never `git add -A` or `git add .`. Other worktrees share this repo's git dir, an
 pathspec-less commit is how another session's in-flight work gets committed under
 your message.
 
+To change your last commit, use `--amend`: `--amend -y <paths>` adds the docs or the
+fix that belong with it and keeps its message, and `--amend -y -m "..."` corrects a
+wrong message and changes nothing else. Only the last commit, and only until you
+hand the slice in: after `slice-done.sh` or `slice-finished.sh` it is refused, since
+the dispatcher may be gating that very commit. An older commit stays as it is; fix
+it in a new one.
+
 ## 5. Run the gates yourself before declaring done
 
 The dispatcher will re-run them, so the only thing you gain by guessing is a failed
