@@ -26,6 +26,7 @@ import {
   runDispatcher,
   sh,
   shResult,
+  startAzelf,
   startDispatcher,
   startScript,
 } from "./fixture";
@@ -848,6 +849,121 @@ describe("a session whose turn is over", () => {
       "To pick the run up again:\n\n    ./scripts/azelf run -y --interval 30 40",
     );
   }, 60_000);
+});
+
+/**
+ * `azelf run` passes a stop signal on to the dispatcher it started. It used
+ * to block in spawnSync: a SIGINT sent to its pid alone ended the wrapper,
+ * and slice-run.ts ran on under init, holding its claims, so consumer-b's
+ * restart of its backend dispatcher was refused as "already being dispatched
+ * by another run".
+ */
+describe("the wrapper passes signals on", () => {
+  const waiting = () => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sessions.push(fakeSession(fx, 40));
+    sh(fx.wt(40), "./scripts/slice-finished.sh -m 'Built a.txt.'");
+    return fx;
+  };
+
+  for (const [sig, code] of [
+    ["SIGINT", 130],
+    ["SIGTERM", 143],
+  ] as const) {
+    it(`stops the dispatcher on a ${sig} to the wrapper alone, which exits with its code`, async () => {
+      c = waiting();
+      d = startAzelf(c, ["run", "-y", "--interval", "30", "40"]);
+      await d.until("1 waiting for you");
+      expect(existsSync(claimOf(c, "40"))).toBe(true);
+
+      process.kill(d.pid, sig);
+      expect(await d.exited).toBe(code);
+
+      expect(d.output()).toContain(
+        `${sig} — stopping after this round. Sessions keep running in their tabs.`,
+      );
+      // The normal ending, and the claim released with it: the wrapper
+      // exits only once the dispatcher has.
+      expect(d.output()).toContain("── waiting for you (1)");
+      expect(existsSync(claimOf(c, "40"))).toBe(false);
+    }, 60_000);
+  }
+
+  /**
+   * Ctrl-C signals the whole foreground group: the dispatcher gets the
+   * terminal's SIGINT, and the wrapper's forwarded copy a moment later. A
+   * second signal quits at once, with no ending and no resume command, and
+   * the copy must not be taken for one. The gate here ignores SIGINT and goes
+   * on, as a long suite that traps it would, so both copies arrive while the
+   * dispatcher is busy.
+   */
+  it("stops after the round under Ctrl-C, though the dispatcher gets SIGINT twice", async () => {
+    const started = join(tmpdir(), `azelf-gate-${process.pid}-${Date.now()}`);
+    c = makeConsumer({
+      worktrees: [40],
+      remote: true,
+      agent: ["true"],
+      gate: ["bash", "-c", `trap '' INT; touch ${started}; sleep 2`],
+    });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    d = startAzelf(c, ["run", "-y", "--no-review", "--interval", "30", "40"], {
+      group: true,
+    });
+    const deadline = Date.now() + 20_000;
+    while (!existsSync(started) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    rmSync(started, { force: true });
+
+    process.kill(-d.pid, "SIGINT");
+    expect(await d.exited).toBe(130);
+
+    expect(d.output()).toContain("SIGINT — stopping after this round.");
+    expect(d.output()).toContain("To pick the run up again:");
+    expect(existsSync(claimOf(c, "40"))).toBe(false);
+  }, 60_000);
+
+  /**
+   * `provision` and `push-main` run bash: a stand-in on PATH that records
+   * its pid and sleeps, so the signal finds it still running.
+   */
+  for (const args of [["provision", "40"], ["push-main"]]) {
+    it(`leaves no child behind for azelf ${args[0]} under SIGTERM`, async () => {
+      c = makeConsumer({});
+      const bin = join(c.root, "fake-bin");
+      mkdirSync(bin);
+      const pidFile = join(c.root, "child.pid");
+      writeFileSync(
+        join(bin, "bash"),
+        `#!/bin/sh\necho $$ > "${pidFile}"\nexec sleep 30\n`,
+      );
+      chmodSync(join(bin, "bash"), 0o755);
+
+      d = startAzelf(c, args, {
+        env: { PATH: `${bin}:${process.env.PATH}` },
+      });
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(pidFile) && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      const child = Number(readFileSync(pidFile, "utf8").trim());
+
+      process.kill(d.pid, "SIGTERM");
+      expect(await d.exited).toBe(143);
+      const alive = (() => {
+        try {
+          process.kill(child, 0);
+          return true;
+        } catch {
+          return false;
+        }
+      })();
+      expect(alive).toBe(false);
+    }, 30_000);
+  }
 });
 
 /**

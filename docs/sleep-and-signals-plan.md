@@ -58,11 +58,14 @@ The cause is `bin/azelf.ts:136-141`. The wrapper runs the dispatcher with `spawn
   inherited as now. It forwards SIGINT, SIGTERM and SIGHUP to the child, and does not die of them
   itself. It exits with the child's code, or 128 + the signal number when the child died of one.
   This is one helper for all three spawns.
-- **A forwarded copy is not a second signal.** Ctrl-C reaches both the wrapper and the dispatcher,
-  so a forwarded SIGINT arrives right behind the terminal's own. Today a second signal "quits at
-  once" (`stopSignalArrived`, `slice-run.ts:340`). The rule becomes: a second signal of the same
-  kind within 1 s of the first is the same one. A person who means "now" presses again later than
-  that.
+- **A forwarded copy is not a second signal, and needs no rule.** Ctrl-C reaches both the wrapper
+  and the dispatcher, so a forwarded SIGINT arrives right behind the terminal's own, and a second
+  signal "quits at once" (`stopSignalArrived`, `slice-run.ts:340`). The plan was a 1 s window. Built
+  and tested, it changed nothing. The dispatcher handles signals only in its sleep between rounds
+  (its one `await`). Once the first has woken it, everything to the exit is synchronous, so the copy
+  is never handled. Two copies pending during a gate are one pending signal. The window was taken
+  out again. The test that Ctrl-C through the wrapper stops after the round stays, and it catches
+  this if a round ever awaits.
 - **The run says it is on battery.** At the start, and once each time the power source changes to
   battery, the run prints one line. It says that on battery a closed lid puts the Mac to sleep
   whatever `caffeinate` holds, that the run pauses until the Mac wakes, and to keep the lid open or
@@ -83,19 +86,19 @@ The cause is `bin/azelf.ts:136-141`. The wrapper runs the dispatcher with `spawn
 
 ## Phase 1 — the wrapper passes signals on
 
-- [ ] 1a. `bin/azelf.ts`: one `runChild(cmd, args, env?)`, an async `spawn` with `stdio: "inherit"`.
+- [x] 1a. `bin/azelf.ts`: one `runChild(cmd, args, env?)`, an async `spawn` with `stdio: "inherit"`.
   It forwards SIGINT, SIGTERM and SIGHUP to the child, and exits with the child's code or 128 +
   signal. `run`/`retry`/`relaunch`/`hold`/`release`/`gates`, `provision` and `push-main` use it.
   The comment says why: the backend restart that found an orphaned dispatcher holding its claim.
-- [ ] 1b. `slice-run.ts`, `stopSignalArrived`: a second signal of the same kind within 1 s of the
-  first is the same signal, so a Ctrl-C (terminal plus forwarded copy) still stops after the round.
-  The `noteStopSignal` comment (`:306-322`) says so.
-- [ ] 1c. Tests:
+- [x] 1b. ~~`stopSignalArrived`: a same-kind signal within 1 s is the same one.~~ Not needed, see
+  Decisions. The reason is in `runChild`'s comment instead.
+- [x] 1c. Tests:
   - SIGINT to the wrapper's pid alone makes the dispatcher print "SIGINT — stopping after this
     round", leave through the normal ending, and release its claim, and the wrapper exits with its
     code.
   - SIGTERM, the same way.
-  - Two SIGINTs within 1 s stop after the round; a third, later, quits at once.
+  - Ctrl-C (SIGINT to the wrapper's process group) during a gate that ignores it stops after the
+    round, with the ending and the claim released.
   - `provision`/`push-main` under a signal leave no child behind.
 
 ## Phase 2 — the run says when the Mac sleeps

@@ -567,6 +567,36 @@ export function startDispatcher(
 }
 
 /**
+ * `azelf <args…>` left running in the background, through the wrapper as a
+ * person types it, from the main checkout. `pid` is the wrapper's: a signal
+ * sent there reaches the dispatcher only if the wrapper passes it on.
+ */
+export function startAzelf(
+  c: Consumer,
+  args: string[],
+  opts: {
+    /** Added to its environment. */
+    env?: Record<string, string>;
+    /**
+     * In a process group of its own, as a terminal's foreground job: a
+     * signal to `-pid` then reaches the wrapper and the dispatcher, as
+     * Ctrl-C does.
+     */
+    group?: boolean;
+  } = {},
+): Dispatcher {
+  return watch(
+    spawn("bun", [join(AZELF, "bin", "azelf.ts"), ...args], {
+      cwd: c.main,
+      stdio: ["ignore", "pipe", "pipe"],
+      env: dispatcherEnv(c, opts.env),
+      detached: opts.group ?? false,
+    }),
+    "azelf",
+  );
+}
+
+/**
  * A bash script left running in the background, with the same handle as a
  * dispatcher: for two scripts that have to overlap, like two lands.
  */

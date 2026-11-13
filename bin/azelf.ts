@@ -19,7 +19,8 @@
  * about what they are, and the extra ~30ms is noise next to a `bun install`.
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
+import { constants } from "node:os";
 import { hookBlock, init, packageRoot } from "../scripts/slice-init";
 import { USAGE, wantsHelp } from "../scripts/slice-run-usage";
 
@@ -36,6 +37,53 @@ function holdFlags(rest: string[]): boolean {
     seen.add(f);
   }
   return true;
+}
+
+/** The signals a person or a script stops a command with. */
+const FORWARDED = ["SIGINT", "SIGTERM", "SIGHUP"] as const;
+
+/**
+ * Run the command that does the work, pass the stop signals on to it, and
+ * exit as it did: with its code, or 128 + the signal it died of.
+ *
+ * WHY NOT `spawnSync`
+ * -------------------
+ * It was, for every verb that spawns. While `spawnSync` blocks, no handler in
+ * this process can run, and with none installed a signal ends this process
+ * by its default and leaves the child where it was. Ctrl-C hid that: the
+ * terminal sends it to the whole foreground group, so the child got its own
+ * copy. A signal sent to this pid alone did not. consumer-b's backend session
+ * restarted its dispatcher with a SIGINT to `azelf run`'s pid: the wrapper
+ * died, slice-run.ts ran on under init, still holding its tickets' claims,
+ * and the restart was refused with "already being dispatched by another
+ * run" until a second SIGINT went to slice-run.ts itself.
+ *
+ * So this process stays alive until the child has gone, and only forwards.
+ * Under Ctrl-C the child gets the signal twice, the terminal's copy and this
+ * one, a moment apart. slice-run.ts still stops after the round, not at
+ * once: it handles signals only in its sleep between rounds, and once the
+ * first has woken it, everything to the exit is synchronous, so the copy is
+ * never handled (a second copy pending during a gate is the same pending
+ * signal). Its test is "stops after the round under Ctrl-C". A child that has
+ * already exited makes `kill` a no-op.
+ */
+function runChild(
+  cmd: string,
+  args: string[],
+  env: NodeJS.ProcessEnv = process.env,
+): void {
+  const child = spawn(cmd, args, { stdio: "inherit", env });
+  const forward = (sig: NodeJS.Signals) => () => {
+    child.kill(sig);
+  };
+  for (const sig of FORWARDED) process.on(sig, forward(sig));
+  child.on("error", (e) => {
+    console.error(`azelf: could not start ${cmd}: ${e.message}`);
+    process.exit(1);
+  });
+  child.on("exit", (code, signal) => {
+    process.exit(code ?? (signal ? 128 + (constants.signals[signal] ?? 0) : 1));
+  });
 }
 
 const usage = (asked = false): never => {
@@ -133,39 +181,25 @@ if (verb === "init") {
       : verb === "gates"
         ? ["--gates", "--no-lock", ...argv.slice(1)]
         : [`--${verb}`, id as string, ...rest];
-  const proc = spawnSync(
-    "bun",
-    [`${packageRoot}/scripts/slice-run.ts`, ...args],
-    { stdio: "inherit" },
-  );
-  process.exit(proc.status ?? 1);
+  runChild("bun", [`${packageRoot}/scripts/slice-run.ts`, ...args]);
 } else if (verb === "provision") {
   if (argv.length !== 2) usage();
-  const proc = spawnSync(
+  runChild(
     "bash",
     [
       `${packageRoot}/scripts/slice-session.sh`,
       argv[1] as string,
       "--provision",
     ],
-    {
-      stdio: "inherit",
-      env: { ...process.env, AZELF_INVOKED_AS: "./scripts/slice-session.sh" },
-    },
+    { ...process.env, AZELF_INVOKED_AS: "./scripts/slice-session.sh" },
   );
-  process.exit(proc.status ?? 1);
 } else if (verb === "push-main") {
   // The verb is the whole instruction: the base branch is the config's.
   if (argv.length !== 1) usage();
-  const proc = spawnSync(
-    "bash",
-    [`${packageRoot}/scripts/slice-push-main.sh`],
-    {
-      stdio: "inherit",
-      env: { ...process.env, AZELF_INVOKED_AS: "azelf push-main" },
-    },
-  );
-  process.exit(proc.status ?? 1);
+  runChild("bash", [`${packageRoot}/scripts/slice-push-main.sh`], {
+    ...process.env,
+    AZELF_INVOKED_AS: "azelf push-main",
+  });
 } else if (verb === "hook") {
   console.log(hookBlock());
 } else {
