@@ -19,6 +19,8 @@ import {
   AZELF,
   type Consumer,
   type Dispatcher,
+  PMSET_AC,
+  PMSET_BATTERY,
   asleepSession,
   fakeSession,
   git,
@@ -1099,6 +1101,111 @@ describe("keepAwake", () => {
       "keeping this Mac awake",
     );
   });
+});
+
+/**
+ * On battery a closed lid sleeps the Mac whatever caffeinate holds, and a
+ * sleeping Mac pauses the run. On consumer-b's #227 evening both happened and
+ * the run said neither. The power source comes from a stand-in `pmset`
+ * (fixture.ts) reading the file FAKE_PMSET names.
+ */
+describe("the run says when the Mac sleeps", () => {
+  const BATTERY_LINE = "on battery: closing the lid puts this Mac to sleep";
+  const ASLEEP = "this Mac was asleep";
+  const count = (part: string) => (d?.output() ?? "").split(part).length - 1;
+  const rounds = () => (d?.output().match(/\[round \d+\]/g) ?? []).length;
+  const waitFor = async (what: string, ok: () => boolean, ms = 20_000) => {
+    const end = Date.now() + ms;
+    while (!ok()) {
+      if (Date.now() > end) {
+        throw new Error(`timed out waiting for ${what}:\n${d?.output()}`);
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  };
+  /** Two more round lines than now: the state has been read again since. */
+  const twoMoreRounds = () => {
+    const now = rounds();
+    return waitFor("two more rounds", () => rounds() >= now + 2);
+  };
+  const running = (power: string) => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    sessions.push(fakeSession(c, 40));
+    const file = join(c.root, "power");
+    writeFileSync(file, power);
+    return file;
+  };
+
+  it.runIf(process.platform === "darwin")(
+    "says it is on battery at the start, once",
+    async () => {
+      const power = running(PMSET_BATTERY);
+      d = startDispatcher(c!, ["-y", "--interval", "1", "40"], {
+        env: { FAKE_PMSET: power },
+      });
+      await d.until(/\[round 3\]/);
+      expect(count(BATTERY_LINE)).toBe(1);
+      expect(d.output()).toContain(
+        "the run and its sessions pause until it wakes. Keep the lid open, or plug it in.",
+      );
+    },
+    60_000,
+  );
+
+  it.runIf(process.platform === "darwin")(
+    "says nothing on mains power, and says it once at each change to battery",
+    async () => {
+      const power = running(PMSET_AC);
+      d = startDispatcher(c!, ["-y", "--interval", "1", "40"], {
+        env: { FAKE_PMSET: power },
+      });
+      await d.until(/\[round 2\]/);
+      expect(count(BATTERY_LINE)).toBe(0);
+
+      writeFileSync(power, PMSET_BATTERY);
+      await waitFor("the battery line", () => count(BATTERY_LINE) === 1);
+      await twoMoreRounds();
+      expect(count(BATTERY_LINE)).toBe(1);
+
+      // Plugged in, then out again: a new change to battery, said again.
+      writeFileSync(power, PMSET_AC);
+      await twoMoreRounds();
+      writeFileSync(power, PMSET_BATTERY);
+      await waitFor("the second battery line", () => count(BATTERY_LINE) === 2);
+    },
+    60_000,
+  );
+
+  it("is not said for --once", () => {
+    const power = running(PMSET_BATTERY);
+    expect(
+      runDispatcher(c!, ["-y", "--once", "40"], { env: { FAKE_PMSET: power } })
+        .out,
+    ).not.toContain(BATTERY_LINE);
+  });
+
+  /**
+   * A stopped process stands in for a sleeping Mac: either way the wait
+   * between two rounds takes longer by the wall clock than --interval.
+   */
+  it("says the run was paused when a wait between rounds took far longer than the interval", async () => {
+    running(PMSET_AC);
+    d = startDispatcher(c!, ["-y", "--interval", "2", "40"], {
+      env: { SLICE_SLEEP_GAP_SECONDS: "1" },
+    });
+    await d.until(/\[round 2\]/);
+    expect(count(ASLEEP)).toBe(0);
+
+    process.kill(d.pid, "SIGSTOP");
+    await new Promise((r) => setTimeout(r, 3000));
+    process.kill(d.pid, "SIGCONT");
+
+    await d.until(
+      /this Mac was asleep, or this run was stopped, for about \d+ s between \d\d:\d\d and \d\d:\d\d; the run was paused, and so were its sessions/,
+    );
+    await twoMoreRounds();
+    expect(count(ASLEEP)).toBe(1);
+  }, 60_000);
 });
 
 /**

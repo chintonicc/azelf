@@ -7149,6 +7149,72 @@ function keepMacAwake(): void {
 
 keepMacAwake();
 
+/**
+ * Whether this Mac runs on its battery: `pmset -g batt` says "Now drawing
+ * from 'Battery Power'". Null when that cannot be told: not macOS, no
+ * `pmset`, an answer this does not read. Through PATH, so a test can stand in.
+ */
+function onBattery(): boolean | null {
+  if (process.platform !== "darwin") return null;
+  const r = run(["pmset", "-g", "batt"], { allowFail: true });
+  if (!r.ok) return null;
+  const m = r.out.match(/Now drawing from '([^']+)'/);
+  return m ? m[1] === "Battery Power" : null;
+}
+
+/** The last answer `onBattery` gave that was not null. */
+let wasOnBattery: boolean | null = null;
+
+/**
+ * On battery a closed lid puts the Mac to sleep, whatever `caffeinate` holds:
+ * its `-s` holds only on mains power, `-i` only against idle sleep. On
+ * consumer-b the lid was closed on battery during #227's evening, the Mac
+ * only DarkWaked for hours, and the run said nothing, before or after. So
+ * say it at the start and at each change to battery, and once only: a run on
+ * battery all evening hears it once. With `keepAwake: false` too, because
+ * the lid sleeps either way. Not for `--once`, which is over in a round.
+ */
+function noteBattery(): void {
+  if (once) return;
+  const now = onBattery();
+  if (now === null) return;
+  if (now && wasOnBattery !== true) {
+    console.log(
+      "\n  on battery: closing the lid puts this Mac to sleep, caffeinate or not, and the run and its sessions pause until it wakes. Keep the lid open, or plug it in.",
+    );
+  }
+  wasOnBattery = now;
+}
+
+noteBattery();
+
+/**
+ * A wait between rounds this much longer than `--interval` by the wall clock
+ * was a sleep: the Mac's, or this process stopped. Seconds, like
+ * SLICE_HEARTBEAT_SECONDS, so a test can make it small.
+ */
+const sleepGapMs = Number(process.env.SLICE_SLEEP_GAP_SECONDS ?? 60) * 1000;
+
+/**
+ * Say that the wait from `from` to `to` held a sleep, when it did. A sleeping
+ * Mac pauses the run and every session in it, and nothing said so: on
+ * consumer-b a night of DarkWakes left a log that read as a run doing
+ * nothing. One line per wake, which for such a night is the evidence.
+ */
+function noteSleep(from: number, to: number): void {
+  const gap = to - from - intervalMs;
+  if (gap < sleepGapMs) return;
+  const about =
+    gap < 90_000
+      ? `${Math.round(gap / 1000)} s`
+      : `${Math.round(gap / 60_000)} min`;
+  console.log(
+    `\n  this Mac was asleep, or this run was stopped, for about ${about} between ${clock(
+      from,
+    )} and ${clock(to)}; the run was paused, and so were its sessions`,
+  );
+}
+
 // Around the loop, so a round that throws ends it the way the stops inside it
 // do. A plan-time error is left to throw: nothing had started.
 watchSignals(true);
@@ -7161,6 +7227,7 @@ try {
     startingAnswers.clear();
     noteAzelfChange();
     if (round > 1) {
+      noteBattery();
       const { failed, allFailed } = refreshOpenState(tickets);
       const outage = noteUnreadable(failed, allFailed);
       if (outage) {
@@ -7585,6 +7652,7 @@ try {
       break;
     }
 
+    const waitFrom = Date.now();
     await new Promise<void>((r) => {
       if (stoppedBy) return r();
       const timer = setTimeout(r, intervalMs);
@@ -7594,6 +7662,7 @@ try {
       };
     });
     wakeFromSleep = null;
+    noteSleep(waitFrom, Date.now());
   }
 } catch (e) {
   stopOnError(errorLine(e));

@@ -5,6 +5,7 @@ import {
   spawnSync,
 } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -488,6 +489,32 @@ export function asleepSession(c: Consumer, n: number, cwd: string): void {
 const DISPATCHER = join(AZELF, "scripts", "slice-run.ts");
 
 /**
+ * A `pmset` that says what `FAKE_PMSET` says, and mains power without it:
+ * the run reads `pmset -g batt` on macOS, and a test's output must not depend
+ * on whether the machine running it is plugged in. One for every test, first
+ * on the dispatcher's PATH.
+ */
+let pmsetDir: string | undefined;
+function fakePmsetDir(): string {
+  if (pmsetDir) return pmsetDir;
+  const dir = mkdtempSync(join(tmpdir(), "azelf-pmset-"));
+  writeFileSync(
+    join(dir, "pmset"),
+    `#!/bin/sh
+if [ -n "$FAKE_PMSET" ] && [ -f "$FAKE_PMSET" ]; then cat "$FAKE_PMSET"; exit 0; fi
+echo "Now drawing from 'AC Power'"
+`,
+  );
+  chmodSync(join(dir, "pmset"), 0o755);
+  pmsetDir = dir;
+  return dir;
+}
+
+/** What `pmset -g batt` prints on battery and on mains power. */
+export const PMSET_BATTERY = "Now drawing from 'Battery Power'\n";
+export const PMSET_AC = "Now drawing from 'AC Power'\n";
+
+/**
  * The dispatcher's environment: this one, with the repo root pinned to the
  * consumer so nothing inherited from the shell running the tests can point it
  * at another checkout. The round line prints every round, because tests
@@ -495,6 +522,7 @@ const DISPATCHER = join(AZELF, "scripts", "slice-run.ts");
  */
 const dispatcherEnv = (c: Consumer, env: Record<string, string> = {}) => ({
   ...process.env,
+  PATH: `${fakePmsetDir()}:${process.env.PATH ?? ""}`,
   SLICE_REPO_ROOT: c.main,
   SLICE_HEARTBEAT_SECONDS: "0",
   ...env,

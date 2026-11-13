@@ -339,7 +339,15 @@ thinking is quiet too.
 ```
 
 On macOS the run keeps the machine awake while it lasts (`caffeinate -is -w <its pid>`,
-which ends with it); `keepAwake: false` turns that off. Not for `--once`.
+which ends with it); `keepAwake: false` turns that off. Not for `--once`. That holds
+only on mains power: on battery a closed lid sleeps the Mac anyway. So the run says
+when it is on battery, at the start and at each change to it, and after a sleep it
+says how long it was paused:
+
+```
+  on battery: closing the lid puts this Mac to sleep, caffeinate or not, and the run and its sessions pause until it wakes. Keep the lid open, or plug it in.
+  this Mac was asleep, or this run was stopped, for about 47 min between 21:13 and 22:00; the run was paused, and so were its sessions
+```
 
 A tracker read that fails mid-run (a `gh` call that times out, an `EOF`, a VPN
 reconnecting) does not end the run. The ticket keeps its last state, the run says so
@@ -566,7 +574,7 @@ export default {
 | `reviewReadDirs` | `string[]?` | directories the spec reviewer may read besides the worktree, relative to the repo root or absolute; each must exist. For tickets whose facts live in another repo or a spec folder |
 | `resolverCommands` | `string[]?` | command prefixes the conflict resolver may run (`"npm test"`, `".venv/bin/python -m pytest"`); each allows every command starting with it. Left out, it runs nothing and the gates judge its work. See [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict) |
 | `minFreeDiskGb` | `number?` | free GB kept where the worktrees go; nothing new is prepped below it. Default 10, `0` is off. Two worktrees and a gate run is a good size |
-| `keepAwake` | `boolean?` | on macOS, `caffeinate -is` for the life of a run. Default on; `false` lets the Mac sleep. `-s` holds only on mains power, and a closed lid sleeps anyway |
+| `keepAwake` | `boolean?` | on macOS, `caffeinate -is` for the life of a run. Default on; `false` lets the Mac sleep. `-s` holds only on mains power, and a closed lid sleeps anyway; the run says when it is on battery |
 | `quietAfterMinutes` | `number?` | minutes a running session may show no sign of work (a changed file, a commit, a write to its Claude Code transcript) before the run counts it as quiet. Default 30, `0` is off |
 | `ports` | `{ from, size? }?` | a block of TCP ports per slice, from `from` on, `size` (10) wide. See [Ports per slice](#ports-per-slice). Left out, no slice is given ports |
 | `overlapIgnore` | `string[]?` | paths the overlap report skips; `*`, `**`, trailing `/` |

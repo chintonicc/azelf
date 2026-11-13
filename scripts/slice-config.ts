@@ -194,7 +194,9 @@ export type SliceConfig = {
    * API call died with "Your computer went to sleep mid-response", it sat at
    * its prompt with 30 files uncommitted, and the run said "1 running" for an
    * hour and a half. `-s` holds only on mains power, and a closed lid sleeps
-   * regardless.
+   * regardless. So the run says when it is on battery, at the start and at
+   * each change to it, whatever this is set to, and says how long a sleep
+   * paused it once it wakes (`noteBattery`, `noteSleep` in slice-run.ts).
    */
   keepAwake?: boolean;
   /**
