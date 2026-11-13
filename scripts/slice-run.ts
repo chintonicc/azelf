@@ -3061,6 +3061,13 @@ const LANDED_NOTE = ".slice-landed.md";
  * cheap chance to get it right before then. Written whether or not review is
  * on.
  *
+ * Each entry also says whether this slice's rebase onto the base now
+ * conflicts, as `git merge-tree` answers it for the overlap report. On
+ * consumer-b a note named the shared files and said nothing of the conflict
+ * already waiting in one of them; the session found it with its own
+ * merge-tree. Committed work only: what is uncommitted in the worktree is not
+ * in the branch git is asked about. A git that cannot answer adds nothing.
+ *
  * Only where git ignores the file (the pattern is in init's exclude block):
  * elsewhere it would be an untracked change, and a slice with one is not
  * clean and does not land.
@@ -3078,6 +3085,27 @@ function noteLanded(landed: Ticket, files: string[]): void {
       allowFail: true,
     });
     if (!ignored) continue;
+    // What git says of the rebase this slice faces at its land, asked now:
+    // the session can do it itself, knowing its own change, before it builds
+    // more on top of the conflict.
+    const head = branchHead(t.id);
+    const conflicts = head
+      ? conflictBetween(
+          { ref: baseBranch, head: range.to },
+          { ref: branchFor(t.id), head },
+        )
+      : null;
+    const at = head?.slice(0, 12);
+    let rebase = "";
+    if (conflicts && conflicts.length > 0) {
+      rebase = `\n### Rebasing now conflicts\n\nA rebase of this branch onto ${baseBranch} conflicts in:\n${conflicts
+        .map((f) => `- ${f}`)
+        .join(
+          "\n",
+        )}\n\nRebase onto ${baseBranch} in this worktree now, before anything else: resolve, commit, and run the gates again. Whatever you build on top of the conflict meets it again at the land. (Checked at ${at}, committed work only.)\n`;
+    } else if (conflicts) {
+      rebase = `\nA rebase onto ${baseBranch} goes through cleanly (checked at ${at}, committed work only).\n`;
+    }
     const path = join(wt, LANDED_NOTE);
     let before = "";
     try {
@@ -3100,9 +3128,15 @@ function noteLanded(landed: Ticket, files: string[]): void {
         .join("\n")}\n\nWhat it changed there: \`git diff ${range.from.slice(
         0,
         12,
-      )} ${range.to.slice(0, 12)} -- ${shared.join(" ")}\`\n`,
+      )} ${range.to.slice(0, 12)} -- ${shared.join(" ")}\`\n${rebase}`,
     );
-    console.log(`  noted in ${ref(t.id)}'s worktree: ${LANDED_NOTE}`);
+    console.log(
+      `  noted in ${ref(t.id)}'s worktree: ${LANDED_NOTE}${
+        conflicts && conflicts.length > 0
+          ? ` (rebase conflicts in ${conflicts.join(", ")})`
+          : ""
+      }`,
+    );
   }
 }
 

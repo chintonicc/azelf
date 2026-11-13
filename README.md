@@ -1330,7 +1330,12 @@ so the pair is not printed.
 open slice has also changed, the dispatcher appends what landed to
 `.slice-landed.md` in the open slice's worktree (`noted in #21's worktree:
 .slice-landed.md`), and the `slice` skill tells a session to read it before it
-finishes. And when that open slice comes to land, with review on, its spec review
+finishes. Each entry also says what `git merge-tree` says of that slice's rebase
+onto the base now: a section `Rebasing now conflicts` naming the files, and the
+log line adds `(rebase conflicts in …)`, or one line that it goes through cleanly.
+The session is told to rebase at once on a conflict, since it knows its own change
+better than the resolver at the land does. Only committed work is checked, and a
+git older than 2.38 adds neither. And when that open slice comes to land, with review on, its spec review
 is shown the landed slice's commit subjects and its diff in the shared files, under
 `LANDED WHILE THIS SLICE WAS OPEN`, with one more kind of finding: something the
 landed work set up for this slice to join, extend or respect, that its diff does

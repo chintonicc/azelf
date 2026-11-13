@@ -1828,6 +1828,85 @@ describe("a slice that lands onto a sibling's files", () => {
     expect(existsSync(join(fx.wt(41), ".slice-landed.md"))).toBe(true);
   }, 60_000);
 
+  it("says the rebase goes through when it does", async () => {
+    const fx = siblings({}, [40, 41]);
+    commitIn(
+      fx.wt(41),
+      "shared.txt",
+      BASE.replace("bottom", "bottom SIBLING"),
+      "feat: the sibling",
+    );
+    sessions.push(fakeSession(fx, 41));
+
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"]);
+    await d.until("noted in #41's worktree: .slice-landed.md\n");
+    const note = readFileSync(join(fx.wt(41), ".slice-landed.md"), "utf8");
+    const at = git(fx.wt(41), "rev-parse", "HEAD").slice(0, 12);
+    expect(note).toContain(
+      `A rebase onto main goes through cleanly (checked at ${at}, committed work only).`,
+    );
+    expect(note).not.toContain("Rebasing now conflicts");
+  }, 60_000);
+
+  // Both on the line "top": the rebase at 41's land would stop there.
+  it("says the rebase conflicts, and in which files, when it does", async () => {
+    const fx = siblings({}, [40, 41]);
+    commitIn(
+      fx.wt(41),
+      "shared.txt",
+      BASE.replace("top", "top SIBLING"),
+      "feat: the sibling",
+    );
+    sessions.push(fakeSession(fx, 41));
+
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"]);
+    await d.until(
+      "noted in #41's worktree: .slice-landed.md (rebase conflicts in shared.txt)",
+    );
+    const note = readFileSync(join(fx.wt(41), ".slice-landed.md"), "utf8");
+    expect(note).toContain(
+      "### Rebasing now conflicts\n\nA rebase of this branch onto main conflicts in:\n- shared.txt\n",
+    );
+    expect(note).toContain("Rebase onto main in this worktree now");
+    expect(note).not.toContain("goes through cleanly");
+  }, 60_000);
+
+  it("says neither on a git without merge-tree --write-tree", async () => {
+    const fx = siblings({}, [40, 41]);
+    commitIn(
+      fx.wt(41),
+      "shared.txt",
+      BASE.replace("top", "top SIBLING"),
+      "feat: the sibling",
+    );
+    sessions.push(fakeSession(fx, 41));
+    const realGit = spawnSync("bash", ["-c", "command -v git"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const bin = join(fx.root, "old-git");
+    mkdirSync(bin);
+    writeFileSync(
+      join(bin, "git"),
+      `#!/usr/bin/env bash
+if [[ "$1" == merge-tree && " $* " == *" --write-tree "* ]]; then
+  echo "usage: git merge-tree [--write-tree] [<options>] <branch1> <branch2>" >&2
+  exit 129
+fi
+exec ${realGit} "$@"
+`,
+    );
+    chmodSync(join(bin, "git"), 0o755);
+
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"], {
+      env: { PATH: `${bin}:${process.env.PATH}` },
+    });
+    await d.until("noted in #41's worktree: .slice-landed.md\n");
+    const note = readFileSync(join(fx.wt(41), ".slice-landed.md"), "utf8");
+    expect(note).toContain("- shared.txt");
+    expect(note).not.toContain("Rebasing now conflicts");
+    expect(note).not.toContain("goes through cleanly");
+  }, 60_000);
+
   it("shows nothing to a slice that was prepped after the land", async () => {
     const fx = siblings({ review: RECORD, agent: ["true"] }, [40]);
     fx.setTicket("41", { blockedBy: ["40"] });

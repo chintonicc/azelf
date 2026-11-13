@@ -98,6 +98,10 @@ another slice of the plan landed on files you have changed, and it names the fil
 and the command that shows what landed. If that work set up something yours should
 join, extend or respect (a shared guard, a registry, an invariant stated in a
 comment), do it now: the review at land is shown the same diff and checks for it.
+If a land's entry has a section **Rebasing now conflicts**, rebase onto the base branch
+before anything else, resolve, commit, and run the gates again: whatever you build on
+top of the conflict meets it again at the land. An entry that says the rebase goes
+through cleanly needs no rebase from you; the land does it.
 
 How a slice finishes depends on the instruction this session was started with.
 
