@@ -1,6 +1,6 @@
 # A session sees the conflict coming, can fix its last commit, and can measure the base
 
-**Status:** planned · nothing built
+**Status:** in progress · Phase 1 (c48e39f) landed 2026-11-13
 **Written:** 2026-11-13
 **Companion:** consumer-b's friction entries of 2026-11-10 (Backend #233, #240) and 2026-11-12
 (Backend #237). Those are the open ones since `at-commit-gates-plan.md`. #197 went into that plan and
@@ -72,20 +72,20 @@ heading. Line numbers are as of `8656917`.
   time, last lines of output. Excluded by `azelf init` like the other markers. The last run is what
   counts. Whoever wants a history writes it to their own log.
 
-## Phase 1 — the landed note says whether the rebase conflicts
+## Phase 1 — the landed note says whether the rebase conflicts (c48e39f)
 
-- [ ] 1a. `noteLanded` (`slice-run.ts:3068`): after `shared`, ask
+- [x] 1a. `noteLanded` (`slice-run.ts:3068`): after `shared`, ask
   `conflictBetween({ ref: baseBranch, head: landedAt }, { ref: branchFor(t.id), head: branchHead(t.id) })`.
   Files: a section `### Rebasing now conflicts` under this land's heading. It names the files and
   says: rebase onto `<base>` in this worktree now, resolve, commit, run the gates again. Empty: one
   line, `A rebase onto <base> goes through cleanly (checked at <sha12>, committed work only).`
   `null`: nothing.
-- [ ] 1b. The run log line becomes `noted in #N's worktree: .slice-landed.md (rebase conflicts in
+- [x] 1b. The run log line becomes `noted in #N's worktree: .slice-landed.md (rebase conflicts in
   a, b)` when there are conflicts, and stays as today otherwise.
-- [ ] 1c. The slice skill, §6 "Finish": a section "Rebasing now conflicts" in `.slice-landed.md`
+- [x] 1c. The slice skill, §6 "Finish": a section "Rebasing now conflicts" in `.slice-landed.md`
   means rebase before anything else, since your later work builds on the conflict. In both copies
   (`agent/skills/slice/SKILL.md`, `.claude/skills/slice/SKILL.md`).
-- [ ] 1d. Tests (`sliceRun.test.ts`, next to "writes the note with review off"): two siblings on
+- [x] 1d. Tests (`sliceRun.test.ts`, next to "writes the note with review off"): two siblings on
   the same line of `shared.txt` get the conflict section with the file. Siblings on different lines
   get the clean line. A git without `--write-tree` (stub `git` on `PATH`, as the overlap report's
   test does) gets the note without either.
