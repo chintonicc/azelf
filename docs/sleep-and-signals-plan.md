@@ -1,6 +1,6 @@
 # A run says when the Mac sleeps, and stops when it is told to
 
-**Status:** Phase 1 landed 2026-11-13 (e3f5697) · Phase 2 open
+**Status:** complete · Phase 1 (e3f5697) and Phase 2 (ded2e30) landed 2026-11-13
 **Written:** 2026-11-12
 **Companion:** `one-session-plan.md` (Backend #227) and what was found while restarting consumer-b's
 two dispatchers after it.
@@ -101,16 +101,16 @@ The cause is `bin/azelf.ts:136-141`. The wrapper runs the dispatcher with `spawn
     round, with the ending and the claim released.
   - `provision`/`push-main` under a signal leave no child behind.
 
-## Phase 2 — the run says when the Mac sleeps
+## Phase 2 — the run says when the Mac sleeps (ded2e30)
 
-- [ ] 2a. `slice-run.ts`, next to `keepMacAwake` (`:7136`): `onBattery()` reads `pmset -g batt`.
+- [x] 2a. `slice-run.ts`, next to `keepMacAwake` (`:7136`): `onBattery()` reads `pmset -g batt`.
   It is null when the answer is unknown.
-- [ ] 2b. The battery line at the start, and once per change to battery, checked each round.
-- [ ] 2c. The sleep line, from the wall-clock length of the wait between rounds.
+- [x] 2b. The battery line at the start, and once per change to battery, checked each round.
+- [x] 2c. The sleep line, from the wall-clock length of the wait between rounds.
   `SLICE_SLEEP_GAP_SECONDS` sets the threshold for tests (default 60).
-- [ ] 2d. `keepAwake`'s doc (`slice-config.ts:188-198`) points at the battery line. The README's
+- [x] 2d. `keepAwake`'s doc (`slice-config.ts:188-198`) points at the battery line. The README's
   keepAwake paragraph says the same, if there is one.
-- [ ] 2e. Tests:
+- [x] 2e. Tests:
   - A fake `pmset` on `PATH` reporting battery gives the line at the start; reporting AC, it does
     not.
   - A switch to battery mid-run gives it once.
