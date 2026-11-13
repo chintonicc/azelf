@@ -1,6 +1,6 @@
 # A session sees the conflict coming, can fix its last commit, and can measure the base
 
-**Status:** in progress · Phase 1 (c48e39f) landed 2026-11-13
+**Status:** in progress · Phase 1 (c48e39f) and Phase 2 (3a31af0) landed 2026-11-13
 **Written:** 2026-11-13
 **Companion:** consumer-b's friction entries of 2026-11-10 (Backend #233, #240) and 2026-11-12
 (Backend #237). Those are the open ones since `at-commit-gates-plan.md`. #197 went into that plan and
@@ -90,22 +90,22 @@ heading. Line numbers are as of `8656917`.
   get the clean line. A git without `--write-tree` (stub `git` on `PATH`, as the overlap report's
   test does) gets the note without either.
 
-## Phase 2 — `session-commit.sh --amend`
+## Phase 2 — `session-commit.sh --amend` (3a31af0)
 
-- [ ] 2a. Parse `--amend` (`session-commit.sh:51`), usage (`:42`): `--amend (-m|-F) [-y] [<path>…]`
+- [x] 2a. Parse `--amend` (`session-commit.sh:51`), usage (`:42`): `--amend (-m|-F) [-y] [<path>…]`
   and `--amend [-y] <path>…`. Not together with `--push`. The paths check at `:82` does not
   apply to `--amend` with a message.
-- [ ] 2b. The guards, before the lock and before anything is staged, each refusal naming why and
+- [x] 2b. The guards, before the lock and before anything is staged, each refusal naming why and
   "nothing was staged": no `.slice-ticket.md` in the toplevel; `.slice-ready-to-land` or
   `.slice-finished` there; HEAD a merge; `git merge-base --is-ancestor HEAD <base>`;
   `git branch -r --contains HEAD` not empty. The base comes from `slice-config.sh`.
-- [ ] 2c. The commit (`:363-367`): `git commit --amend` with `-F`/`-m`, or `--no-edit` without a
+- [x] 2c. The commit (`:363-367`): `git commit --amend` with `-F`/`-m`, or `--no-edit` without a
   message; `-- paths` when paths are given, `--only` when not. Then
   `✓ amended: <old12> → <new12> <subject>`. The DB-lock block (`:308`) runs on the amended paths as
   on a new commit. The `atCommit` block (`:377`) runs unchanged.
-- [ ] 2d. The slice skill, §4: one paragraph. Use `--amend` for the last commit, for docs that
+- [x] 2d. The slice skill, §4: one paragraph. Use `--amend` for the last commit, for docs that
   belong with it or a message that is wrong. It is refused once the slice is handed in. Both copies.
-- [ ] 2e. Tests (`sessionCommit.test.ts`): amend with a path keeps the message and adds the file,
+- [x] 2e. Tests (`sessionCommit.test.ts`): amend with a path keeps the message and adds the file,
   and keeps the commit's other changes. Amend with `-m` and no path changes only the message, and a
   stray staged file stays staged and out. Refused in a checkout without `.slice-ticket.md`, on a
   commit that is on the base, on one that `origin/x` contains, and with `.slice-ready-to-land`
