@@ -1,6 +1,6 @@
 # A run says when the Mac sleeps, and stops when it is told to
 
-**Status:** planned · nothing built
+**Status:** Phase 1 landed 2026-11-13 (e3f5697) · Phase 2 open
 **Written:** 2026-11-12
 **Companion:** `one-session-plan.md` (Backend #227) and what was found while restarting consumer-b's
 two dispatchers after it.
@@ -84,7 +84,7 @@ The cause is `bin/azelf.ts:136-141`. The wrapper runs the dispatcher with `spawn
 - **No `pmset disablesleep`.** It needs `sudo`, and changes the machine for everything on it.
   Whether the Mac may sleep is the owner's setting; azelf says what it costs.
 
-## Phase 1 — the wrapper passes signals on
+## Phase 1 — the wrapper passes signals on (e3f5697)
 
 - [x] 1a. `bin/azelf.ts`: one `runChild(cmd, args, env?)`, an async `spawn` with `stdio: "inherit"`.
   It forwards SIGINT, SIGTERM and SIGHUP to the child, and exits with the child's code or 128 +
