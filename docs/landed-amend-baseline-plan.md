@@ -1,6 +1,6 @@
 # A session sees the conflict coming, can fix its last commit, and can measure the base
 
-**Status:** in progress · Phase 1 (c48e39f) and Phase 2 (3a31af0) landed 2026-11-13
+**Status:** complete · Phase 1 (c48e39f) and Phase 2 (3a31af0) landed 2026-11-13, Phase 3 (c673f83) 2026-11-14
 **Written:** 2026-11-13
 **Companion:** consumer-b's friction entries of 2026-11-10 (Backend #233, #240) and 2026-11-12
 (Backend #237). Those are the open ones since `at-commit-gates-plan.md`. #197 went into that plan and
@@ -111,27 +111,27 @@ heading. Line numbers are as of `8656917`.
   commit that is on the base, on one that `origin/x` contains, and with `.slice-ready-to-land`
   present. `--amend --push` is a usage error. The `atCommit` gate runs after an amend.
 
-## Phase 3 — a command on the base: `azelf on-base`
+## Phase 3 — a command on the base: `azelf on-base` (c673f83)
 
-- [ ] 3a. Extract the throwaway checkout from `testsOnBase` (`slice-run.ts:2965-2990`) into
+- [x] 3a. Extract the throwaway checkout from `testsOnBase` (`slice-run.ts:2965-2990`) into
   `throwawayCheckout(dir, sha, { install })`: `git worktree add --detach`, the `provisionCopy`
   files, then either the `node_modules` link (`testsOnBase`, unchanged) or `installFor(…, "prep")`
   (on-base). Removal stays `removeBaseTest`'s, generalised to a directory. Its own directory,
   `<worktree>-on-base`, so it never meets a land's `-base-test`.
-- [ ] 3b. `slice-run.ts --on-base [<id>] -- <cmd…>`: the ticket as `--gates` finds it (from the cwd
+- [x] 3b. `slice-run.ts --on-base [<id>] -- <cmd…>`: the ticket as `--gates` finds it (from the cwd
   when not given). The merge base of the slice branch with `<base>`. Run `cmd` there with output
   streamed, then remove the checkout, whatever happened (`finally`, and on SIGINT/SIGTERM). Print
   `base <sha12> (main is N commit(s) ahead — rebase first for the land's baseline)` when N > 0.
   Exit with the command's code. Write `.slice-baseline` into the slice worktree.
-- [ ] 3c. The entry points: verb `azelf on-base [<ticket>] -- <cmd…>` in `bin/azelf.ts` (beside
+- [x] 3c. The entry points: verb `azelf on-base [<ticket>] -- <cmd…>` in `bin/azelf.ts` (beside
   `gates`, `:111`), through the forwarding spawn helper from `sleep-and-signals-plan.md` Phase 1.
   Shim `scripts/slice-on-base.sh` (`how: "exec"` in `slice-files.ts:66`). `.slice-baseline` in
   init's exclude block (`slice-init.ts:77`). Usage in `slice-run-usage.ts`.
-- [ ] 3d. `noteLanded`: when the worktree has a `.slice-baseline`, the note adds `your
+- [x] 3d. `noteLanded`: when the worktree has a `.slice-baseline`, the note adds `your
   .slice-baseline is on <sha12>; the base has moved since`.
-- [ ] 3e. The slice skill, §5: when you need to know whether a failure is yours, run
+- [x] 3e. The slice skill, §5: when you need to know whether a failure is yours, run
   `./scripts/slice-on-base.sh -- <the suite>`, and don't build your own worktree. Both copies.
-- [ ] 3f. Tests (`sliceRun.test.ts`, `sliceInit.test.ts`): the command runs in a tree without the
+- [x] 3f. Tests (`sliceRun.test.ts`, `sliceInit.test.ts`): the command runs in a tree without the
   slice's change (a file the slice added is absent) at the merge base. Its exit code is the run's.
   `.slice-baseline` holds SHA, command and code. The checkout is gone afterwards, also after a
   failing command. A `provisionCopy` file is there. With the base ahead, the line names the count.
