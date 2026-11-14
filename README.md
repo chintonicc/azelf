@@ -165,6 +165,7 @@ saying so.
 | `scripts/format.sh` | shim — the write half of the formatter, run by hand |
 | `scripts/slice-config.sh` | shim — the shell's view of your config |
 | `scripts/slice-gates.sh` | shim — the landing gates on a worktree, as the land runs them |
+| `scripts/slice-on-base.sh` | shim — one command at the slice's base, without its changes (`azelf on-base`) |
 | `scripts/slice-push-main.sh` | shim — push a hand merge of the base branch, under the land lock |
 | `scripts/azelf` | the launcher — `./scripts/azelf run --plan` and every other verb |
 | `.claude/commands/azelf.md` | the `/azelf` command |
@@ -261,6 +262,7 @@ Installs into the repo you are standing in.
 | `--gates [ids…]` | run only the landing gates against existing worktrees, and exit; without ids, the worktree you are in |
 | `--no-lock` | with `--gates`: do not wait for the gate lock (what `azelf gates` passes) |
 | `--keep-going` | with `--gates`: go on after a red gate and report every one; a land always stops at the first |
+| `--on-base [id] -- <cmd…>` | run one command at the slice's merge base, in a throwaway checkout; without an id, the worktree you are in (what `azelf on-base` passes) |
 | `--at-commit` | with `--gates`: only the [`atCommit`](#gates) gates of the slice you are in, on the tree as it is, as a warning that always exits 0 (what `session-commit.sh` runs) |
 | `--sync-edges [-y]` | record the blockers ticket bodies claim, then exit — the one write that is not a close |
 | `--ignore-body-blockers` | dispatch although a body names an open blocker the tracker has no edge for |
@@ -482,6 +484,26 @@ whoever decides sees all of what is red. `.slice-reviews/last-gate.log` then hol
 each red gate's output under its name. A gate that writes to the tree still ends the
 run.
 
+### `azelf on-base [<ticket>] -- <command…>`
+
+Runs one command at the commit the slice's branch sits on (its merge base with the
+base branch), without the slice's changes, and exits with the command's code. It is
+for "did this fail before my change too?", and for a project that wants a suite
+baseline as a pair of SHA and result. A worktree has it as
+`./scripts/slice-on-base.sh -- <command…>`.
+
+The command runs in a throwaway checkout beside the worktree, `<worktree>-on-base`.
+It is installed like a prep (`install`, or what the lockfile says), not linked to the
+slice's dependencies, and gets the `provisionCopy` files. It is removed afterwards,
+after a failure or a stop too. The output streams as it runs. When the base branch
+has moved past the slice's base, the first line says by how many commits: rebase
+first if the baseline should be the one the land will compare against.
+
+The base's SHA, the command, the exit code, the time and the output's last 40 lines
+go to `.slice-baseline` in the slice's worktree, overwritten each run. A land that
+then moves the base says so in `.slice-landed.md`. It runs a command and not the
+gates: on the base the gates would read an empty diff and pass for nothing.
+
 ### `azelf push-main`
 
 Pushes the base branch from the main checkout, under the
@@ -524,6 +546,7 @@ Generated into `scripts/`, these are what a session inside a worktree uses:
 ./scripts/slice-done.sh --hand-over "<what to do>"         # not done: hold it for a person, with the reason
 ./scripts/slice-gates.sh                                   # the landing gates on this worktree, as the land will run them
 ./scripts/slice-gates.sh --keep-going                      # the same, past the first red gate: once before --stuck
+./scripts/slice-on-base.sh -- <command>                    # the command at the slice's base, without its changes; result in .slice-baseline
 ./scripts/format.sh                                        # the write half, by hand
 ./scripts/format.sh --check path/to/file                   # the same, writing nothing
 ./scripts/db-lock.sh claim                                 # before touching exclusiveLockPaths

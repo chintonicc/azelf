@@ -74,7 +74,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 // Every project-specific value — the base branch, the branch and worktree
@@ -190,7 +190,11 @@ const baseBranch = config.baseBranch;
 // Parsed up here, not down in main: the launch helpers below close over
 // `sessionFlags`, and a const declared after its user only works by accident
 // of call order.
-const argv = process.argv.slice(2);
+// Everything after `--` is `--on-base`'s command, and none of it is ours: a
+// `-q` there is not an unknown flag, and a `12` is not a ticket.
+const dashes = process.argv.indexOf("--", 2);
+const argv = process.argv.slice(2, dashes < 0 ? undefined : dashes);
+const onBaseCommand = dashes < 0 ? [] : process.argv.slice(dashes + 1);
 const flag = (name: string) => argv.includes(name);
 const value = (name: string) => {
   const i = argv.indexOf(name);
@@ -2910,14 +2914,63 @@ const MANIFESTS = new Set([
 /** The throwaway worktree for one slice's run, beside the slice's own. */
 const baseTestDir = (id: TicketId) => `${worktreeFor(id)}-base-test`;
 
-/** Remove it, whatever state it was left in. */
-function removeBaseTest(id: TicketId): void {
-  const dir = baseTestDir(id);
+/** Remove a throwaway checkout, whatever state it was left in. */
+function removeThrowaway(dir: string): void {
   if (!existsSync(dir)) return;
   run(["git", "worktree", "remove", "--force", dir], { allowFail: true });
   // A directory git no longer knows as a worktree, or could not remove.
   rmSync(dir, { recursive: true, force: true });
   run(["git", "worktree", "prune"], { allowFail: true });
+}
+
+/**
+ * A detached checkout of `sha` at `dir`, with what prep gives a worktree:
+ * the `provisionCopy` files, and dependencies — either the slice's own
+ * `node_modules` by reference (`link`, for `testOnBase`, which only runs a
+ * few test files), or an install of their own (`install`, for `on-base`,
+ * where the run is the point and the base's dependencies are the base's).
+ * Whatever was at `dir` is removed first: a crashed run's leftover.
+ *
+ * Null when it is ready, else why it is not. The caller removes it, in a
+ * `finally`, with `removeThrowaway`.
+ */
+function throwawayCheckout(
+  dir: string,
+  sha: string,
+  deps: { link: string } | "install",
+): string | null {
+  removeThrowaway(dir);
+  const made = run(["git", "worktree", "add", "--detach", dir, sha], {
+    allowFail: true,
+  });
+  if (!made.ok) {
+    return `the throwaway worktree could not be made: ${
+      made.out.split("\n").pop() ?? ""
+    }`;
+  }
+  for (const f of config.provisionCopy) {
+    const from = join(repoRoot, f);
+    const to = join(dir, f);
+    if (existsSync(from) && !existsSync(to)) {
+      mkdirSync(dirname(to), { recursive: true });
+      copyFileSync(from, to);
+    }
+  }
+  if (deps === "install") {
+    const install = installFor(config.install, dir, "prep");
+    if (install.argv.length === 0) return null;
+    console.log(`  installing: ${installName(install.argv)} (${install.why})`);
+    const r = run(install.argv, { cwd: dir, inherit: true, allowFail: true });
+    return r.ok
+      ? null
+      : `the install failed there (${installName(install.argv)}, exit ${
+          r.status ?? "on a signal"
+        })`;
+  }
+  if (existsSync(join(deps.link, "node_modules"))) {
+    symlinkSync(join(deps.link, "node_modules"), join(dir, "node_modules"));
+  }
+  return null;
 }
 
 /**
@@ -2963,32 +3016,11 @@ function testsOnBase(id: TicketId): { line: string; section?: string } | null {
   }
 
   const dir = baseTestDir(id);
-  removeBaseTest(id);
   try {
-    const made = run(["git", "worktree", "add", "--detach", dir, onto], {
-      allowFail: true,
-    });
-    if (!made.ok) {
-      return {
-        line: `skipped — the throwaway worktree could not be made: ${
-          made.out.split("\n").pop() ?? ""
-        }`,
-      };
-    }
     // What prep gives a worktree, without the install: the slice's own
     // node_modules by reference, and the gitignored files the config names.
-    const wt = worktreeFor(id);
-    if (existsSync(join(wt, "node_modules"))) {
-      symlinkSync(join(wt, "node_modules"), join(dir, "node_modules"));
-    }
-    for (const f of config.provisionCopy) {
-      const from = join(repoRoot, f);
-      const to = join(dir, f);
-      if (existsSync(from) && !existsSync(to)) {
-        mkdirSync(dirname(to), { recursive: true });
-        copyFileSync(from, to);
-      }
-    }
+    const unmade = throwawayCheckout(dir, onto, { link: worktreeFor(id) });
+    if (unmade) return { line: `skipped — ${unmade}` };
     const got = run(["git", "checkout", branchFor(id), "--", ...tests], {
       cwd: dir,
       allowFail: true,
@@ -3047,7 +3079,7 @@ ${tail || "(no output)"}`,
       line: `skipped — ${e instanceof Error ? e.message : String(e)}`,
     };
   } finally {
-    removeBaseTest(id);
+    removeThrowaway(dir);
   }
 }
 
@@ -3106,6 +3138,22 @@ function noteLanded(landed: Ticket, files: string[]): void {
     } else if (conflicts) {
       rebase = `\nA rebase onto ${baseBranch} goes through cleanly (checked at ${at}, committed work only).\n`;
     }
+    // A baseline measured before this land is on a base the land no longer
+    // compares against.
+    let baseline = "";
+    try {
+      const was = /^base: ([0-9a-f]+)/m.exec(
+        readFileSync(join(wt, BASELINE), "utf8"),
+      )?.[1];
+      if (was) {
+        baseline = `\nYour ${BASELINE} is on ${was.slice(
+          0,
+          12,
+        )}; the base has moved since. Run it again after a rebase if the land's baseline is the one you need.\n`;
+      }
+    } catch {
+      // No baseline taken in this worktree.
+    }
     const path = join(wt, LANDED_NOTE);
     let before = "";
     try {
@@ -3128,7 +3176,9 @@ function noteLanded(landed: Ticket, files: string[]): void {
         .join("\n")}\n\nWhat it changed there: \`git diff ${range.from.slice(
         0,
         12,
-      )} ${range.to.slice(0, 12)} -- ${shared.join(" ")}\`\n${rebase}`,
+      )} ${range.to.slice(0, 12)} -- ${shared.join(
+        " ",
+      )}\`\n${rebase}${baseline}`,
     );
     console.log(
       `  noted in ${ref(t.id)}'s worktree: ${LANDED_NOTE}${
@@ -6685,7 +6735,145 @@ if (flag("--hold") || flag("--release")) {
  * through `branchPattern`. Exits 64 when the directory is on no slice branch —
  * the main checkout, a detached HEAD — because then nothing says which slice.
  */
-function sliceHere(): TicketId {
+/** Left in a slice's worktree by `--on-base`: the last run's base and result. */
+const BASELINE = ".slice-baseline";
+
+/** Output lines `.slice-baseline` keeps. */
+const BASELINE_TAIL = 40;
+
+/**
+ * `--on-base`: run one command on the slice's base, without its changes, and
+ * say how it went. consumer-b's rule wants a suite baseline as a pair, SHA and
+ * result, on the base: a session built that checkout by hand in its
+ * scratchpad, and two lands later the baseline matched a base nobody would
+ * land on (Backend #240).
+ *
+ * The base is the merge base, the commit the branch sits on: "mine without my
+ * changes". When the base branch has moved past it, the run says by how many
+ * commits, since the land will compare against the newer one. The checkout is
+ * installed like a prep, not linked to the slice's dependencies: the run is
+ * the point, and the base's are the base's. It is its own directory, beside
+ * the worktree, so it never meets a land's `-base-test`.
+ *
+ * A command, not the gates: on the base they read an empty diff, and pass for
+ * nothing. The command's output streams as it runs, and its exit code is this
+ * one's. `.slice-baseline` in the slice's worktree is overwritten each run, and
+ * written only where git ignores it, as `.slice-landed.md` is.
+ */
+async function onBase(id: TicketId, cmd: string[]): Promise<number> {
+  if (!hasWorktree(id)) {
+    console.error(`  ✗ ${ref(id)}: no worktree at ${worktreeFor(id)}`);
+    return 1;
+  }
+  const at = mergeBase(id);
+  if (!at) {
+    console.error(
+      `  ✗ ${ref(id)}: ${branchFor(id)} and ${baseBranch} have no merge base`,
+    );
+    return 1;
+  }
+  const ahead = Number(
+    run(["git", "rev-list", "--count", `${at}..${baseBranch}`], {
+      allowFail: true,
+    }).out.trim() || 0,
+  );
+  console.log(
+    `  base ${at.slice(0, 12)}${
+      ahead > 0
+        ? ` (${baseBranch} is ${ahead} commit(s) ahead — rebase first for the land's baseline)`
+        : ""
+    }`,
+  );
+
+  const dir = `${worktreeFor(id)}-on-base`;
+  // A stop removes the checkout too: passed on to the command, which ends,
+  // and the `finally` below runs. Without a handler bun would die at once and
+  // leave the checkout behind.
+  let child: ReturnType<typeof spawn> | null = null;
+  const pass = (sig: NodeJS.Signals) => () => {
+    child?.kill(sig);
+  };
+  const handlers = (["SIGINT", "SIGTERM", "SIGHUP"] as const).map(
+    (sig) => [sig, pass(sig)] as const,
+  );
+  for (const [sig, h] of handlers) process.on(sig, h);
+  const started = Date.now();
+  let tail: string[] = [];
+  let code: number;
+  try {
+    const unmade = throwawayCheckout(dir, at, "install");
+    if (unmade) {
+      console.error(`  ✗ ${unmade}`);
+      return 1;
+    }
+    console.log(`  running in ${dir}: ${cmd.join(" ")}`);
+    let partial = "";
+    const keep = (chunk: Buffer, to: NodeJS.WriteStream) => {
+      to.write(chunk);
+      const lines = (partial + chunk.toString("utf8")).split("\n");
+      partial = lines.pop() ?? "";
+      tail = [...tail, ...lines].slice(-BASELINE_TAIL);
+    };
+    code = await new Promise<number>((resolve) => {
+      const c = spawn(cmd[0] as string, cmd.slice(1), {
+        cwd: dir,
+        stdio: ["inherit", "pipe", "pipe"],
+      });
+      child = c;
+      c.stdout?.on("data", (b: Buffer) => keep(b, process.stdout));
+      c.stderr?.on("data", (b: Buffer) => keep(b, process.stderr));
+      c.on("error", (e) => {
+        console.error(`  ✗ could not run ${cmd[0]}: ${e.message}`);
+        resolve(127);
+      });
+      c.on("close", (status, signal) =>
+        resolve(
+          status ?? (signal ? 128 + (osConstants.signals[signal] ?? 0) : 1),
+        ),
+      );
+    });
+    if (partial) tail = [...tail, partial].slice(-BASELINE_TAIL);
+  } finally {
+    removeThrowaway(dir);
+    for (const [sig, h] of handlers) process.off(sig, h);
+  }
+
+  const took = duration(Date.now() - started);
+  console.log(
+    `  ${code === 0 ? "✓" : "✗"} on the base (${at.slice(
+      0,
+      12,
+    )}): exit ${code}, in ${took}`,
+  );
+  const wt = worktreeFor(id);
+  const { ok: ignored } = run(["git", "check-ignore", "-q", BASELINE], {
+    cwd: wt,
+    allowFail: true,
+  });
+  if (!ignored) {
+    console.log(
+      `  ${BASELINE} not written: git does not ignore it in this worktree, and it would make the slice dirty. Run azelf init in the main checkout.`,
+    );
+    return code;
+  }
+  writeFileSync(
+    join(wt, BASELINE),
+    `base: ${at}
+command: ${cmd.join(" ")}
+exit: ${code}
+at: ${new Date(started).toISOString()}
+took: ${took}
+${
+  ahead > 0 ? `${baseBranch} was ${ahead} commit(s) ahead of this base\n` : ""
+}last ${BASELINE_TAIL} lines of output:
+${tail.join("\n") || "(no output)"}
+`,
+  );
+  console.log(`  written to ${BASELINE}`);
+  return code;
+}
+
+function sliceHere(mode = "--gates"): TicketId {
   const branch = run(["git", "branch", "--show-current"], {
     allowFail: true,
     cwd: process.cwd(),
@@ -6693,7 +6881,7 @@ function sliceHere(): TicketId {
   const id = branch ? ticketFromBranch(branch) : null;
   if (id === null) {
     console.error(
-      `--gates needs a ticket id, or a slice worktree to run from — ${
+      `${mode} needs a ticket id, or a slice worktree to run from — ${
         branch
           ? `\`${branch}\` is not a slice branch`
           : "this is a detached HEAD"
@@ -6808,6 +6996,20 @@ if (flag("--gates")) {
     } else allOk = false;
   }
   process.exit(allOk ? 0 : 1);
+}
+
+// `--on-base [n] -- <cmd…>`: one command at the slice's merge base, in a
+// throwaway checkout, its result in `.slice-baseline`. No tracker, no gates.
+if (flag("--on-base")) {
+  if (explicit.length > 1 || onBaseCommand.length === 0) {
+    console.error(
+      "usage: azelf on-base [<ticket>] -- <command…>   (the command runs at the slice's merge base)",
+    );
+    process.exit(64);
+  }
+  process.exit(
+    await onBase(explicit[0] ?? sliceHere("--on-base"), onBaseCommand),
+  );
 }
 
 console.log(`── reading the plan from ${tracker.name} ──────────────────────`);
@@ -7048,7 +7250,7 @@ const planBase = run(["git", "rev-parse", baseBranch]).out.trim();
 for (const t of tickets) {
   rmSync(join(worktreeFor(t.id), RETRY_MARKER), { force: true });
   // A `testOnBase` worktree a crashed run left behind.
-  removeBaseTest(t.id);
+  removeThrowaway(baseTestDir(t.id));
 }
 
 // Lands an earlier process pushed and never finished: a dispatcher killed with

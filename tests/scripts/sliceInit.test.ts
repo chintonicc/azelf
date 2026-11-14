@@ -77,7 +77,7 @@ describe("upsertBlock", () => {
 });
 
 describe("the exclude block", () => {
-  it("carries exactly the sixteen markers", () => {
+  it("carries exactly the seventeen markers", () => {
     const patterns = EXCLUDE_BLOCK.split("\n").filter(
       (l) => l.length > 0 && !l.startsWith("#"),
     );
@@ -86,6 +86,7 @@ describe("the exclude block", () => {
       ".slice-parent.md",
       ".slice-refs.md",
       ".slice-landed.md",
+      ".slice-baseline",
       ".slice-autostart",
       ".slice-live",
       ".slice-ready-to-land",
@@ -510,7 +511,7 @@ describe("init, against a real git repo", () => {
   it("writes the markers, the shims and a starter config", () => {
     const lines = run().map((r) => r.line);
     expect(lines.join("\n")).toContain(
-      ".git/info/exclude — 16 marker patterns",
+      ".git/info/exclude — 17 marker patterns",
     );
     expect(
       readFileSync(join(dir, ".git", "info", "exclude"), "utf8"),
@@ -632,6 +633,20 @@ describe("the agent-facing files", () => {
     expect(
       SHIMS.some((s) => s.name === "slice-push-main.sh" && s.how === "exec"),
     ).toBe(true);
+  });
+
+  // A session runs a command on its base through the shim, and the skill says
+  // so, so it does not build a worktree of its own.
+  it("writes a shim for slice-on-base.sh, and the skill names it", () => {
+    expect(
+      SHIMS.some((s) => s.name === "slice-on-base.sh" && s.how === "exec"),
+    ).toBe(true);
+    agentFiles(dir);
+    const skill = readFileSync(
+      join(dir, ".claude", "skills", "slice", "SKILL.md"),
+      "utf8",
+    );
+    expect(skill).toContain("./scripts/slice-on-base.sh -- ");
   });
 
   it("changes nothing on a second run", () => {

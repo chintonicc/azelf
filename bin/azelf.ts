@@ -117,6 +117,10 @@ const usage = (asked = false): never => {
       "        with their verdict; from inside a worktree the ticket is its own.",
       "        No land, no rebase; a gate that waits for CI runs at the land.",
       "        --keep-going goes on after a red gate and reports every one",
+      "  azelf on-base [<ticket>] -- <command…>",
+      "        run one command at the slice's merge base, without its changes,",
+      "        in a throwaway checkout installed like a prep; the exit code is",
+      "        the command's, and the result goes to .slice-baseline",
       "  azelf push-main",
       "        push the base branch from the main checkout, under the land lock,",
       "        once it is a fast-forward of origin's: for merges made by hand",
@@ -182,6 +186,18 @@ if (verb === "init") {
         ? ["--gates", "--no-lock", ...argv.slice(1)]
         : [`--${verb}`, id as string, ...rest];
   runChild("bun", [`${packageRoot}/scripts/slice-run.ts`, ...args]);
+} else if (verb === "on-base") {
+  // `[<ticket>] -- <command…>`: one ticket at most before the `--`, and a
+  // command after it. Everything after the `--` is passed through untouched.
+  const dashes = argv.indexOf("--");
+  const before = dashes < 0 ? argv.slice(1) : argv.slice(1, dashes);
+  if (dashes < 0 || dashes === argv.length - 1 || before.length > 1) usage();
+  if (before[0]?.startsWith("-")) usage();
+  runChild("bun", [
+    `${packageRoot}/scripts/slice-run.ts`,
+    "--on-base",
+    ...argv.slice(1),
+  ]);
 } else if (verb === "provision") {
   if (argv.length !== 2) usage();
   runChild(

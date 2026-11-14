@@ -64,6 +64,7 @@ export const SHIMS: Shim[] = [
   { name: "session-commit.sh", how: "exec" },
   { name: "format.sh", how: "exec" },
   { name: "slice-gates.sh", how: "exec" },
+  { name: "slice-on-base.sh", how: "exec" },
   { name: "slice-push-main.sh", how: "exec" },
   { name: "azelf", how: "exec", target: "bin/azelf.ts", via: "bun" },
 ];

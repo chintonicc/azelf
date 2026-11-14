@@ -75,6 +75,7 @@ export const EXCLUDE_BLOCK = `${EXCLUDE_BEGIN}
 .slice-parent.md
 .slice-refs.md
 .slice-landed.md
+.slice-baseline
 .slice-autostart
 .slice-live
 .slice-ready-to-land

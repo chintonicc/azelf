@@ -1,7 +1,7 @@
 import {
   type GhRunner,
-  type Tracker,
   type TicketThread,
+  type Tracker,
   TrackerUnavailable,
   blockerLine,
   blockersFromBody,

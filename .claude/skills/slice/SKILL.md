@@ -70,6 +70,19 @@ land. Run them, read the output, fix what you broke.
 A gate must never write to the tree. If formatting is a gate here, it runs in check
 mode — apply formatting as an edit you commit, not as part of the gate.
 
+When a test fails and you need to know whether it failed before your change too, or
+the project wants a baseline from the base, run it there:
+
+```sh
+./scripts/slice-on-base.sh -- <the suite's command>
+```
+
+That runs the command at the commit your branch sits on, without your changes, in a
+throwaway checkout it installs and removes again. It exits with the command's code
+and writes the base's SHA, the command and the result to `.slice-baseline`. Do not
+build a worktree of your own for this. When it says the base branch is ahead,
+rebase first if the baseline should be the one the land will see.
+
 ## 6. Finish
 
 Before you finish, look for `.slice-landed.md` in this worktree. It is there when

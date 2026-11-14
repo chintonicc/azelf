@@ -29,6 +29,9 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --gates --keep-going   go on after a red gate and report every one
   azelf run --gates --at-commit    the atCommit gates of the slice here, as a
                              warning: always exits 0 (session-commit.sh runs it)
+  azelf run --on-base [12] -- <cmd…>   run <cmd> at slice 12's merge base, in
+                             an installed throwaway checkout; the result goes to
+                             .slice-baseline (azelf on-base)
   azelf run --retry 12       retry parked slice 12 in the running dispatcher
   azelf run --relaunch 12    send slice 12 back to a session, with the review's
                              finding (azelf relaunch)
@@ -72,6 +75,7 @@ const FLAGS = new Set([
   "--auto-resolve",
   "--no-auto-resolve",
   "--gates",
+  "--on-base",
   "--no-lock",
   "--keep-going",
   "--at-commit",

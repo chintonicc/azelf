@@ -219,6 +219,7 @@ export function makeConsumer(opts: {
     "db-lock.sh",
     "slice-session.sh",
     "slice-gates.sh",
+    "slice-on-base.sh",
     "slice-push-main.sh",
   ]) {
     writeFileSync(

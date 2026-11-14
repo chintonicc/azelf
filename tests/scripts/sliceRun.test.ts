@@ -1842,6 +1842,7 @@ describe("a slice that lands onto a sibling's files", () => {
     await d.until("noted in #41's worktree: .slice-landed.md\n");
     const note = readFileSync(join(fx.wt(41), ".slice-landed.md"), "utf8");
     const at = git(fx.wt(41), "rev-parse", "HEAD").slice(0, 12);
+    expect(note).not.toContain(".slice-baseline");
     expect(note).toContain(
       `A rebase onto main goes through cleanly (checked at ${at}, committed work only).`,
     );
@@ -1858,6 +1859,10 @@ describe("a slice that lands onto a sibling's files", () => {
       "feat: the sibling",
     );
     sessions.push(fakeSession(fx, 41));
+    writeFileSync(
+      join(fx.wt(41), ".slice-baseline"),
+      "base: 0123456789abcdef\ncommand: true\nexit: 0\n",
+    );
 
     d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"]);
     await d.until(
@@ -1868,6 +1873,9 @@ describe("a slice that lands onto a sibling's files", () => {
       "### Rebasing now conflicts\n\nA rebase of this branch onto main conflicts in:\n- shared.txt\n",
     );
     expect(note).toContain("Rebase onto main in this worktree now");
+    expect(note).toContain(
+      "Your .slice-baseline is on 0123456789ab; the base has moved since.",
+    );
     expect(note).not.toContain("goes through cleanly");
   }, 60_000);
 
@@ -6326,4 +6334,135 @@ describe("the land order after a park", () => {
       "feat: a\nfix: fixed.txt\nfeat: b\nchore: unrelated\ninit",
     );
   }, 90_000);
+});
+
+/**
+ * `azelf on-base`: one command at the slice's merge base, without its changes,
+ * in a throwaway checkout installed like a prep, the result in
+ * `.slice-baseline`. consumer-b's Backend #240 built that checkout by hand for
+ * a suite baseline.
+ */
+describe("azelf on-base — a command on the slice's base", () => {
+  /**
+   * #40 adds mine.txt; the base has base.txt. The install touches
+   * installed-here, and provisionCopy brings .env.local from the main checkout.
+   */
+  const slice = () => {
+    const fx = makeConsumer({
+      worktrees: [40],
+      configExtra:
+        'provisionCopy: [".env.local"],\n  install: ["bash", "-c", "touch installed-here"],',
+    });
+    c = fx;
+    writeFileSync(join(fx.main, ".env.local"), "LOCAL\n");
+    commitIn(fx.main, "base.txt", "base\n", "chore: base");
+    git(fx.wt(40), "rebase", "-q", "main");
+    commitIn(fx.wt(40), "mine.txt", "mine\n", "feat: mine");
+    return fx;
+  };
+  const gone = (fx: Consumer) => {
+    expect(existsSync(`${fx.wt(40)}-on-base`)).toBe(false);
+    expect(git(fx.main, "worktree", "list")).not.toContain("on-base");
+  };
+  const baseline = (fx: Consumer) =>
+    readFileSync(join(fx.wt(40), ".slice-baseline"), "utf8");
+  const PROBE =
+    "test ! -e mine.txt && test -f base.txt && test -f installed-here && test -f .env.local && git rev-parse HEAD > ../probe-at && echo BASE-OUTPUT";
+
+  it("runs the command at the merge base, without the slice's change, and writes .slice-baseline", () => {
+    const fx = slice();
+    const at = git(fx.main, "rev-parse", "main");
+
+    const r = shResult(
+      fx.wt(40),
+      `./scripts/slice-on-base.sh -- bash -c ${JSON.stringify(PROBE)}`,
+    );
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(`  base ${at.slice(0, 12)}\n`);
+    expect(r.out).toContain("BASE-OUTPUT");
+    expect(readFileSync(join(fx.root, "probe-at"), "utf8").trim()).toBe(at);
+    expect(r.out).toContain(`✓ on the base (${at.slice(0, 12)}): exit 0`);
+    const b = baseline(fx);
+    expect(b).toContain(`base: ${at}\n`);
+    expect(b).toContain(`command: bash -c ${PROBE}\n`);
+    expect(b).toContain("exit: 0\n");
+    expect(b).toContain("BASE-OUTPUT");
+    gone(fx);
+    // Ignored, so the baseline does not make the slice dirty.
+    expect(git(fx.wt(40), "status", "--porcelain")).toBe("");
+  });
+
+  it("exits with the command's code, and removes the checkout after a failure too", () => {
+    const fx = slice();
+    // A checkout a crashed run left behind is in the way.
+    git(fx.main, "worktree", "add", "-q", "--detach", `${fx.wt(40)}-on-base`);
+
+    const r = shResult(
+      fx.wt(40),
+      "./scripts/slice-on-base.sh -- bash -c 'echo RED; exit 3'",
+    );
+
+    expect(r.code, r.out).toBe(3);
+    expect(r.out).toContain("✗ on the base");
+    expect(baseline(fx)).toContain("exit: 3\n");
+    expect(baseline(fx)).toContain("RED");
+    gone(fx);
+  });
+
+  it("says how far the base branch has moved past the slice's base", () => {
+    const fx = slice();
+    commitIn(fx.main, "later.txt", "later\n", "chore: later");
+
+    const r = shResult(fx.wt(40), "./scripts/slice-on-base.sh -- true");
+
+    expect(r.code, r.out).toBe(0);
+    expect(r.out).toContain(
+      "(main is 1 commit(s) ahead — rebase first for the land's baseline)",
+    );
+    expect(baseline(fx)).toContain("main was 1 commit(s) ahead of this base");
+  });
+
+  it("runs by ticket from the main checkout through azelf on-base, and passes the command's flags through", () => {
+    const fx = slice();
+    const r = shResult(
+      fx.main,
+      "./scripts/azelf on-base 40 -- bash -c 'test ! -e mine.txt' -x",
+    );
+    expect(r.code, r.out).toBe(0);
+    expect(baseline(fx)).toContain("command: bash -c test ! -e mine.txt -x\n");
+    gone(fx);
+  });
+
+  it("is a usage error without a command", () => {
+    const fx = slice();
+    expect(shResult(fx.main, "./scripts/azelf on-base 40").code).toBe(2);
+    expect(shResult(fx.wt(40), "./scripts/slice-on-base.sh").code).toBe(64);
+    gone(fx);
+  });
+
+  it("removes the checkout when it is stopped", async () => {
+    const fx = slice();
+    const p = spawn(
+      join(fx.wt(40), "scripts", "slice-on-base.sh"),
+      ["--", "sleep", "30"],
+      {
+        cwd: fx.wt(40),
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    let out = "";
+    p.stdout.on("data", (b) => {
+      out += b;
+    });
+    const exited = new Promise<number | null>((r) => p.on("exit", r));
+    while (!out.includes("running in")) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    p.kill("SIGTERM");
+
+    expect(await exited).toBe(143);
+    gone(fx);
+    expect(baseline(fx)).toContain("exit: 143\n");
+  }, 30_000);
 });
