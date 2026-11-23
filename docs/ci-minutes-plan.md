@@ -1,6 +1,6 @@
 # CI that never started is not red, a run without CI, and CI read after the land
 
-**Status:** Phase 1 (f748a86) landed 2026-11-22
+**Status:** Phase 1 (f748a86) and Phase 2 (5bfa8bc) landed 2026-11-22
 **Written:** 2026-11-22
 **Companion:** consumer-b's friction entries of 2026-11-22: "Backend #246, #247 · dispatcher" (Actions
 out of minutes, two green slices parked as red) and the maintainer's own entry beneath it (two CI runs per land).
@@ -167,42 +167,58 @@ What a land costs in CI, per configuration:
   - `sliceRun.test.ts`: a gate that returns `unavailable` parks the slice as `ci`. A base move does not
     retry it, and `azelf retry` does. The summary of a run that ends on it has the line.
 
-## Phase 2 — `azelf run --no-ci`, a record of lands without CI, a config that says it is frozen
+## Phase 2 — `azelf run --no-ci`, a record of lands without CI, a config that says it is frozen (5bfa8bc)
 
-- [ ] 2a. `--no-ci` in `slice-run-usage.ts`: in `FLAGS` (`:63`) and in `USAGE`, one line: "skip the
+- [x] 2a. `--no-ci` in `slice-run-usage.ts`: in `FLAGS` (`:63`) and in `USAGE`, one line: "skip the
   gates that wait for CI (ciRuns) in this run; each land is noted in .slice-reviews/landed-without-ci.md".
-- [ ] 2b. `gatesPass` (`:3549`): with `--no-ci`, filter `landOnly` as `byHand` does. The line becomes
+- [x] 2b. `gatesPass` (`:3549`): with `--no-ci`, filter `landOnly` as `byHand` does. The line becomes
   "skipped `CI: …` — --no-ci". Keep the list of skipped gates that *would* have run (per `when`) for
   2e.
-- [ ] 2c. `ciRuns({ covers })` (`CiRunsOptions`, `slice-gates.ts:338`): an optional string, what this
+- [x] 2c. `ciRuns({ covers })` (`CiRunsOptions`, `slice-gates.ts:338`): an optional string, what this
   CI checks that the local gates do not. It is carried on the `Gate` as `covers`. The config refuses
   an empty one.
-- [ ] 2d. Preamble (`slice-run.ts:7189`, after the gates line):
+- [x] 2d. Preamble (`slice-run.ts:7189`, after the gates line):
   - With `--no-ci` and a `landOnly` gate: "CI: OFF (--no-ci) — `CI: Tests, Docker-Gate` does not run
     before a land. It also checks: <covers>. Each land is noted in .slice-reviews/landed-without-ci.md."
   - With `--no-ci` and no such gate: "--no-ci: no gate here waits for CI — the flag changes nothing."
   - Always: "config: <configPath>, read once at start — an edit takes effect when the run is started
     again."
-- [ ] 2e. After a land under `--no-ci` in which a `landOnly` gate would have run, append one line to
+- [x] 2e. After a land under `--no-ci` in which a `landOnly` gate would have run, append one line to
   `.slice-reviews/landed-without-ci.md`. The header paragraph is written when the file is created.
   Line format: `- 2026-11-22 21:40 · #246 · main at 3e812a7 · not run: CI: Tests, Docker-Gate (--no-ci)`.
   A function `noteWithoutCi(id, sha, what, why)` that Phase 3 reuses.
-- [ ] 2f. The run's last word, after the parked list: "landed without CI: #246, #247 — see
+- [x] 2f. The run's last word, after the parked list: "landed without CI: #246, #247 — see
   .slice-reviews/landed-without-ci.md", when there were any.
-- [ ] 2g. The `ci` park's `waysOut` and the summary block from 1f add: "or land without CI:
+- [x] 2g. The `ci` park's `waysOut` and the summary block from 1f add: "or land without CI:
   <runCommand with --no-ci>".
-- [ ] 2h. `noteConfigChange()` next to `noteAzelfChange` (`:7303`), called in the round loop beside it
+- [x] 2h. `noteConfigChange()` next to `noteAzelfChange` (`:7303`), called in the round loop beside it
   (`:7464`). It compares the mtime of `configPath` with the one at start, and reports the first change
   once: "slice.config.ts changed at HH:MM, after this run started. This run keeps the config it started
   with, gates included. To apply the change: stop it with Ctrl-C when nothing is landing, then
   <resumeCommand>." It is reported again only after a further change.
-- [ ] 2i. Tests (`sliceRun.test.ts`):
+- [x] 2i. Tests (`sliceRun.test.ts`):
   - With `--no-ci`, a `landOnly` gate is not called, the land goes through, and the file has one
     line under its header.
   - `--no-ci` with a `when` that the slice does not match writes no line.
   - The flag is in the resume command.
   - A touched config prints the line once, and a second touch prints it again.
   - `--no-ci` without a `landOnly` gate says that it changes nothing.
+
+As built, where it differs from the above:
+
+- 2d: under `--no-ci` the gates line names only the gates that run. The OFF line ends "Each land it
+  would have judged is noted …", because a gate's `when` can leave a land out. Without `covers` it
+  says that nothing names what goes unchecked. The config line reads "an edit reaches this run's gates
+  when the run is started again".
+- 2g: a running dispatcher's park line says "to land it without CI, stop this run and start it again
+  with --no-ci". A second run cannot take a slice this one owns, so a command there would be refused.
+  The end summary prints the whole command, as planned.
+- 2h: the line also says that `slice-land.sh` and the sessions' own `azelf gates` read the new file.
+  They source the config afresh, so the run and its scripts disagree until the restart.
+- Beyond the plan: the README (flag table, "CI as a gate", "What retries a parked slice", the
+  configuration reference) and `agent/commands/azelf.md`, which tells the agent that a `ci` park is
+  not a fix and that turning CI off is the user's call. Phase 1's behaviour was not in the README
+  either, and is now.
 
 ## Phase 3 — `afterLandCi`: read the CI on the landed SHA and stop on red
 
