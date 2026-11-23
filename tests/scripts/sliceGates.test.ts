@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Exec,
+  type Gate,
   type GateContext,
   baselineDiff,
   ciRuns,
@@ -588,6 +589,51 @@ describe("runGates with when", () => {
  * pass on a retry is reported rather than buried. Off by default, because
  * re-running a deterministic gate only doubles what a real failure costs.
  */
+describe("runGates with a gate that could not judge", () => {
+  const clean: Exec = () => ({ ok: true, out: "" });
+  /** A gate like `ciRuns` when CI never started. */
+  const unjudged = (runs: { n: number }): Gate => ({
+    name: "CI: Tests",
+    retries: 2,
+    run: () => {
+      runs.n += 1;
+      return { ok: false, unavailable: true, why: "CI: `Tests` did not start" };
+    },
+  });
+
+  it("does not retry it, and says the run could not judge", () => {
+    const runs = { n: 0 };
+    const r = runGates([unjudged(runs)], ctxWith(clean));
+    expect(runs.n).toBe(1);
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.unavailable).toBe(true);
+    expect(r.why).toBe("CI: `Tests` did not start");
+    expect(r.failures).toEqual([
+      {
+        gate: "CI: Tests",
+        why: "CI: `Tests` did not start",
+        unavailable: true,
+      },
+    ]);
+  });
+
+  it("is red, not unavailable, when another gate is red too", () => {
+    const exec: Exec = (cmd) =>
+      cmd[0] === "test"
+        ? { ok: false, out: "1 failed" }
+        : { ok: true, out: "" };
+    const r = runGates([exitCode(["test"]), unjudged({ n: 0 })], {
+      ...ctxWith(exec),
+      keepGoing: true,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.failures).toHaveLength(2);
+    expect(r.unavailable).toBeUndefined();
+  });
+});
+
 describe("runGates with retries", () => {
   const clean = { ok: true, out: "" };
 
@@ -732,6 +778,16 @@ describe("ciRuns", () => {
     push?: { ok: boolean; out: string };
     /** What the push answers in turn, before `push` takes over. */
     pushes?: { ok: boolean; out: string }[];
+    /**
+     * `gh run view <id> --json jobs`, per run id. A run not named here
+     * started: it has a job with a step.
+     */
+    jobs?: Record<
+      number,
+      { databaseId: number; steps: unknown[] }[] | { ok: false; out: string }
+    >;
+    /** `gh api …/check-runs/<job id>/annotations`, per job id; `[]` when not named. */
+    annotations?: Record<number, unknown[] | { ok: false; out: string }>;
   }) {
     const calls: Call[] = [];
     let listed = 0;
@@ -754,6 +810,23 @@ describe("ciRuns", () => {
         // Deleting a branch that is not there fails, and the gate ignores it.
         if (deleting) return { ok: false, out: "remote ref does not exist" };
         return o.pushes?.[pushed++] ?? o.push ?? { ok: true, out: "" };
+      }
+      if (cmd[0] === "gh" && cmd[1] === "run" && cmd[2] === "view") {
+        const id = Number(cmd[3]);
+        const jobs = o.jobs?.[id] ?? [
+          { databaseId: id * 10, steps: [{ name: "Set up job" }] },
+        ];
+        return Array.isArray(jobs)
+          ? { ok: true, out: JSON.stringify({ jobs }) }
+          : jobs;
+      }
+      if (cmd[0] === "gh" && cmd[1] === "api") {
+        const job = Number(/check-runs\/(\d+)\//.exec(cmd.at(-1) ?? "")?.[1]);
+        const notes = o.annotations?.[job] ?? [];
+        // gh api prints its JSON without a newline at the end.
+        return Array.isArray(notes)
+          ? { ok: true, out: JSON.stringify(notes) }
+          : notes;
       }
       if (cmd[0] === "gh") {
         const answer = o.lists[Math.min(listed++, o.lists.length - 1)];
@@ -824,6 +897,155 @@ describe("ciRuns", () => {
       ],
     });
     expect(w.lines().at(-1)).toBe(`git push -q origin :${CI_REF}`);
+  });
+
+  /**
+   * consumer-b's Backend #246: the account was out of Actions minutes. Each
+   * job ended after two seconds with no step, and the reason was only in the
+   * job's annotation. Read as red, two green slices parked as "the gates are
+   * red".
+   */
+  const BILLING =
+    "The job was not started because recent account payments have failed or your spending limit needs to be increased. Please check the 'Billing & plans' section in your settings";
+
+  it("does not call a run that never started red, and gives GitHub's reason", () => {
+    const w = ciWorld({
+      lists: [[], [red(11, "Tests"), red(12, "Docker-Gate")]],
+      jobs: {
+        11: [{ databaseId: 110, steps: [] }],
+        12: [{ databaseId: 120, steps: [] }],
+      },
+      annotations: {
+        110: [
+          { path: ".github", annotation_level: "failure", message: BILLING },
+        ],
+      },
+    });
+    const r = gate({ hint: "the CI is not green" }).run(ctxWith(w.exec));
+    expect(r).toEqual({
+      ok: false,
+      unavailable: true,
+      why: `CI: \`Tests\`, \`Docker-Gate\` did not start on 0123456 — GitHub: "${BILLING}"`,
+      detail: [
+        "https://github.com/acme/app/actions/runs/11",
+        "gh run view 11 -R acme/app",
+      ],
+    });
+    expect(w.lines()).toContain("gh run view 11 -R acme/app --json jobs");
+    expect(w.lines()).toContain(
+      "gh api repos/acme/app/check-runs/110/annotations",
+    );
+    expect(w.lines().at(-1)).toBe(`git push -q origin :${CI_REF}`);
+  });
+
+  it("is red when one workflow started and failed, even beside one that never started", () => {
+    const w = ciWorld({
+      lists: [[], [red(11, "Tests"), red(12, "Docker-Gate")]],
+      jobs: { 11: [{ databaseId: 110, steps: [] }] },
+    });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r).toEqual({
+      ok: false,
+      why: "CI: `Docker-Gate` is failure on 0123456",
+      detail: [
+        "https://github.com/acme/app/actions/runs/12",
+        `gh run list -R acme/app --commit ${SHA}`,
+      ],
+    });
+  });
+
+  it("calls a startup failure unavailable without asking for its jobs", () => {
+    const w = ciWorld({
+      lists: [
+        [],
+        [
+          runOf("completed", "startup_failure")(11, "Tests"),
+          green(12, "Docker-Gate"),
+        ],
+      ],
+    });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.unavailable).toBe(true);
+    expect(r.why).toBe(
+      'CI: `Tests` did not start on 0123456 — GitHub: "GitHub could not start the workflow (startup_failure) — a workflow file error, or the account"',
+    );
+    expect(w.count("gh run view")).toBe(0);
+  });
+
+  it("says so in its own words when a job without a step has no annotation", () => {
+    const w = ciWorld({
+      lists: [
+        [],
+        [red(11, "Tests"), runOf("completed", "cancelled")(12, "Docker-Gate")],
+      ],
+      jobs: {
+        11: [{ databaseId: 110, steps: [] }],
+        12: [{ databaseId: 120, steps: [] }],
+      },
+    });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.unavailable).toBe(true);
+    expect(r.why).toBe(
+      'CI: `Tests`, `Docker-Gate` did not start on 0123456 — GitHub: "no job ran a single step"',
+    );
+  });
+
+  it("says a run cancelled before it started was cancelled", () => {
+    const w = ciWorld({
+      lists: [
+        [],
+        [
+          runOf("completed", "cancelled")(11, "Tests"),
+          green(12, "Docker-Gate"),
+        ],
+      ],
+      jobs: { 11: [{ databaseId: 110, steps: [] }] },
+    });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.why).toContain('GitHub: "it was cancelled before a job started"');
+  });
+
+  it("is red, as before, when the jobs of a failed run cannot be read", () => {
+    const w = ciWorld({
+      lists: [[], [red(11, "Tests"), green(12, "Docker-Gate")]],
+      jobs: { 11: { ok: false, out: "HTTP 502: Bad Gateway" } },
+    });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.unavailable).toBeUndefined();
+    expect(r.why).toBe("CI: `Tests` is failure on 0123456");
+  });
+
+  it("keeps the verdict and loses only the words when the annotation cannot be read", () => {
+    const w = ciWorld({
+      lists: [[], [red(11, "Tests"), green(12, "Docker-Gate")]],
+      jobs: { 11: [{ databaseId: 110, steps: [] }] },
+      annotations: { 110: { ok: false, out: "HTTP 502: Bad Gateway" } },
+    });
+    const r = gate().run(ctxWith(w.exec));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.unavailable).toBe(true);
+    expect(r.why).toContain('GitHub: "no job ran a single step"');
+  });
+
+  it("asks a GitHub Enterprise host for the annotations through --hostname", () => {
+    const w = ciWorld({
+      origin: "git@ghe.acme.io:acme/app.git",
+      lists: [[], [red(11, "Tests"), green(12, "Docker-Gate")]],
+      jobs: { 11: [{ databaseId: 110, steps: [] }] },
+    });
+    gate().run(ctxWith(w.exec));
+    expect(w.lines()).toContain(
+      "gh api --hostname ghe.acme.io repos/acme/app/check-runs/110/annotations",
+    );
   });
 
   it("does not count a run that finished before the push", () => {

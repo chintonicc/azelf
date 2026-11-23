@@ -45,6 +45,14 @@
 
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import {
+  type CiRun,
+  ghRepoOf,
+  listRuns,
+  listRunsArgv,
+  newestPerWorkflow,
+  whyNotStarted,
+} from "./slice-ci";
 import { NET_RETRY_SECONDS, isNetworkError } from "./slice-net";
 import { ignores } from "./slice-overlap";
 
@@ -103,6 +111,13 @@ export type GateResult =
        * outside any tail.
        */
       output?: string;
+      /**
+       * The gate could not judge, and the slice is not the cause: CI that
+       * never started (`ciRuns`). `runGates` does not retry it, and the
+       * dispatcher parks the slice as `ci` rather than `gates`, with no
+       * retry on a base move. CI does not come back because the base moved.
+       */
+      unavailable?: true;
     };
 
 export type Gate = {
@@ -348,42 +363,15 @@ export type CiRunsOptions = {
   pollSeconds?: number;
 } & GateOptions;
 
-type CiRun = {
-  databaseId: number;
-  name: string;
-  status: string;
-  conclusion: string;
-  url: string;
-};
-
 type CiVerdict =
   | { kind: "green" }
-  | { kind: "red"; run: CiRun }
+  /** Completed and not a success, in the order the workflows were named. */
+  | { kind: "done"; failed: CiRun[] }
   | { kind: "open"; running: string[]; missing: string[] };
 
-/**
- * `owner/repo` for a remote URL on github.com, `host/owner/repo` for any other
- * host (GitHub Enterprise), as `gh -R` takes it. null for a URL with no host,
- * like a local path: there is no GitHub to ask.
- */
-export function ghRepoOf(url: string): string | null {
-  const bare = url
-    .trim()
-    .replace(/\/+$/, "")
-    .replace(/\.git$/, "");
-  // Two forms: a URL with a scheme, and scp's `user@host:path`. Kept apart,
-  // because read as the second, `file:///srv/app` is host `file`.
-  const m =
-    bare.match(
-      /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i,
-    ) ?? bare.match(/^(?:[^@/]+@)?([^/:]+):(?!\/\/)(.+)$/);
-  if (!m) return null;
-  const [, host, path] = m as unknown as [string, string, string];
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length < 2) return null;
-  const repo = parts.slice(-2).join("/");
-  return host.toLowerCase() === "github.com" ? repo : `${host}/${repo}`;
-}
+// Kept importable from here, where it was first: the tests and any consumer
+// that took it from this module.
+export { ghRepoOf };
 
 /**
  * Pass iff GitHub Actions ran every named workflow on exactly the SHA that is
@@ -418,6 +406,12 @@ export function ghRepoOf(url: string): string | null {
  *  - **It says what it waits for**, through `ctx.log`: the push, then each
  *    change in the workflows, not every look. Without it the dispatcher's log
  *    goes quiet for as long as CI takes.
+ *  - **A run that never started is not red.** A failed run is asked whether
+ *    any of its jobs ran a step (`whyNotStarted`, slice-ci.ts). When none of
+ *    the failed workflows started, the gate is `unavailable`, with GitHub's
+ *    reason word for word: an account out of minutes is not the slice's
+ *    fault, and the dispatcher parks it as `ci`. One that started and failed
+ *    is red, even beside one that did not.
  *
  * The repo is origin's, from its URL, because origin is where the push goes:
  * gh's own guess prefers an `upstream` remote. Read-only like every gate: the
@@ -499,48 +493,58 @@ export function ciRuns(opts: CiRunsOptions): Gate {
           `origin is not a GitHub repository (${originUrl}) — ciRuns reads GitHub Actions through gh`,
         );
       }
-      const listArgv = ["gh", "run", "list", "-R", repo, "--commit", sha];
-      const listCmd = listArgv.join(" ");
-
-      const look = (): { runs: CiRun[] } | { error: string[] } => {
-        const r = ctx.exec(
-          [
-            ...listArgv,
-            "--limit",
-            "30",
-            "--json",
-            "databaseId,name,status,conclusion,url",
-          ],
-          ctx.worktree,
-        );
-        // `out` carries stderr too; gh prints its JSON as one line of its own.
-        const json = r.ok
-          ? r.out.split("\n").find((l) => l.trim().startsWith("["))
-          : undefined;
-        if (json === undefined) return { error: tail(r.out) };
-        try {
-          return { runs: JSON.parse(json) as CiRun[] };
-        } catch {
-          return { error: tail(r.out) };
-        }
-      };
+      const listCmd = listRunsArgv(repo, sha).join(" ");
+      const look = () => listRuns(ctx.exec, ctx.worktree, repo, sha);
       const verdict = (runs: CiRun[], after: number): CiVerdict => {
-        const counted = runs
-          .filter((r) => r.databaseId > after)
-          .sort((a, b) => b.databaseId - a.databaseId);
+        const newest = newestPerWorkflow(runs, workflows, after);
         const running: string[] = [];
         const missing: string[] = [];
+        const failed: CiRun[] = [];
         for (const wf of workflows) {
-          const newest = counted.find((r) => r.name === wf);
-          if (!newest) missing.push(wf);
-          else if (newest.status !== "completed") running.push(wf);
-          else if (newest.conclusion !== "success") {
-            return { kind: "red", run: newest };
-          }
+          const run = newest.get(wf);
+          if (!run) missing.push(wf);
+          else if (run.status !== "completed") running.push(wf);
+          else if (run.conclusion !== "success") failed.push(run);
         }
+        if (failed.length) return { kind: "done", failed };
         return running.length || missing.length
           ? { kind: "open", running, missing }
           : { kind: "green" };
+      };
+      /**
+       * The verdict on the workflows that finished and failed. One that
+       * started and failed is red, the first named deciding, because then
+       * the slice may be the cause. Only when none of them started could CI
+       * not judge: on consumer-b's Backend #246 that was an account out of
+       * minutes, read as a red CI, and two green slices parked.
+       */
+      const judged = (failed: CiRun[]): GateResult => {
+        const notStarted: { run: CiRun; why: string }[] = [];
+        for (const run of failed) {
+          const why = whyNotStarted(ctx.exec, ctx.worktree, repo, run);
+          if (why === null) {
+            return red(
+              `\`${run.name}\` is ${
+                run.conclusion || "not a success"
+              } on ${short}`,
+              [run.url, listCmd],
+            );
+          }
+          notStarted.push({ run, why });
+        }
+        const [first] = notStarted as [{ run: CiRun; why: string }];
+        // No hint: it speaks to a red CI, and this one judged nothing.
+        return {
+          ok: false,
+          unavailable: true,
+          why: `CI: ${notStarted
+            .map(({ run }) => `\`${run.name}\``)
+            .join(", ")} did not start on ${short} — GitHub: "${first.why}"`,
+          detail: [
+            first.run.url,
+            `gh run view ${first.run.databaseId} -R ${repo}`,
+          ],
+        };
       };
 
       /**
@@ -621,14 +625,7 @@ export function ciRuns(opts: CiRunsOptions): Gate {
           lastError = null;
           last = verdict(now.runs, after);
           if (last.kind === "green") return { ok: true };
-          if (last.kind === "red") {
-            return red(
-              `\`${last.run.name}\` is ${
-                last.run.conclusion || "not a success"
-              } on ${short}`,
-              [last.run.url, listCmd],
-            );
-          }
+          if (last.kind === "done") return judged(last.failed);
           tell(progress(last.running, last.missing), i + 1);
         }
         const open = last.kind === "open" ? last : { running: [], missing: [] };
@@ -683,7 +680,9 @@ export type GateFailure = Omit<Red, "ok"> & { gate: string };
 /**
  * What `runGates` answers: the verdict, which gates passed only on a retry,
  * and which were skipped because the diff touches none of their paths. A red
- * run is its first failure, with `failures` holding every one.
+ * run is its first failure, with `failures` holding every one. It is
+ * `unavailable` when every failure is: no gate found the slice wanting, and
+ * one could not judge it.
  */
 export type GatesResult = { flaky: Flaky[]; skipped: string[] } & (
   | { ok: true }
@@ -715,7 +714,8 @@ export function gateApplies(gate: Gate, changedFiles: string[]): boolean {
  * test suite under a wave's load: on consumer-a, at a load average near 30, a
  * 5-second test timeout parked three green slices that never touched the code
  * under test. A pass on a retry is still a pass, and is reported in `flaky`
- * so that it is seen, not buried.
+ * so that it is seen, not buried. A result that is `unavailable` is not
+ * retried: a gate that could not judge is not flaky.
  *
  * A gate whose `when` matches none of `ctx.changedFiles` is not run, and is
  * named in `skipped`. Skipped is not passed: the caller says which is which.
@@ -742,7 +742,21 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
     const [first] = failures;
     if (!first) return { ok: true, flaky, skipped };
     const { why, detail, output } = first;
-    return { ok: false, why, detail, output, flaky, skipped, failures };
+    // Unavailable only when nothing else is red: a red suite beside CI that
+    // never started is a red slice.
+    const unavailable = failures.every((f) => f.unavailable)
+      ? ({ unavailable: true } as const)
+      : {};
+    return {
+      ok: false,
+      why,
+      detail,
+      output,
+      ...unavailable,
+      flaky,
+      skipped,
+      failures,
+    };
   };
   const stop = (failure: GateFailure): GatesResult => {
     failures.push(failure);
@@ -787,7 +801,9 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
         if (attempt > 0) flaky.push({ gate: gate.name, retry: attempt });
         break;
       }
-      if (attempt >= retries) {
+      // A gate that could not judge is not flaky: retrying CI that never
+      // started pushes and waits again for the same answer.
+      if (attempt >= retries || result.unavailable) {
         const failure: GateFailure = {
           gate: gate.name,
           why: attempt
@@ -797,6 +813,7 @@ export function runGates(gates: Gate[], ctx: GateContext): GatesResult {
             : result.why,
           detail: result.detail,
           output: result.output,
+          ...(result.unavailable ? { unavailable: true as const } : {}),
         };
         if (!ctx.keepGoing) return stop(failure);
         failures.push(failure);

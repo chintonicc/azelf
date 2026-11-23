@@ -3497,6 +3497,11 @@ type GatesByHand = { byHand?: boolean; lock?: boolean; keepGoing?: boolean };
 const gateRuns = new Map<TicketId, GateRun>();
 /** The failing gate's output, from the last `gatesPass` that failed on a gate. */
 const gateFailures = new Map<TicketId, string>();
+/**
+ * Set by `gatesPass` when what failed could not judge the slice (CI that never
+ * started), with the gate's line. `tryLand` parks such a slice as `ci`.
+ */
+const gatesUnavailable = new Map<TicketId, string>();
 
 /**
  * Re-run the quality gates against a finished slice, in its own worktree,
@@ -3523,6 +3528,7 @@ function gatesPass(
   flakyGates.delete(n);
   gateRuns.delete(n);
   gateFailures.delete(n);
+  gatesUnavailable.delete(n);
   const wt = worktreeFor(n);
   const fail = (why: string) => {
     console.log(`  ✗ ${ref(n)} not landed — ${why}`);
@@ -3662,6 +3668,10 @@ function gatesPass(
     }
   }
   if (whole) console.log(`      whole output: ${whole}`);
+  if (result.unavailable) {
+    gatesUnavailable.set(n, result.why);
+    return fail(result.why);
+  }
   return fail(several ? `${result.failures.length} gates are red` : result.why);
 }
 
@@ -4843,8 +4853,14 @@ function repairResolution(t: Ticket, failure: string): boolean {
  *
  * `rebase` gets no base trigger: each attempt can be a resolver run of up to
  * twenty minutes, against a conflict a moving base rarely removes.
+ *
+ * `ci` is a slice whose gates could not judge it: CI that never started
+ * (`unavailable` in slice-gates.ts). No base trigger either. CI comes back
+ * when a person fixes the account, not because a land moved the base, and
+ * each retry would push and wait for the same answer. On consumer-b's Backend
+ * #246 it was an account out of Actions minutes, read as red gates.
  */
-type ParkKind = "rebase" | "gates" | "review" | "land";
+type ParkKind = "rebase" | "gates" | "review" | "land" | "ci";
 type Parked = {
   reason: string;
   kind: ParkKind;
@@ -5232,7 +5248,9 @@ function waysOut(id: TicketId, kind: ParkKind, spent: number): string {
   // A BLOCK that was a verdict has a finding to take back to a session.
   const edit = kind === "review" && autoLand && lastBlock(id) !== null;
   if (kind === "review" && !edit) when.push("when the ticket is edited");
-  const retried = `retried ${when.join(", ")}, or now with: azelf retry ${id}`;
+  const retried = `retried ${when.join(", ")}, or now with: azelf retry ${id}${
+    kind === "ci" ? " once CI runs again" : ""
+  }`;
   if (kind !== "review") return retried;
   return `${retried}; sent back to a session${
     edit ? " when the ticket is edited, or now" : ""
@@ -5638,6 +5656,10 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       );
     }
     if (!gatesPass(t.id, changed)) {
+      // CI that never started judged nothing: there is no failure for a
+      // resolver to repair, and the slice is not the cause.
+      const unjudged = gatesUnavailable.get(t.id);
+      if (unjudged) return park(t, "ci", unjudged);
       // A resolution the gates refuse goes back to its resolver once, with
       // what they said. Anything else parks as it always did.
       if (
@@ -5647,6 +5669,8 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
         return park(t, "gates", "the gates are red");
       }
       if (!gatesPass(t.id, worktreeChanges(t.id))) {
+        const unjudgedNow = gatesUnavailable.get(t.id);
+        if (unjudgedNow) return park(t, "ci", unjudgedNow);
         return park(t, "gates", "the gates are red after the repair too");
       }
     }
@@ -7985,6 +8009,22 @@ if (parked.size > 0) {
   for (const [id, p] of parked) {
     console.log(`  ${ref(id)}  ${p.reason}`);
     console.log(`     ${worktreeFor(id)}`);
+  }
+  // Nothing in these was judged, so there is nothing to fix in them: what
+  // has to change is GitHub's side, which their lines above name.
+  const waitingForCi = [...parked]
+    .filter(([, p]) => p.kind === "ci")
+    .map(([id]) => ref(id));
+  if (waitingForCi.length) {
+    console.log(
+      `\n  ${waitingForCi.join(", ")} ${
+        waitingForCi.length === 1 ? "waits" : "wait"
+      } for CI, not for a fix: CI did not start, so nothing in ${
+        waitingForCi.length === 1 ? "it" : "them"
+      } was judged. Once CI runs again, the command below tries ${
+        waitingForCi.length === 1 ? "it" : "them"
+      } again.`,
+    );
   }
   // Not the park line's "retried when …": that is a running dispatcher's
   // promise, and this one is exiting.

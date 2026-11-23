@@ -4009,6 +4009,70 @@ case "$1" in *CORRECTED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; es
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
   }, 60_000);
 
+  /**
+   * consumer-b's Backend #246: the account was out of Actions minutes, no CI
+   * job started, and two green slices parked as "the gates are red", then
+   * retried on every base move for the same answer. The gate here passes once
+   * `ci-back` exists, as CI would once the account is fixed.
+   */
+  const CI_DOWN =
+    '✗ #40 did not land — CI: `Tests` did not start on abc1234 — GitHub: "out of minutes"';
+  /** A consumer whose one gate is CI that does not start until `<root>/ci-back` exists. */
+  const ciDown = (worktrees: number[]) => {
+    const fx = makeConsumer({ worktrees, remote: true, gate: ["true"] });
+    const back = join(fx.root, "ci-back");
+    const config = join(fx.main, "slice.config.ts");
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[.*\],/,
+        `gates: [{ name: "CI: Tests", landOnly: true, run: (ctx) => ctx.exec(["test", "-f", ${JSON.stringify(
+          back,
+        )}], ctx.worktree).ok ? { ok: true } : { ok: false, unavailable: true, why: 'CI: \`Tests\` did not start on abc1234 — GitHub: "out of minutes"' } }],`,
+      ),
+    );
+    commitIn(fx.wt(40), "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    return { fx, back };
+  };
+
+  it("parks a slice CI could not judge as ci, and does not retry it when main moves", async () => {
+    const { fx, back } = ciDown([40, 41]);
+    sessions.push(fakeSession(fx, 41));
+    c = fx;
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"]);
+    await d.until(CI_DOWN);
+    await d.until(
+      "parked (non-interactive) — retried when its branch moves, or now with: azelf retry 40 once CI runs again",
+    );
+
+    commitIn(fx.main, "m1.txt", "1\n", "main: 1");
+    await d.until(seen(CI_DOWN, 1, 3));
+    expect(d.output()).not.toContain("retrying (automatic retry");
+    expect(d.output()).not.toContain("the gates are red");
+    expect(count(d.output(), CI_DOWN)).toBe(1);
+
+    writeFileSync(back, "");
+    azelfRetry(fx, "40");
+    await d.until(LANDED);
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+  }, 60_000);
+
+  it("says at the end that a slice waits for CI, not for a fix", () => {
+    const { fx } = ciDown([40]);
+    c = fx;
+    const r = runDispatcher(fx, ["-y", "--interval", "1", "40"]);
+
+    expect(r.out).toContain(CI_DOWN);
+    expect(r.out).toContain(
+      "nothing can advance — every open slice is parked.",
+    );
+    expect(r.out).toContain(
+      "#40 waits for CI, not for a fix: CI did not start, so nothing in it was judged. Once CI runs again, the command below tries it again.",
+    );
+    expect(r.code).toBe(1);
+  });
+
   it("stops counting a ticket closed outside the run", async () => {
     const { c, d } = parkedRun({ gate: ["false"] });
     await d.until("· 1 parked");
