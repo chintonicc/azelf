@@ -128,6 +128,30 @@ export type SliceConfig = {
    */
   afterLand?: string[];
   /**
+   * GitHub Actions workflows whose run on the landed SHA the dispatcher reads
+   * after each land, by the name GitHub shows for them. The push to the base
+   * branch starts them anyway; this reads their verdict, once a round, and
+   * does not hold the next land for it. Optional; left out, nothing is read.
+   *
+   *   afterLandCi: { workflows: ["Tests", "Docker-Gate"] }
+   *
+   * - A red run stops the landing, like a failed `afterLand`: the land stays
+   *   landed and closed, and the same command picks the run up once the base
+   *   is fixed. A land that fell inside the red run's minutes is on top of it.
+   * - A run that never started (an account out of minutes) stops nothing. It
+   *   is said with GitHub's words and noted in landed-without-ci.md.
+   * - A run cancelled by a newer push to the base is judged by that push's run
+   *   when this run landed it, and left to the next run on the base when
+   *   someone else did. Cancelled with nothing after it, it is noted.
+   * - None after `deadlineMinutes` (default 30): noted, as not checked.
+   * - The run's last land is waited for, up to the same deadline.
+   * - `azelf run --no-ci` reads nothing, and notes every land.
+   *
+   * Leave out a workflow that is red on the base for reasons of its own: it
+   * would stop every run. Needs `gh`, signed in, and an origin on GitHub.
+   */
+  afterLandCi?: { workflows: string[]; deadlineMinutes?: number };
+  /**
    * Commands the conflict resolver may run, as prefixes: the repo's test
    * command, a compile check. Optional; without it the resolver edits and
    * runs nothing, and only the gates afterwards say whether the resolution
@@ -755,6 +779,37 @@ function validate(c: SliceConfig): SliceConfig {
     ) {
       bad(
         'afterLand must be an array of non-empty strings, like ["./scripts/health.sh"] — [] or left out runs nothing',
+      );
+    }
+  }
+  if (c.afterLandCi !== undefined) {
+    const a: unknown = c.afterLandCi;
+    const workflows = (a as { workflows?: unknown } | null)?.workflows;
+    const deadline = (a as { deadlineMinutes?: unknown } | null)
+      ?.deadlineMinutes;
+    if (
+      typeof a !== "object" ||
+      a === null ||
+      !Array.isArray(workflows) ||
+      workflows.length === 0 ||
+      workflows.some((w) => typeof w !== "string" || w.trim() === "")
+    ) {
+      bad(
+        'afterLandCi must be { workflows: [...] } with at least one workflow name and no empty one, like { workflows: ["Tests"] } — left out, nothing is read',
+      );
+    }
+    if (
+      deadline !== undefined &&
+      !(
+        typeof deadline === "number" &&
+        Number.isFinite(deadline) &&
+        deadline > 0
+      )
+    ) {
+      bad(
+        `afterLandCi.deadlineMinutes must be a positive number of minutes, not ${String(
+          deadline,
+        )}`,
       );
     }
   }

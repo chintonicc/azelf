@@ -9,7 +9,8 @@
  * out. Every job ended after two seconds without a single step, `ciRuns` read
  * `conclusion: failure` as a red CI, and two slices that were green locally
  * parked as "the gates are red". GitHub's reason was only in the job's
- * annotation, and nobody had read it.
+ * annotation, and nobody had read it. `afterLandCi` in slice-run.ts asks the
+ * same questions of the base's run after a land.
  *
  * What GitHub returned there, for the record:
  *  - `gh run view <id> --json jobs`: one job, `conclusion: failure`,
@@ -90,9 +91,27 @@ function ghApi(repo: string, path: string): string[] {
   return ["gh", "api", `repos/${repo}/${path}`];
 }
 
-/** The argv for listing the runs on `sha`; also what a failure tells a person to run. */
-export function listRunsArgv(repo: string, sha: string): string[] {
-  return ["gh", "run", "list", "-R", repo, "--commit", sha];
+/**
+ * The argv for listing the runs on `sha`; also what a failure tells a person
+ * to run. With `branch`, only the runs of pushes to that branch: the same SHA
+ * has runs from `ciRuns`' own branch too, and after a land only the base's
+ * own run is the verdict on it.
+ */
+export function listRunsArgv(
+  repo: string,
+  sha: string,
+  branch?: string,
+): string[] {
+  return [
+    "gh",
+    "run",
+    "list",
+    "-R",
+    repo,
+    "--commit",
+    sha,
+    ...(branch ? ["--branch", branch] : []),
+  ];
 }
 
 /** The runs GitHub has on `sha`, newest 30, or the tail of what gh said instead. */
@@ -101,10 +120,11 @@ export function listRuns(
   cwd: string,
   repo: string,
   sha: string,
+  branch?: string,
 ): { runs: CiRun[] } | { error: string[] } {
   const r = exec(
     [
-      ...listRunsArgv(repo, sha),
+      ...listRunsArgv(repo, sha, branch),
       "--limit",
       "30",
       "--json",

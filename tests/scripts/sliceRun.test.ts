@@ -4331,6 +4331,294 @@ describe("a config edited under a running dispatcher", () => {
   }, 60_000);
 });
 
+/**
+ * `afterLandCi`: the CI run the push to main starts anyway, read after the
+ * land. From consumer-b, where every land cost two CI runs, one before the
+ * land on a branch of its own and one on main after it.
+ *
+ * origin reads as github.com/acme/app and is the local bare repo underneath
+ * (`insteadOf`). `gh` is a stub that answers `run list` from a file named
+ * after the subject of the commit it is asked about, so a test can say what
+ * CI answers for a land before the land has a SHA.
+ */
+describe("afterLandCi: CI on the base after a land", () => {
+  const GH_STUB = `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GH_WORLD/calls"
+after() { local prev=""; for a in "\${@:2}"; do [ "$prev" = "$1" ] && { echo "$a"; return; }; prev="$a"; done; }
+answer() { if [ -f "$GH_WORLD/$1" ]; then cat "$GH_WORLD/$1"; echo; else echo "$2"; fi; exit 0; }
+case "$1 $2" in
+  "run list")
+    key=$(git log -1 --format=%s "$(after --commit "$@")" | tr -c 'a-zA-Z0-9\\n' '-')
+    answer "runs-$key.json" '[]' ;;
+  "run view")
+    answer "jobs-$3.json" '{"jobs":[{"databaseId":1,"steps":[{"name":"Set up job"}]}]}' ;;
+esac
+if [ "$1" = api ]; then
+  job=$(echo "$2" | sed -E 's#.*/check-runs/([0-9]+)/annotations#\\1#')
+  answer "annotations-$job.json" '[]'
+fi
+echo "gh stub: no answer for: $*" >&2
+exit 1
+`;
+  type Run = {
+    databaseId: number;
+    name: string;
+    status: string;
+    conclusion: string;
+    url: string;
+  };
+  const runOf = (databaseId: number, status: string, conclusion = ""): Run => ({
+    databaseId,
+    name: "Tests",
+    status,
+    conclusion,
+    url: `https://github.com/acme/app/actions/runs/${databaseId}`,
+  });
+  const RECORD = join(".slice-reviews", "landed-without-ci.md");
+
+  /** Slices `worktrees`, each done with one commit `feat: <n>`. */
+  const ciAfter = (worktrees: number[], deadlineMinutes = 1) => {
+    const fx = makeConsumer({
+      worktrees,
+      remote: true,
+      gate: ["true"],
+      configExtra: `afterLandCi: { workflows: ["Tests"], deadlineMinutes: ${deadlineMinutes} },`,
+    });
+    const url = "https://github.com/acme/app.git";
+    git(fx.main, "config", `url.${join(fx.root, "remote")}.insteadOf`, url);
+    git(fx.main, "remote", "set-url", "origin", url);
+    const world = join(fx.root, "gh");
+    const bin = join(fx.root, "gh-bin");
+    mkdirSync(world);
+    mkdirSync(bin);
+    writeFileSync(join(bin, "gh"), GH_STUB);
+    chmodSync(join(bin, "gh"), 0o755);
+    for (const n of worktrees) {
+      commitIn(fx.wt(n), `${n}.txt`, "x\n", `feat: ${n}`);
+      sh(fx.wt(n), "./scripts/slice-done.sh");
+    }
+    c = fx;
+    return {
+      fx,
+      world,
+      env: { PATH: `${bin}:${process.env.PATH}`, GH_WORLD: world },
+      /** What `gh run list` answers for the commit with this subject. */
+      runs: (subject: string, list: Run[]) =>
+        writeFileSync(
+          join(world, `runs-${subject.replace(/[^a-zA-Z0-9]/g, "-")}.json`),
+          JSON.stringify(list),
+        ),
+      calls: () =>
+        existsSync(join(world, "calls"))
+          ? readFileSync(join(world, "calls"), "utf8")
+          : "",
+    };
+  };
+  const head = (fx: Consumer) => git(fx.main, "rev-parse", "--short=7", "main");
+
+  it("reads a green run on the landed SHA, and the run goes on", () => {
+    const { fx, env, runs, calls } = ciAfter([40]);
+    runs("feat: 40", [runOf(11, "completed", "success")]);
+    const r = runDispatcher(fx, ["-y", "--interval", "1", "40"], { env });
+
+    expect(r.out).toContain(
+      "  CI after each land: `Tests` on the landed SHA, read each round — a red one stops the landing.",
+    );
+    expect(r.out).toContain(
+      `  CI on main at ${head(fx)} (#40's land): \`Tests\` passed`,
+    );
+    expect(calls()).toContain(
+      `run list -R acme/app --commit ${git(
+        fx.main,
+        "rev-parse",
+        "main",
+      )} --branch main`,
+    );
+    expect(existsSync(join(fx.main, RECORD))).toBe(false);
+    expect(r.code).toBe(0);
+  });
+
+  it("stops before the next land on a red run, with its URL and the command to go on", () => {
+    const { fx, env, runs } = ciAfter([40, 41]);
+    runs("feat: 40", [runOf(12, "completed", "failure")]);
+    runs("feat: 41", [runOf(13, "completed", "success")]);
+    const r = runDispatcher(fx, ["-y", "--interval", "1", "40", "41"], {
+      env,
+    });
+    const sha = head(fx);
+
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: 40");
+    expect(r.out).toContain(
+      `  ✗ CI on main at ${sha} (#40's land): \`Tests\` ended in failure — https://github.com/acme/app/actions/runs/12`,
+    );
+    expect(r.out).toContain(
+      `stopping: #40 landed, and CI \`Tests\` is red on main at ${sha} after it. It stays landed and closed; nothing else lands until main has been looked at.`,
+    );
+    expect(r.out).toMatch(
+      /Fix main, then pick the run up again:\n\n {4}\S.* run -y --interval 1 41\n/,
+    );
+    expect(r.code).toBe(1);
+  });
+
+  it("judges a run cancelled by its own next land with that land's run", async () => {
+    const { fx, env, runs } = ciAfter([40, 41]);
+    runs("feat: 40", [runOf(14, "in_progress")]);
+    runs("feat: 41", [runOf(15, "completed", "success")]);
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40", "41"], { env });
+    await d.until("landing #41 …");
+    // The push of #41 to main cancels the run still going on #40's SHA.
+    runs("feat: 40", [runOf(14, "completed", "cancelled")]);
+    expect(await d.exited).toBe(0);
+
+    const sha = head(fx);
+    expect(d.output()).toMatch(
+      new RegExp(
+        `CI on main at [0-9a-f]{7} \\(#40's land\\): \`Tests\` was cancelled by a newer push — judged with #41's land at ${sha}`,
+      ),
+    );
+    expect(d.output()).toContain(
+      `  CI on main at ${sha} (#41's land): \`Tests\` passed`,
+    );
+    expect(d.output()).not.toContain("stopping:");
+    expect(existsSync(join(fx.main, RECORD))).toBe(false);
+  }, 60_000);
+
+  it("leaves a run cancelled by someone else's push to the next run on main", async () => {
+    const { fx, env, runs } = ciAfter([40]);
+    runs("feat: 40", [runOf(18, "in_progress")]);
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40"], { env });
+    await d.until("waiting for CI on main for #40");
+    const other = join(fx.root, "other");
+    git(fx.root, "clone", "-q", join(fx.root, "remote"), other);
+    commitIn(other, "o.txt", "o\n", "someone else");
+    git(other, "push", "-q", "origin", "main");
+    runs("feat: 40", [runOf(18, "completed", "cancelled")]);
+    expect(await d.exited).toBe(0);
+
+    expect(d.output()).toContain(
+      `\`Tests\` was cancelled, and main has moved past it (now ${git(
+        other,
+        "rev-parse",
+        "--short=7",
+        "HEAD",
+      )}) — the next run on main decides`,
+    );
+    expect(existsSync(join(fx.main, RECORD))).toBe(false);
+  }, 60_000);
+
+  it("notes a run that never started, in GitHub's words, and stops nothing", () => {
+    const { fx, env, runs, world } = ciAfter([40, 41]);
+    runs("feat: 40", [runOf(16, "completed", "failure")]);
+    writeFileSync(
+      join(world, "jobs-16.json"),
+      JSON.stringify({ jobs: [{ databaseId: 160, steps: [] }] }),
+    );
+    writeFileSync(
+      join(world, "annotations-160.json"),
+      JSON.stringify([
+        { annotation_level: "failure", message: "out of minutes" },
+      ]),
+    );
+    runs("feat: 41", [runOf(17, "completed", "success")]);
+    const r = runDispatcher(fx, ["-y", "--interval", "1", "40", "41"], {
+      env,
+    });
+
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: 41");
+    expect(r.out).toMatch(
+      /CI on main at [0-9a-f]{7} \(#40's land\): `Tests` did not start — GitHub: "out of minutes"/,
+    );
+    expect(r.out).not.toContain("stopping:");
+    expect(readFileSync(join(fx.main, RECORD), "utf8")).toMatch(
+      /^- .* · #40 · main at [0-9a-f]{7} · not run: CI on main: Tests \(did not start\)$/m,
+    );
+    expect(r.out).toContain(
+      "landed without CI: #40 — see .slice-reviews/landed-without-ci.md",
+    );
+    expect(r.code).toBe(0);
+  });
+
+  it("notes a land whose run did not appear before the deadline", () => {
+    const { fx, env } = ciAfter([40], 0.05);
+    const r = runDispatcher(fx, ["-y", "--interval", "1", "40"], { env });
+    const sha = head(fx);
+
+    expect(r.out).toContain(
+      `  CI on main at ${sha} (#40's land): no \`Tests\` run after 0.05 minutes — not checked (does it run on a push to main?)`,
+    );
+    expect(readFileSync(join(fx.main, RECORD), "utf8")).toContain(
+      `· #40 · main at ${sha} · not run: CI on main: Tests (no run on main after 0.05 minutes)\n`,
+    );
+    expect(r.code).toBe(0);
+  });
+
+  it("reads nothing under --no-ci, and notes the land", () => {
+    const { fx, env, calls } = ciAfter([40]);
+    const r = runDispatcher(fx, ["-y", "--no-ci", "--interval", "1", "40"], {
+      env,
+    });
+
+    expect(r.out).toContain(
+      "  CI after each land: off (--no-ci) — each land is noted in .slice-reviews/landed-without-ci.md.",
+    );
+    expect(r.out).not.toContain("the flag changes nothing");
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: 40");
+    expect(calls()).not.toContain("run list");
+    expect(readFileSync(join(fx.main, RECORD), "utf8")).toMatch(
+      /^- .* · #40 · main at [0-9a-f]{7} · not run: CI after the land: Tests \(--no-ci\)$/m,
+    );
+  });
+
+  it("waits at the end of the run for a land whose run is still going", async () => {
+    const { fx, env, runs } = ciAfter([40]);
+    runs("feat: 40", [runOf(19, "in_progress")]);
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40"], { env });
+    await d.until("waiting for CI on main for #40 (at most 1 min) …");
+    await d.until("(#40's land): `Tests` running");
+    runs("feat: 40", [runOf(19, "completed", "success")]);
+    expect(await d.exited).toBe(0);
+
+    const out = d.output();
+    expect(out.indexOf("(#40's land): `Tests` passed")).toBeGreaterThan(
+      out.indexOf("waiting for CI on main for #40"),
+    );
+  }, 60_000);
+
+  it("stops waiting on Ctrl-C, and says where to read what it did not", async () => {
+    const { fx, env, runs } = ciAfter([40]);
+    runs("feat: 40", [runOf(20, "in_progress")]);
+    d = startDispatcher(fx, ["-y", "--interval", "1", "40"], { env });
+    await d.until("(#40's land): `Tests` running");
+    process.kill(d.pid, "SIGINT");
+    expect(await d.exited).toBe(130);
+
+    expect(d.output()).toContain(
+      `  not waited for: CI on main for #40's land — gh run list -R acme/app --commit ${git(
+        fx.main,
+        "rev-parse",
+        "main",
+      )} --branch main shows it`,
+    );
+  }, 60_000);
+
+  it("the config refuses no workflow, and a deadline that is not positive", () => {
+    for (const [value, said] of [
+      ["{ workflows: [] }", "afterLandCi must be { workflows: [...] }"],
+      [
+        '{ workflows: ["Tests"], deadlineMinutes: 0 }',
+        "afterLandCi.deadlineMinutes must be a positive number of minutes, not 0",
+      ],
+    ] as const) {
+      c = makeConsumer({ configExtra: `afterLandCi: ${value},` });
+      const r = runDispatcher(c, ["--plan"]);
+
+      expect(r.code).not.toBe(0);
+      expect(r.out).toContain(said);
+      rmSync(c.root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("a land overtaken during the review", () => {
   const racer = (file: string, moves: number) => [
     "bash",

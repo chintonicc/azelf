@@ -78,6 +78,14 @@ import {
 import { constants as osConstants, homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+// Reading GitHub Actions after a land (afterLandCi), as ciRuns does before it.
+import {
+  ghRepoOf,
+  listRuns,
+  listRunsArgv,
+  newestPerWorkflow,
+  whyNotStarted,
+} from "./slice-ci";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
 // file; nothing below should grow a literal back.
@@ -5403,11 +5411,56 @@ function askAboutBlocked(
 let stopRequested = false;
 
 /**
- * The slice whose land went through and whose `afterLand` then failed
- * (slice-land.sh's exit 3). The round loop stops on it before landing
- * anything else: the base needs a person, and a next land would go on top.
+ * A land that went through and left the base in need of a person: its
+ * `afterLand` failed (slice-land.sh's exit 3), or its CI on the base came
+ * back red (`afterLandCi`). The round loop stops on it before landing
+ * anything else, because a next land would go on top. The first one is kept.
  */
-let afterLandFailed: TicketId | null = null;
+type BaseFailure = { id: TicketId; why: string };
+let baseFailed: BaseFailure | null = null;
+
+/** slice-land.sh's exit 3, for `baseFailed`. */
+function afterLandFailed(id: TicketId): void {
+  baseFailed ??= {
+    id,
+    why: `${ref(id)} landed, and afterLand failed after it`,
+  };
+}
+
+/**
+ * A land whose CI on the base is still being read (`afterLandCi`). Kept after
+ * it is done, in landing order, because a run cancelled by a newer push is
+ * judged by the next land's watch.
+ */
+type CiWatch = {
+  id: TicketId;
+  /** The base's head right after the land. */
+  sha: string;
+  /** When a workflow with no verdict yet counts as not checked. */
+  deadline: number;
+  /** Each workflow that has its answer, with the word for it. */
+  settled: Map<string, string>;
+  /** The progress line last printed, so that only a change is printed. */
+  said: string;
+  /** What gh said the last time it could not list the runs. */
+  lastError: string[] | null;
+  done: boolean;
+};
+const ciWatches: CiWatch[] = [];
+
+/** After a land: read its CI on the base from the next round on. */
+function watchCiAfter(id: TicketId, sha: string | null): void {
+  if (!config.afterLandCi || noCi || !ciRepo || !sha) return;
+  ciWatches.push({
+    id,
+    sha,
+    deadline: Date.now() + ciDeadlineMinutes * 60_000,
+    settled: new Map(),
+    said: "",
+    lastError: null,
+    done: false,
+  });
+}
 
 const WITHOUT_CI = "landed-without-ci.md";
 /** The slices this run landed without a CI verdict, for its last word. */
@@ -5869,7 +5922,7 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
         "slice-land.sh refused — a hold, a hook, or a push that failed; its output above says which",
       );
     }
-    if (status === LAND_AFTER_FAILED) afterLandFailed = t.id;
+    if (status === LAND_AFTER_FAILED) afterLandFailed(t.id);
     landedFiles.set(t.id, landing);
     landedAdded.set(t.id, landingAdded);
     closePending.set(t.id, { said: false });
@@ -5887,8 +5940,18 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       else landedWhileOpen.set(o.id, [t.id]);
     }
     noteLanded(t, landing);
-    const notRun = skippedForNoCi.get(t.id);
-    if (notRun) noteWithoutCi(t.id, landedAt, notRun.join("; "), "--no-ci");
+    // Under --no-ci: the CI gates this slice would have run, and the CI
+    // after the land, which this run does not read either.
+    const notRun = [
+      ...(skippedForNoCi.get(t.id) ?? []),
+      ...(noCi && config.afterLandCi
+        ? [`CI after the land: ${config.afterLandCi.workflows.join(", ")}`]
+        : []),
+    ];
+    if (notRun.length) {
+      noteWithoutCi(t.id, landedAt, notRun.join("; "), "--no-ci");
+    }
+    watchCiAfter(t.id, landedAt);
     const flaky = flakyGates.get(t.id);
     if (flaky) landedOnRetry.set(t.id, flaky);
     parked.delete(t.id);
@@ -7352,7 +7415,7 @@ if (noCi && ciGates.length) {
         : "What it checks that the local gates do not goes unchecked; ciRuns({ covers }) would name it here."
     } Each land it would have judged is noted in .slice-reviews/${WITHOUT_CI}.`,
   );
-} else if (noCi) {
+} else if (noCi && !config.afterLandCi) {
   console.log(
     "  --no-ci: no gate here waits for CI — the flag changes nothing.",
   );
@@ -7360,6 +7423,27 @@ if (noCi && ciGates.length) {
 console.log(
   `  config: ${shownConfigPath}, read once at start — an edit reaches this run's gates when the run is started again.`,
 );
+// origin's repository on GitHub, for afterLandCi. The URL as configured, as
+// `gh -R` takes it; null when origin is not on GitHub, and nothing is read.
+const ciRepo = config.afterLandCi
+  ? ghRepoOf(
+      run(["git", "config", "--get", "remote.origin.url"], {
+        cwd: repoRoot,
+        allowFail: true,
+      }).out,
+    )
+  : null;
+const ciDeadlineMinutes = config.afterLandCi?.deadlineMinutes ?? 30;
+if (config.afterLandCi) {
+  const named = config.afterLandCi.workflows.map((w) => `\`${w}\``).join(", ");
+  console.log(
+    noCi
+      ? "  CI after each land: off (--no-ci) — each land is noted in .slice-reviews/landed-without-ci.md."
+      : ciRepo
+        ? `  CI after each land: ${named} on the landed SHA, read each round — a red one stops the landing.`
+        : "  CI after each land: origin is not a GitHub repository — afterLandCi reads nothing.",
+  );
+}
 if (config.afterLand?.length) {
   console.log(
     `  afterLand: ${config.afterLand.join(
@@ -7448,7 +7532,7 @@ for (const file of readdirSync(commonDir())) {
   // Exit 3 finished the land and then failed its afterLand: landed, and the
   // first round stops before landing anything else.
   const finished = ok || status === LAND_AFTER_FAILED;
-  if (status === LAND_AFTER_FAILED) afterLandFailed = id;
+  if (status === LAND_AFTER_FAILED) afterLandFailed(id);
   // No record left means the ticket closed. A record and a zero exit means the
   // close failed, and the dispatcher's own retry takes it from there. A
   // non-zero exit is a refusal (origin lacks what the record says landed): the
@@ -7516,20 +7600,255 @@ let lastLockBlockAt = 0;
 let stoppedOnError = false;
 
 /**
- * A land went through and its `afterLand` failed: stop before the next land
- * goes on top of a base nobody has looked at. Not `stopOnError`, because
- * nothing is wrong with the run — sessions keep working in their tabs, and
- * the same command picks it up once the base is fixed. True when it stopped.
+ * A land went through and the base needs a person (`baseFailed`): stop before
+ * the next land goes on top of it. Not `stopOnError`, because nothing is
+ * wrong with the run — sessions keep working in their tabs, and the same
+ * command picks it up once the base is fixed. True when it stopped.
  */
-function stopForAfterLand(): boolean {
-  if (!afterLandFailed) return false;
+function stopForBase(): boolean {
+  if (!baseFailed) return false;
   console.log(
-    `\n  stopping: ${ref(
-      afterLandFailed,
-    )} landed, and afterLand failed after it. It stays landed and closed; nothing else lands until ${baseBranch} has been looked at. Sessions still running keep working. Fix ${baseBranch}, then pick the run up again:\n\n    ${resumeCommand()}`,
+    `\n  stopping: ${
+      baseFailed.why
+    }. It stays landed and closed; nothing else lands until ${baseBranch} has been looked at. Sessions still running keep working. Fix ${baseBranch}, then pick the run up again:\n\n    ${resumeCommand()}`,
   );
   process.exitCode = 1;
   return true;
+}
+
+/** gh, for reading CI after a land: bounded, so a hung call cannot hold a round. */
+const ghExec = (cmd: string[], cwd: string) =>
+  run(cmd, { cwd, allowFail: true, timeoutMs: 60_000 });
+
+/**
+ * Read the CI on the base for every land still being watched: one `gh run
+ * list` per watch, and more only for a run that failed or was cancelled.
+ * Prints a watch's progress when it changes and each answer once. A red run
+ * sets `baseFailed`, and the caller stops.
+ */
+function lookAtLandedCi(): void {
+  if (!config.afterLandCi || !ciRepo) return;
+  for (const w of ciWatches) {
+    if (w.done) continue;
+    lookAtWatch(w, config.afterLandCi.workflows, ciRepo);
+    if (baseFailed) return;
+  }
+}
+
+function lookAtWatch(w: CiWatch, workflows: string[], repo: string): void {
+  const short = w.sha.slice(0, 7);
+  const prefix = `CI on ${baseBranch} at ${short} (${ref(w.id)}'s land)`;
+  const listed = listRuns(ghExec, repoRoot, repo, w.sha, baseBranch);
+  if ("error" in listed) w.lastError = listed.error;
+  const newest = newestPerWorkflow(
+    "runs" in listed ? listed.runs : [],
+    workflows,
+    0,
+  );
+  const late = Date.now() >= w.deadline;
+  const minutes = `${ciDeadlineMinutes} minute${
+    ciDeadlineMinutes === 1 ? "" : "s"
+  }`;
+  /** What is left without a verdict in this look, by why: one note each. */
+  const unchecked = new Map<string, string[]>();
+  const leave = (wf: string, word: string, why?: string) => {
+    w.settled.set(wf, word);
+    if (why) unchecked.set(why, [...(unchecked.get(why) ?? []), wf]);
+  };
+  /** The state of a workflow still open, for the progress line. */
+  const open = new Map<string, string>();
+
+  for (const wf of workflows) {
+    if (w.settled.has(wf)) continue;
+    const r = newest.get(wf);
+    if (!r || r.status !== "completed") {
+      if (!late) {
+        open.set(wf, r ? "running" : "not started yet");
+        continue;
+      }
+      if (r) {
+        console.log(
+          `  ${prefix}: \`${wf}\` still running after ${minutes} — not waited for`,
+        );
+        leave(wf, "not waited for", `still running after ${minutes}`);
+        continue;
+      }
+      const gh = w.lastError?.at(-1);
+      console.log(
+        `  ${prefix}: no \`${wf}\` run after ${minutes} — not checked (does it run on a push to ${baseBranch}?)${
+          gh ? `; gh said: ${gh}` : ""
+        }`,
+      );
+      leave(wf, "not checked", `no run on ${baseBranch} after ${minutes}`);
+      continue;
+    }
+    if (r.conclusion === "success") {
+      w.settled.set(wf, "passed");
+      continue;
+    }
+    if (r.conclusion === "cancelled") {
+      cancelledOnBase(w, wf, prefix, leave);
+      continue;
+    }
+    const notStarted = whyNotStarted(ghExec, repoRoot, repo, r);
+    if (notStarted === null) {
+      console.log(
+        `  ✗ ${prefix}: \`${wf}\` ended in ${r.conclusion} — ${r.url}`,
+      );
+      const onTop = ciWatches
+        .slice(ciWatches.indexOf(w) + 1)
+        .map((o) => ref(o.id));
+      baseFailed ??= {
+        id: w.id,
+        why: `${ref(
+          w.id,
+        )} landed, and CI \`${wf}\` is red on ${baseBranch} at ${short} after it${
+          onTop.length
+            ? `; ${onTop.join(
+                ", ",
+              )} landed on top of it before the result came in`
+            : ""
+        }`,
+      };
+      w.done = true;
+      return;
+    }
+    console.log(
+      `  ${prefix}: \`${wf}\` did not start — GitHub: "${notStarted}"`,
+    );
+    leave(wf, "did not start", "did not start");
+  }
+
+  for (const [why, wfs] of unchecked) {
+    noteWithoutCi(w.id, w.sha, `CI on ${baseBranch}: ${wfs.join(", ")}`, why);
+  }
+  const done = workflows.every((wf) => w.settled.has(wf));
+  if (done) w.done = true;
+  // All green in one line. Otherwise each workflow's state, when it changed:
+  // the lines above said why one has no verdict, and this says where all of
+  // them stand, the last time too.
+  const line =
+    done && workflows.every((wf) => w.settled.get(wf) === "passed")
+      ? `${workflows.map((wf) => `\`${wf}\``).join(", ")} passed`
+      : workflows
+          .map((wf) => `\`${wf}\` ${w.settled.get(wf) ?? open.get(wf)}`)
+          .join(", ");
+  // One workflow that ended without a verdict has said so in its own line.
+  const repeats = done && workflows.length === 1 && !line.endsWith(" passed");
+  if (line !== w.said && !repeats) {
+    console.log(`  ${prefix}: ${line}`);
+    w.said = line;
+  }
+}
+
+/**
+ * A run on the base that was cancelled. consumer-b's tests cancel the run in
+ * progress on main when a newer push comes, so a land of this run after this
+ * one judges it with its own run. One by someone else leaves it to the next
+ * run on the base, which this run does not watch. Cancelled with nothing
+ * after it, someone cancelled it by hand, and nothing judged the land.
+ */
+function cancelledOnBase(
+  w: CiWatch,
+  wf: string,
+  prefix: string,
+  leave: (wf: string, word: string, why?: string) => void,
+): void {
+  const next = ciWatches[ciWatches.indexOf(w) + 1];
+  if (next) {
+    console.log(
+      `  ${prefix}: \`${wf}\` was cancelled by a newer push — judged with ${ref(
+        next.id,
+      )}'s land at ${next.sha.slice(0, 7)}`,
+    );
+    leave(wf, `judged with ${ref(next.id)}'s land`);
+    return;
+  }
+  const remote = run(
+    ["git", "ls-remote", "origin", `refs/heads/${baseBranch}`],
+    {
+      cwd: repoRoot,
+      allowFail: true,
+      timeoutMs: 60_000,
+    },
+  );
+  const head = remote.ok ? remote.out.trim().split(/\s/)[0] ?? "" : "";
+  if (/^[0-9a-f]{40}$/.test(head) && head !== w.sha) {
+    console.log(
+      `  ${prefix}: \`${wf}\` was cancelled, and ${baseBranch} has moved past it (now ${head.slice(
+        0,
+        7,
+      )}) — the next run on ${baseBranch} decides`,
+    );
+    leave(wf, `left to the next run on ${baseBranch}`);
+    return;
+  }
+  console.log(
+    `  ${prefix}: \`${wf}\` was cancelled, and nothing after it judges it — not checked`,
+  );
+  leave(wf, "cancelled", `cancelled on ${baseBranch}`);
+}
+
+/**
+ * Before the run's last word: the lands whose CI on the base is still open
+ * are waited for, each up to its deadline, so the last land of a run is read
+ * like the others. Not after a stop, which a person reads now: a signal, an
+ * error, `[q]`, or a base already failed. A second look waits a pause of at
+ * most 20 seconds; a stop signal ends the wait.
+ */
+async function waitForLandedCi(): Promise<void> {
+  const open = () => ciWatches.filter((w) => !w.done);
+  if (
+    !open().length ||
+    stoppedBy ||
+    stoppedOnError ||
+    stopRequested ||
+    baseFailed
+  ) {
+    return;
+  }
+  const until = Math.max(...open().map((w) => w.deadline));
+  console.log(
+    `\n  waiting for CI on ${baseBranch} for ${open()
+      .map((w) => ref(w.id))
+      .join(", ")} (at most ${Math.max(
+      1,
+      Math.ceil((until - Date.now()) / 60_000),
+    )} min) …`,
+  );
+  const pause = Math.min(intervalMs, 20_000);
+  for (;;) {
+    lookAtLandedCi();
+    if (!open().length || baseFailed || stoppedBy) break;
+    await new Promise<void>((r) => {
+      if (stoppedBy) return r();
+      const timer = setTimeout(r, pause);
+      wakeFromSleep = () => {
+        clearTimeout(timer);
+        r();
+      };
+    });
+    wakeFromSleep = null;
+  }
+  // A stop signal ended the wait: what was not read is said, with where to
+  // read it.
+  for (const w of open()) {
+    console.log(
+      `  not waited for: CI on ${baseBranch} for ${ref(
+        w.id,
+      )}'s land — ${listRunsArgv(ciRepo ?? "", w.sha, baseBranch).join(
+        " ",
+      )} shows it`,
+    );
+  }
+  // Set by the looks above, which the narrowing at the top cannot see.
+  const failed = baseFailed as BaseFailure | null;
+  if (failed) {
+    console.log(
+      `\n  ${failed.why}. It stays landed and closed; look at ${baseBranch} before anything else lands on it.`,
+    );
+    process.exitCode = 1;
+  }
 }
 
 /**
@@ -7685,8 +8004,9 @@ try {
     // One per round: every land fast-forwards the same master in the same main
     // worktree, so they cannot be done concurrently.
     // Before the land too: a land finished at startup may have failed its
-    // afterLand already.
-    if (stopForAfterLand()) break;
+    // afterLand already, and a land's CI on the base may have come back red.
+    lookAtLandedCi();
+    if (stopForBase()) break;
     const finished = tickets.filter((t) => awaitingLand(t, isParked));
     if (finished.length) {
       const next = landOrder(finished)[0] as Ticket;
@@ -7704,7 +8024,7 @@ try {
         }
       }
     }
-    if (stopForAfterLand()) break;
+    if (stopForBase()) break;
 
     if (stopRequested) {
       console.log(
@@ -8096,6 +8416,8 @@ try {
   // what finds it.
   console.error(e);
 }
+
+await waitForLandedCi();
 
 // A landed ticket the tracker has not been read as closed. Read once more
 // first, so a run that ends the round of its last land does not list a close

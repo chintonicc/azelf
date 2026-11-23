@@ -117,6 +117,11 @@ again with `--no-ci`, which skips every gate that waits for CI and notes each la
 `.slice-reviews/landed-without-ci.md`. That is the user's call, not yours: do not edit
 `slice.config.ts` to turn CI off. A run reads its config once, at start.
 
+A run that stops with "CI `<workflow>` is red on <base> … after it" (`afterLandCi`) has
+landed a slice whose CI on the base failed. The land stands. Tell the user, with the
+run's URL from the line above it, and do not start the run again until the base has been
+looked at: every land after it would go on top.
+
 `azelf relaunch <ticket>` sends a slice back to a new session in its worktree, with the
 ticket as it reads now and the last review's finding in `.slice-reviews/last-block.md`.
 Use it when a BLOCK needs the code changed, or when a slice that said done needs a

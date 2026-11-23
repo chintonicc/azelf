@@ -41,6 +41,7 @@ session in each, and lands the finished ones — re-running the gates itself, be
   - [What retries a parked slice](#what-retries-a-parked-slice)
   - [Fixing a slice by hand while the dispatcher runs](#fixing-a-slice-by-hand-while-the-dispatcher-runs)
   - [A check after every land](#a-check-after-every-land)
+  - [CI on the base after a land](#ci-on-the-base-after-a-land)
 - [Two dispatchers on one repo](#two-dispatchers-on-one-repo)
 - [In a coding agent](#in-a-coding-agent)
 - [Sandboxing](#sandboxing)
@@ -603,6 +604,7 @@ export default {
 | `provisionCopy` | `string[]` | gitignored files copied into each new worktree. An untracked `slice.config.ts` belongs here only if sessions are to read it; the shims read it from the main checkout, so `./scripts/slice-gates.sh` and the DB lock work without. The shims and agent files `init` writes need not be listed: the prep copies those by its own list |
 | `install` | `string[]?` | the command that installs a worktree's dependencies, after a prep and after a rebase that moved a manifest. Left out, the lockfile decides: `bun.lock` → `bun install`, `pnpm-lock.yaml` → `pnpm install --frozen-lockfile`, `yarn.lock` → `yarn install --frozen-lockfile`, `package-lock.json` → `npm ci`, a `package.json` with no lockfile → `bun install --frozen-lockfile` (writes none), no `package.json` → nothing. `[]` installs nothing |
 | `afterLand` | `string[]?` | a command run after every land, in the main checkout, under the land lock; a failure stops the landing. See [A check after every land](#a-check-after-every-land) |
+| `afterLandCi` | `{ workflows: string[]; deadlineMinutes?: number }?` | GitHub Actions workflows whose run on the landed SHA is read after each land; a red one stops the landing. See [CI on the base after a land](#ci-on-the-base-after-a-land) |
 | `refresh` | `{ when, run, name? }[]?` | steps run in the worktree after a rebase brought a change to a file matching `when`; what they change is committed on the branch. See [Refreshing after a rebase](#refreshing-after-a-rebase) |
 | `reviewReadDirs` | `string[]?` | directories the spec reviewer may read besides the worktree, relative to the repo root or absolute; each must exist. For tickets whose facts live in another repo or a spec folder |
 | `resolverCommands` | `string[]?` | command prefixes the conflict resolver may run (`"npm test"`, `".venv/bin/python -m pytest"`); each allows every command starting with it. Left out, it runs nothing and the gates judge its work. See [Letting an agent resolve a rebase conflict](#letting-an-agent-resolve-a-rebase-conflict) |
@@ -819,7 +821,9 @@ What it needs:
 
 What it costs: the dispatcher waits inside the gate for as long as CI takes, and holds
 the [gate lock](#two-dispatchers-on-one-repo) while it waits. It preps nothing and lands
-nothing in that time. Put `ciRuns` last, so a red local suite never pushes.
+nothing in that time. Put `ciRuns` last, so a red local suite never pushes. Each land
+then costs two CI runs, this one and the one the push to the base starts. To pay for
+one, read the second instead: [`afterLandCi`](#ci-on-the-base-after-a-land).
 
 It runs only at a land. `azelf gates` and `azelf run --gates` judge a worktree with
 nothing pushed, so they skip it with a line saying so (``skipped `CI: Tests` — it
@@ -841,7 +845,8 @@ not start. When the run ends on such slices, it says they wait for CI and not fo
 and prints the same command with `--no-ci`.
 
 **A run without CI:** `azelf run --no-ci …` skips every gate that waits for CI, for that
-run only, and says so per slice (``skipped `CI: Tests` — --no-ci``). The flag stays in the
+run only, and says so per slice (``skipped `CI: Tests` — --no-ci``). With
+[`afterLandCi`](#ci-on-the-base-after-a-land) it reads no CI after the land either. The flag stays in the
 command the run prints to pick it up again. What the CI checks that the local gates do
 not, azelf cannot know. `covers` says it, and the run prints it in its preamble:
 
@@ -1975,6 +1980,46 @@ afterLand: ["./scripts/health-after-deploy.sh"],
   of waiting and parks.
 - **A land killed while its check runs** does not run the check again: the record is
   already gone by then.
+
+### CI on the base after a land
+
+The push to the base branch starts its CI anyway. `afterLandCi` reads that run's verdict
+on the landed SHA instead of starting one of its own, as `ciRuns` does before the land.
+That is one CI run per land, not two:
+
+```ts
+afterLandCi: { workflows: ["Tests", "Docker-Gate"] },   // deadlineMinutes: 30 by default
+```
+
+- **When it reads:** once a round, one `gh run list` per land still open, counting only
+  the runs of pushes to the base branch. It does not hold the next land. That would be
+  `ciRuns` again, a CI wait per land, so a land that falls inside a red run's minutes
+  lands on top of it.
+- **Green:** ``CI on main at 3e812a7 (#246's land): `Tests`, `Docker-Gate` passed``.
+- **Red:** the landing stops, as for a failed `afterLand`. The land stays landed and
+  closed, and the run prints the run's URL and the command that picks it up again:
+
+  ```
+    ✗ CI on main at 3e812a7 (#246's land): `Tests` ended in failure — https://github.com/…/actions/runs/…
+    stopping: #246 landed, and CI `Tests` is red on main at 3e812a7 after it; #247 landed on top of it before the result came in. It stays landed and closed; …
+  ```
+
+- **Never started** (an account out of minutes): said with GitHub's words and noted in
+  `.slice-reviews/landed-without-ci.md`. Nothing stops.
+- **Cancelled by a newer push** (a workflow with `cancel-in-progress` on the base): when
+  that push was a later land of this run, its run judges both, and the line says so.
+  When someone else pushed, the next run on the base decides, and this run stops
+  watching. Cancelled with nothing after it, the land is noted.
+- **No run before the deadline:** noted, with the question whether the workflow runs on
+  a push to the base at all.
+- **The last land** is waited for before the run's last lines, up to the same deadline
+  (`waiting for CI on main for #246, #247 (at most 30 min) …`). Ctrl-C ends the wait.
+- **`--no-ci`** reads nothing, and notes every land.
+
+Leave out a workflow that is red on the base for reasons of its own: it would stop
+every run. It needs `gh`, signed in, and an origin on GitHub; a run whose origin is not
+on GitHub says so in its preamble and reads nothing. A restarted run does not read the
+lands of the run before it.
 
 ## Two dispatchers on one repo
 
