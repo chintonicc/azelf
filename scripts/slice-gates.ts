@@ -137,6 +137,12 @@ export type Gate = {
    * `azelf gates`, `azelf run --gates` — skips it and says it runs at the land.
    */
   landOnly?: true;
+  /**
+   * What this gate checks that the local gates do not, in the consumer's
+   * words. `ciRuns` carries it, and `azelf run --no-ci` prints it, so a run
+   * without CI says what it goes without.
+   */
+  covers?: string;
   /** It also runs after each commit of a slice session, as a warning. See `GateOptions`. */
   atCommit?: true;
 };
@@ -361,6 +367,13 @@ export type CiRunsOptions = {
   deadlineMinutes?: number;
   /** The pause between two looks at the runs. Default 20. */
   pollSeconds?: number;
+  /**
+   * What this CI checks that the local gates do not, as one line: consumer-b's
+   * is a clean install on Linux without `.env`, and the Docker image build.
+   * azelf cannot know it. `azelf run --no-ci` prints it in its preamble, as
+   * what that run goes without.
+   */
+  covers?: string;
 } & GateOptions;
 
 type CiVerdict =
@@ -427,6 +440,11 @@ export function ciRuns(opts: CiRunsOptions): Gate {
       "ciRuns: workflows must name at least one workflow, and no empty name — with none, every SHA would pass",
     );
   }
+  if (opts.covers !== undefined && !opts.covers.trim()) {
+    throw new Error(
+      "ciRuns: covers must say what this CI checks that the local gates do not — leave it out rather than empty",
+    );
+  }
   const deadlineMinutes = opts.deadlineMinutes ?? 45;
   const pollSeconds = opts.pollSeconds ?? 20;
   for (const [key, v] of [
@@ -462,6 +480,7 @@ export function ciRuns(opts: CiRunsOptions): Gate {
     retries: opts.retries,
     when: opts.when,
     landOnly: true,
+    ...(opts.covers ? { covers: opts.covers.trim() } : {}),
     // Carried, not dropped, so the config refuses it by name: a gate that waits
     // for CI on a push has nothing to judge right after a local commit.
     ...atCommitOf(opts),

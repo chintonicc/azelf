@@ -61,6 +61,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -75,7 +76,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { constants as osConstants, homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 // Every project-specific value — the base branch, the branch and worktree
 // naming, the ready label — comes from slice.config.ts through here. See that
@@ -84,6 +85,7 @@ import {
   agent,
   branchFor,
   config,
+  configPath,
   isTicketId,
   launcher as configuredLauncher,
   minFreeDiskGb,
@@ -186,6 +188,23 @@ import { installedVersion, ownRoot } from "./slice-version";
 // there in the one function that uses both.
 const baseBranch = config.baseBranch;
 
+/** The config file's mtime, or null when it cannot be read. */
+function mtimeOf(path: string): number | null {
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+// Read as early as this module can: the import above is when the config was
+// read, and an edit after it is one this run does not see. See noteConfigChange.
+let configSeenAt = mtimeOf(configPath);
+/** The config's path as the preamble and the change note print it. */
+const shownConfigPath = (() => {
+  const rel = relative(repoRoot, configPath);
+  return rel.startsWith("..") || isAbsolute(rel) ? configPath : rel;
+})();
+
 // ─── arguments ────────────────────────────────────────────────────────────
 // Parsed up here, not down in main: the launch helpers below close over
 // `sessionFlags`, and a const declared after its user only works by accident
@@ -238,6 +257,13 @@ const sessionFlags = [
 const reviewEnabled =
   !flag("--no-review") && (flag("--auto") || flag("--review"));
 const reviewBlocks = flag("--auto");
+// This run has no CI: every gate that waits for it (`landOnly`, which only
+// `ciRuns` makes) is skipped, and each land it would have judged is noted in
+// .slice-reviews/landed-without-ci.md. For an account out of Actions minutes,
+// and for a CI that costs a run per land. A flag and not a config edit,
+// because the config is read once (see noteConfigChange), and because it goes
+// into the resume command by itself.
+const noCi = flag("--no-ci");
 // Slices whose rebase an agent resolved in this run. Their spec review blocks
 // even without --auto: the human who ran slice-done.sh released the slice's
 // code, and the resolution was written after that.
@@ -1742,6 +1768,14 @@ const saidQuiet = new Map<TicketId, number>();
 
 /** `14:05`, in this machine's time, for a line a person reads at the time. */
 const clock = (ms: number): string => new Date(ms).toTimeString().slice(0, 5);
+/** `2026-11-22 21:40`, local time: for a line read later, in a file. */
+const stamp = (ms: number): string => {
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(
+    d.getDate(),
+  )} ${clock(ms)}`;
+};
 
 /**
  * Say once per stretch of quiet that a running session has shown no sign of
@@ -2496,11 +2530,7 @@ function saveReport(name: string, body: string, heading?: string): string {
   }
   if (!before) before = `${heading}\n`;
   const k = (before.match(/^## Attempt \d+/gm) ?? []).length + 1;
-  const now = new Date();
-  const pad = (n: number) => String(n).padStart(2, "0");
-  const at = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(
-    now.getDate(),
-  )} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const at = stamp(Date.now());
   writeFileSync(
     path,
     `${before.trimEnd()}\n\n## Attempt ${k} — ${at}\n\n${body.trim()}\n`,
@@ -3502,6 +3532,12 @@ const gateFailures = new Map<TicketId, string>();
  * started), with the gate's line. `tryLand` parks such a slice as `ci`.
  */
 const gatesUnavailable = new Map<TicketId, string>();
+/**
+ * Set by `gatesPass` under --no-ci: the names of the CI gates it skipped that
+ * would have run on this slice, judged by their `when`. `tryLand` notes them
+ * in landed-without-ci.md once the slice has landed.
+ */
+const skippedForNoCi = new Map<TicketId, string[]>();
 
 /**
  * Re-run the quality gates against a finished slice, in its own worktree,
@@ -3529,6 +3565,7 @@ function gatesPass(
   gateRuns.delete(n);
   gateFailures.delete(n);
   gatesUnavailable.delete(n);
+  skippedForNoCi.delete(n);
   const wt = worktreeFor(n);
   const fail = (why: string) => {
     console.log(`  ✗ ${ref(n)} not landed — ${why}`);
@@ -3551,14 +3588,29 @@ function gatesPass(
   // By hand there is no land, so a gate that judges the pushed commit (CI)
   // has nothing to judge: it would wait its whole deadline for a run that
   // never starts. Skipped, and said to be, so "passes every gate" is read
-  // as what it is — the local gates.
-  const gates = opts.byHand
-    ? config.gates.filter((g) => !g.landOnly)
-    : config.gates;
+  // as what it is — the local gates. Under --no-ci the same gates are skipped
+  // at the land, and the ones this slice would have run are kept for the
+  // record of lands without CI.
+  const gates =
+    opts.byHand || noCi
+      ? config.gates.filter((g) => !g.landOnly)
+      : config.gates;
   for (const g of config.gates) {
-    if (!gates.includes(g)) {
-      console.log(
-        `  skipped \`${g.name}\` — it judges the pushed commit, and runs at the land`,
+    if (gates.includes(g)) continue;
+    console.log(
+      opts.byHand
+        ? `  skipped \`${g.name}\` — it judges the pushed commit, and runs at the land`
+        : `  skipped \`${g.name}\` — --no-ci`,
+    );
+  }
+  if (noCi && !opts.byHand) {
+    const wouldRun = config.gates.filter(
+      (g) => g.landOnly && gateApplies(g, changed),
+    );
+    if (wouldRun.length) {
+      skippedForNoCi.set(
+        n,
+        wouldRun.map((g) => g.name),
       );
     }
   }
@@ -5248,8 +5300,12 @@ function waysOut(id: TicketId, kind: ParkKind, spent: number): string {
   // A BLOCK that was a verdict has a finding to take back to a session.
   const edit = kind === "review" && autoLand && lastBlock(id) !== null;
   if (kind === "review" && !edit) when.push("when the ticket is edited");
+  // A second run cannot take the slice while this one owns it, so landing
+  // without CI means this run stops and starts again with the flag.
   const retried = `retried ${when.join(", ")}, or now with: azelf retry ${id}${
-    kind === "ci" ? " once CI runs again" : ""
+    kind === "ci"
+      ? " once CI runs again; to land it without CI, stop this run and start it again with --no-ci"
+      : ""
   }`;
   if (kind !== "review") return retried;
   return `${retried}; sent back to a session${
@@ -5352,6 +5408,63 @@ let stopRequested = false;
  * anything else: the base needs a person, and a next land would go on top.
  */
 let afterLandFailed: TicketId | null = null;
+
+const WITHOUT_CI = "landed-without-ci.md";
+/** The slices this run landed without a CI verdict, for its last word. */
+const landedWithoutCi: TicketId[] = [];
+
+/**
+ * One line in `.slice-reviews/landed-without-ci.md` for a land that reached
+ * the base with no CI verdict: when, which slice, the base's head after it,
+ * what did not run, and why. In the main checkout, whose `.slice-reviews/`
+ * outlives the worktrees and is in the exclude block `azelf init` writes.
+ * Append-only, and its first paragraph says what clears it, because the file
+ * is read later by someone who did not see the run. A failed write is said
+ * and is all: the land stands either way.
+ */
+function noteWithoutCi(
+  id: TicketId,
+  sha: string | null,
+  what: string,
+  why: string,
+): void {
+  const path = join(REVIEW_DIR, WITHOUT_CI);
+  const at = sha ? `${baseBranch} at ${sha.slice(0, 7)}` : baseBranch;
+  const line = `- ${stamp(Date.now())} · ${ref(
+    id,
+  )} · ${at} · not run: ${what} (${why})\n`;
+  try {
+    mkdirSync(REVIEW_DIR, { recursive: true });
+    if (!existsSync(path)) {
+      writeFileSync(
+        path,
+        `# Landed without a CI verdict
+
+Each line is a land that reached \`${baseBranch}\` without the CI verdict azelf was
+set to wait for: under \`azelf run --no-ci\`, or with a CI run that did not start.
+A green CI run on a commit of \`${baseBranch}\` covers every land that commit
+contains, so one green run on \`${baseBranch}\`'s head, started after the last line
+here, covers them all. To start one by hand:
+\`gh workflow run <workflow> --ref ${baseBranch}\`.
+
+`,
+      );
+    }
+    appendFileSync(path, line);
+  } catch (e) {
+    console.log(
+      `  could not note ${ref(id)} in .slice-reviews/${WITHOUT_CI}: ${errorLine(
+        e,
+      )}`,
+    );
+  }
+  if (!landedWithoutCi.includes(id)) landedWithoutCi.push(id);
+  console.log(
+    `  ${ref(
+      id,
+    )} landed without ${what} (${why}) — noted in .slice-reviews/${WITHOUT_CI}`,
+  );
+}
 
 /** Resolver passes one land attempt gets when the base moves under it. */
 const RESOLVE_PASSES = 2;
@@ -5774,6 +5887,8 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
       else landedWhileOpen.set(o.id, [t.id]);
     }
     noteLanded(t, landing);
+    const notRun = skippedForNoCi.get(t.id);
+    if (notRun) noteWithoutCi(t.id, landedAt, notRun.join("; "), "--no-ci");
     const flaky = flakyGates.get(t.id);
     if (flaky) landedOnRetry.set(t.id, flaky);
     parked.delete(t.id);
@@ -7208,12 +7323,42 @@ if (autoLand) {
     `  run ./scripts/slice-done.sh inside a finished slice to release it; this then verifies it, lands it and pushes ${config.baseBranch} to origin.`,
   );
 }
+// Under --no-ci the gates line names the gates that run, and the line after
+// it says what does not, with the consumer's own words for what goes missing.
+const ciGates = config.gates.filter((g) => g.landOnly);
+const landGates = noCi ? config.gates.filter((g) => !g.landOnly) : config.gates;
 console.log(
-  config.gates.length
-    ? `  gates before each land: ${config.gates
+  landGates.length
+    ? `  gates before each land: ${landGates
         .map((g) => `\`${g.name}\``)
         .join(", ")}`
-    : "  gates: NONE configured — whatever is committed lands. See slice.config.ts.",
+    : config.gates.length
+      ? "  gates before each land: none in this run — every gate configured waits for CI."
+      : "  gates: NONE configured — whatever is committed lands. See slice.config.ts.",
+);
+if (noCi && ciGates.length) {
+  const one = ciGates.length === 1;
+  const covered = ciGates.flatMap((g) =>
+    g.covers ? [one ? g.covers : `\`${g.name}\`: ${g.covers}`] : [],
+  );
+  console.log(
+    `  CI: OFF (--no-ci) — ${ciGates.map((g) => `\`${g.name}\``).join(", ")} ${
+      one ? "does" : "do"
+    } not run before a land. ${
+      covered.length
+        ? `${one ? "It also checks" : "They also check"}: ${covered.join(
+            "; ",
+          )}.`
+        : "What it checks that the local gates do not goes unchecked; ciRuns({ covers }) would name it here."
+    } Each land it would have judged is noted in .slice-reviews/${WITHOUT_CI}.`,
+  );
+} else if (noCi) {
+  console.log(
+    "  --no-ci: no gate here waits for CI — the flag changes nothing.",
+  );
+}
+console.log(
+  `  config: ${shownConfigPath}, read once at start — an edit reaches this run's gates when the run is started again.`,
 );
 if (config.afterLand?.length) {
   console.log(
@@ -7331,6 +7476,26 @@ function noteAzelfChange(): void {
   azelfChangeNoted = true;
   console.log(
     `\n  azelf changed under this run: ${azelfAtStart} → ${now}. This dispatcher is still running ${azelfAtStart}; the sessions and lands it starts run ${now} from now on. Restart it (the same command) when nothing is landing.`,
+  );
+}
+
+/**
+ * Said each time the config file changes after the run read it. The config is
+ * imported once and never again: it holds functions (gates with closures, the
+ * tracker, the launcher), and half a reload is a state nobody tests. The
+ * scripts this run starts read it afresh, so for as long as it runs the two
+ * disagree. On consumer-b `ciRuns` was commented out mid-run to turn CI off;
+ * the edit did nothing until a restart, and nothing said so. Said again only
+ * after a further change.
+ */
+function noteConfigChange(): void {
+  const now = mtimeOf(configPath);
+  if (now === null || now === configSeenAt) return;
+  configSeenAt = now;
+  console.log(
+    `\n  ${shownConfigPath} changed at ${clock(
+      now,
+    )}, after this run started. This run keeps the config it started with, gates included; slice-land.sh and the sessions' own azelf gates read the new one. To apply the change here: stop this run with Ctrl-C when nothing is landing, then\n\n    ${resumeCommand()}`,
   );
 }
 
@@ -7486,6 +7651,7 @@ try {
     processTable = null;
     startingAnswers.clear();
     noteAzelfChange();
+    noteConfigChange();
     if (round > 1) {
       noteBattery();
       const { failed, allFailed } = refreshOpenState(tickets);
@@ -7976,13 +8142,24 @@ function resumeCommand(): string {
   return runCommand(tickets.filter((t) => t.open).map((t) => t.id));
 }
 
-/** This run's own command, minus `--once`, over `ids` instead of its own. */
-function runCommand(ids: TicketId[]): string {
+/** `resumeCommand` with --no-ci: for slices parked because CI did not start. */
+function noCiCommand(): string {
+  return runCommand(
+    tickets.filter((t) => t.open).map((t) => t.id),
+    noCi ? [] : ["--no-ci"],
+  );
+}
+
+/**
+ * This run's own command, minus `--once`, over `ids` instead of its own, with
+ * `more` flags after its own.
+ */
+function runCommand(ids: TicketId[], more: string[] = []): string {
   const flags = argv.filter(
     (a, i) =>
       a !== "--once" && !(isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? "")),
   );
-  return [launcherCommand(), "run", ...flags, ...ids].join(" ");
+  return [launcherCommand(), "run", ...flags, ...more, ...ids].join(" ");
 }
 
 /**
@@ -8021,9 +8198,9 @@ if (parked.size > 0) {
         waitingForCi.length === 1 ? "waits" : "wait"
       } for CI, not for a fix: CI did not start, so nothing in ${
         waitingForCi.length === 1 ? "it" : "them"
-      } was judged. Once CI runs again, the command below tries ${
+      } was judged. Once CI runs again, the last command below tries ${
         waitingForCi.length === 1 ? "it" : "them"
-      } again.`,
+      } again. To land without CI instead:\n\n    ${noCiCommand()}`,
     );
   }
   // Not the park line's "retried when …": that is a running dispatcher's
@@ -8044,6 +8221,16 @@ if (parked.size > 0) {
   process.exitCode = 1;
 } else if (stoppedOnError || stoppedBy) {
   console.log(`\n  To pick the run up again:\n\n    ${resumeCommand()}`);
+}
+
+// Landed, with nothing in CI having judged them: the file says what clears
+// them, and this run is the last place anyone is told.
+if (landedWithoutCi.length > 0) {
+  console.log(
+    `\n  landed without CI: ${landedWithoutCi
+      .map((id) => ref(id))
+      .join(", ")} — see .slice-reviews/${WITHOUT_CI}`,
+  );
 }
 
 // After the parked list, because a hold is not something to fix: it is

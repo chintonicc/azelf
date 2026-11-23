@@ -23,6 +23,9 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run --auto-resolve       hand a rebase conflict to the agent without
                              asking (implied by --auto)
   azelf run --no-auto-resolve    never let an agent resolve a rebase conflict
+  azelf run --no-ci          skip the gates that wait for CI (ciRuns) in this
+                             run; each land is noted in
+                             .slice-reviews/landed-without-ci.md
   azelf run --gates 12       run the landing gates on slice 12, land nothing
   azelf run --gates          the same for the slice whose worktree you are in
   azelf run --gates --no-lock    without waiting for the gate lock (azelf gates)
@@ -74,6 +77,7 @@ const FLAGS = new Set([
   "--no-review",
   "--auto-resolve",
   "--no-auto-resolve",
+  "--no-ci",
   "--gates",
   "--on-base",
   "--no-lock",

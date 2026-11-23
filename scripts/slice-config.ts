@@ -608,6 +608,17 @@ function validate(c: SliceConfig): SliceConfig {
         `gates[${i}] (\`${g.name}\`): when must be a non-empty array of path patterns, like ["ios/**"]`,
       );
     }
+    // Printed under --no-ci as what the run goes without: an empty one would
+    // say "nothing" by accident.
+    const covers: unknown = g.covers;
+    if (
+      covers !== undefined &&
+      !(typeof covers === "string" && covers.trim() !== "")
+    ) {
+      bad(
+        `gates[${i}] (\`${g.name}\`): covers must be a non-empty string — what this gate checks that the local gates do not`,
+      );
+    }
     const atCommit: unknown = g.atCommit;
     if (atCommit !== undefined && typeof atCommit !== "boolean") {
       bad(`gates[${i}] (\`${g.name}\`): atCommit must be true or false`);

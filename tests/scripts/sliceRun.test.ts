@@ -4068,7 +4068,10 @@ case "$1" in *CORRECTED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; es
       "nothing can advance — every open slice is parked.",
     );
     expect(r.out).toContain(
-      "#40 waits for CI, not for a fix: CI did not start, so nothing in it was judged. Once CI runs again, the command below tries it again.",
+      "#40 waits for CI, not for a fix: CI did not start, so nothing in it was judged. Once CI runs again, the last command below tries it again. To land without CI instead:",
+    );
+    expect(r.out).toMatch(
+      /To land without CI instead:\n\n {4}\S.* run -y --interval 1 --no-ci 40\n/,
     );
     expect(r.code).toBe(1);
   });
@@ -4141,6 +4144,193 @@ case "$1" in *CORRECTED*) echo "VERDICT: PASS" ;; *) echo "VERDICT: BLOCK" ;; es
  * is that other run: during the spec review it commits to main, in the main
  * checkout next to the worktree, `moves` times in all.
  */
+/**
+ * `azelf run --no-ci`: a run that skips the gates waiting for CI, and notes
+ * each land they would have judged. From consumer-b's Backend #246, where the
+ * only way to land without CI was to comment `ciRuns` out of the config and
+ * restart, and no land recorded that it went without.
+ */
+describe("azelf run --no-ci", () => {
+  const RECORD = join(".slice-reviews", "landed-without-ci.md");
+  /**
+   * A consumer with a local gate and a CI gate that only notes it was called.
+   * `when` scopes the CI gate; the slice changes `file`.
+   */
+  const withCi = (opts: { when?: string[]; file?: string } = {}) => {
+    const fx = makeConsumer({ worktrees: [40], remote: true, gate: ["true"] });
+    const called = join(fx.root, "ci-called");
+    const config = join(fx.main, "slice.config.ts");
+    const ci = {
+      name: "CI: Tests",
+      landOnly: true,
+      covers: "a clean install on Linux",
+      ...(opts.when ? { when: opts.when } : {}),
+    };
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[(.*)\],/,
+        `gates: [$1, { ...${JSON.stringify(
+          ci,
+        )}, run: (ctx) => (ctx.exec(["touch", ${JSON.stringify(
+          called,
+        )}], ctx.worktree), { ok: true }) }],`,
+      ),
+    );
+    commitIn(fx.wt(40), opts.file ?? "a.txt", "a\n", "feat: a");
+    sh(fx.wt(40), "./scripts/slice-done.sh");
+    c = fx;
+    return { fx, called };
+  };
+
+  it("does not run the CI gate, lands, and notes the land under the file's header", () => {
+    const { fx, called } = withCi();
+    const r = runDispatcher(fx, ["-y", "--no-ci", "--interval", "1", "40"]);
+
+    expect(r.out).toContain("  gates before each land: `true`\n");
+    expect(r.out).toContain(
+      "  CI: OFF (--no-ci) — `CI: Tests` does not run before a land. It also checks: a clean install on Linux. Each land it would have judged is noted in .slice-reviews/landed-without-ci.md.",
+    );
+    expect(r.out).toContain("  skipped `CI: Tests` — --no-ci");
+    expect(existsSync(called)).toBe(false);
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+
+    const head = git(fx.main, "rev-parse", "--short=7", "main");
+    expect(r.out).toContain(
+      "#40 landed without CI: Tests (--no-ci) — noted in .slice-reviews/landed-without-ci.md",
+    );
+    expect(r.out).toContain(
+      "landed without CI: #40 — see .slice-reviews/landed-without-ci.md",
+    );
+    const record = readFileSync(join(fx.main, RECORD), "utf8");
+    expect(record).toMatch(/^# Landed without a CI verdict\n/);
+    expect(record).toContain(
+      "covers them all. To start one by hand:\n`gh workflow run <workflow> --ref main`.",
+    );
+    const lines = record.split("\n").filter((l) => l.startsWith("- "));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(
+      new RegExp(
+        `^- \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d · #40 · main at ${head} · not run: CI: Tests \\(--no-ci\\)$`,
+      ),
+    );
+    expect(r.code).toBe(0);
+  });
+
+  it("notes nothing for a slice the CI gate's when does not reach", () => {
+    const { fx, called } = withCi({ when: ["docker/**"] });
+    const r = runDispatcher(fx, ["-y", "--no-ci", "--interval", "1", "40"]);
+
+    expect(r.out).toContain("  skipped `CI: Tests` — --no-ci");
+    expect(existsSync(called)).toBe(false);
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    expect(r.out).not.toContain("landed without CI");
+    expect(existsSync(join(fx.main, RECORD))).toBe(false);
+  });
+
+  it("runs the CI gate without the flag, and notes nothing", () => {
+    const { fx, called } = withCi();
+    const r = runDispatcher(fx, ["-y", "--interval", "1", "40"]);
+
+    expect(r.out).toContain("  gates before each land: `true`, `CI: Tests`\n");
+    expect(r.out).not.toContain("CI: OFF");
+    expect(existsSync(called)).toBe(true);
+    expect(git(fx.main, "log", "-1", "--format=%s")).toBe("feat: a");
+    expect(existsSync(join(fx.main, RECORD))).toBe(false);
+  });
+
+  it("stays in the command that picks the run up again", () => {
+    const { fx } = withCi();
+    const config = join(fx.main, "slice.config.ts");
+    // The local gate red, so the run ends with the slice parked.
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        'exitCode(["true"]',
+        'exitCode(["false"]',
+      ),
+    );
+    const r = runDispatcher(fx, ["-y", "--no-ci", "--interval", "1", "40"]);
+
+    expect(r.out).toContain("the gates are red");
+    expect(r.out).toMatch(
+      /To pick the run up again:\n\n {4}\S.* run -y --no-ci --interval 1 40\n/,
+    );
+    expect(existsSync(join(fx.main, RECORD))).toBe(false);
+  });
+
+  it("says it changes nothing when no gate waits for CI", () => {
+    c = makeConsumer({ worktrees: [40], gate: ["true"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    const r = runDispatcher(c, ["-y", "--no-ci", "--interval", "1", "40"]);
+
+    expect(r.out).toContain(
+      "  --no-ci: no gate here waits for CI — the flag changes nothing.",
+    );
+    expect(r.out).not.toContain("landed without CI");
+    expect(existsSync(join(c.main, RECORD))).toBe(false);
+  });
+
+  it("the config refuses an empty covers", () => {
+    c = makeConsumer({ gate: ["true"] });
+    const config = join(c.main, "slice.config.ts");
+    writeFileSync(
+      config,
+      readFileSync(config, "utf8").replace(
+        /gates: \[.*\],/,
+        'gates: [{ name: "CI: Tests", landOnly: true, covers: " ", run: () => ({ ok: true }) }],',
+      ),
+    );
+    const r = runDispatcher(c, ["--plan"]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain(
+      "gates[0] (`CI: Tests`): covers must be a non-empty string — what this gate checks that the local gates do not",
+    );
+  });
+});
+
+/**
+ * The config is read once, at start. On consumer-b `ciRuns` was commented out
+ * of a running dispatcher's config to turn CI off, and the edit did nothing
+ * until a restart, with nothing to say so.
+ */
+describe("a config edited under a running dispatcher", () => {
+  it("is said to be read once at start", () => {
+    c = makeConsumer({ worktrees: [40], gate: ["true"] });
+    const r = runDispatcher(c, ["-y", "--once", "40"]);
+
+    expect(r.out).toContain(
+      "  config: slice.config.ts, read once at start — an edit reaches this run's gates when the run is started again.",
+    );
+  });
+
+  it("says so once per change, with the command that applies it", async () => {
+    c = makeConsumer({ worktrees: [40] });
+    sessions.push(fakeSession(c, 40));
+    d = startDispatcher(c, ["-y", "--interval", "1", "40"]);
+    await d.until("[round 1]");
+
+    const config = join(c.main, "slice.config.ts");
+    const touch = (minutes: number) => {
+      const at = new Date(Date.now() + minutes * 60_000);
+      utimesSync(config, at, at);
+    };
+    const CHANGED =
+      /slice\.config\.ts changed at \d\d:\d\d, after this run started\. This run keeps the config it started with, gates included; slice-land\.sh and the sessions' own azelf gates read the new one\. To apply the change here: stop this run with Ctrl-C when nothing is landing, then\n\n {4}\S.* run -y --interval 1 40\n/g;
+    const said = () => (d?.output() ?? "").match(CHANGED)?.length ?? 0;
+
+    touch(1);
+    await d.until(/after this run started[\s\S]*(\[round \d+\][\s\S]*){3}/);
+    expect(said()).toBe(1);
+
+    touch(2);
+    await d.until(/(after this run started[\s\S]*){2}/);
+    expect(said()).toBe(2);
+  }, 60_000);
+});
+
 describe("a land overtaken during the review", () => {
   const racer = (file: string, moves: number) => [
     "bash",

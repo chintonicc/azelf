@@ -746,6 +746,17 @@ describe("ciRuns", () => {
     ).toBeUndefined();
   });
 
+  /** What `azelf run --no-ci` prints as the run goes without. */
+  it("carries covers onto the gate, and refuses an empty one", () => {
+    expect(
+      ciRuns({ workflows: ["Tests"], covers: " a clean install " }).covers,
+    ).toBe("a clean install");
+    expect(ciRuns({ workflows: ["Tests"] })).not.toHaveProperty("covers");
+    expect(() => ciRuns({ workflows: ["Tests"], covers: "  " })).toThrow(
+      "ciRuns: covers must say what this CI checks that the local gates do not — leave it out rather than empty",
+    );
+  });
+
   const SHA = "0123456789abcdef0123456789abcdef01234567";
   const CI_REF = "refs/heads/azelf-ci/ticket-40-0123456789ab";
   const LIST = `gh run list -R acme/app --commit ${SHA} --limit 30 --json databaseId,name,status,conclusion,url`;

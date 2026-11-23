@@ -109,6 +109,14 @@ next round, whatever it parked on. A review verdict on an unchanged diff and an
 unchanged ticket cannot change, so re-running it would be a paid loop rather than
 optimism. A parked ticket closed some other way — landed by hand — stops counting.
 
+A slice parked as `ci` was not judged: its CI run never started (GitHub's reason is in
+the park line, often an account out of Actions minutes). There is nothing to fix in the
+slice, and the base moving does not retry it. Tell the user what GitHub said. Once CI
+runs again, `azelf retry <ticket>` tries it. To land without CI, the user starts the run
+again with `--no-ci`, which skips every gate that waits for CI and notes each land in
+`.slice-reviews/landed-without-ci.md`. That is the user's call, not yours: do not edit
+`slice.config.ts` to turn CI off. A run reads its config once, at start.
+
 `azelf relaunch <ticket>` sends a slice back to a new session in its worktree, with the
 ticket as it reads now and the last review's finding in `.slice-reviews/last-block.md`.
 Use it when a BLOCK needs the code changed, or when a slice that said done needs a
