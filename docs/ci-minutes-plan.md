@@ -1,6 +1,6 @@
 # CI that never started is not red, a run without CI, and CI read after the land
 
-**Status:** planned
+**Status:** Phase 1 (f748a86) landed 2026-11-22
 **Written:** 2026-11-22
 **Companion:** consumer-b's friction entries of 2026-11-22: "Backend #246, #247 · dispatcher" (Actions
 out of minutes, two green slices parked as red) and the maintainer's own entry beneath it (two CI runs per land).
@@ -126,35 +126,38 @@ What a land costs in CI, per configuration:
 | `afterLandCi` + `ciRuns({ trigger: "dispatch", when })` | once, plus the listed workflows on a land that touches a `when` path |
 | `--no-ci` | the run on main, unread |
 
-## Phase 1 — a CI that never started parks as `ci`, with GitHub's words
+## Phase 1 — a CI that never started parks as `ci`, with GitHub's words (f748a86)
 
-- [ ] 1a. A module `scripts/slice-ci.ts` for reading GitHub Actions:
-  - Move `ghRepoOf`, `CiRun` and `CiVerdict` there from `slice-gates.ts:351-390`. `slice-gates.ts`
-    re-exports `ghRepoOf` so that `index.ts` does not change.
+- [x] 1a. A module `scripts/slice-ci.ts` for reading GitHub Actions:
+  - Move `ghRepoOf` and `CiRun` there from `slice-gates.ts:351-390`. `slice-gates.ts` re-exports
+    `ghRepoOf` so that `index.ts` does not change. `CiVerdict` stays with `ciRuns`: it is that
+    gate's own view, with a `done` case for the failed runs it then classifies.
   - Pull the run listing out of `ciRuns`' closures (`look`, `slice-gates.ts:505`) as
-    `listRuns(exec, cwd, repo, sha)`.
+    `listRuns(exec, cwd, repo, sha)`, and the command a failure names as `listRunsArgv`.
   - Pull the decision out the same way (`verdict`, `:527`) as `newestPerWorkflow(runs, workflows, after)`.
   - New: `whyNotStarted(exec, cwd, repo, run): string | null`. It returns `null` for a run that
     started. Otherwise it returns GitHub's message: the first `failure` annotation of the first job,
-    or else `startup_failure`, "no job ran a step", or "cancelled before it started". If one of its
-    calls fails, it returns `null` (counted as red, see Decisions).
-- [ ] 1b. `GateResult` (`slice-gates.ts:91`) gets `unavailable?: true`, with a doc comment.
+    or else `startup_failure`, "no job ran a single step", or "it was cancelled before a job
+    started". If the jobs cannot be read, it returns `null` (counted as red, see Decisions). If only
+    the annotation cannot be read, the run still did not start, and the words are azelf's own.
+    A GitHub Enterprise repo is asked through `gh api --hostname`.
+- [x] 1b. `GateResult` (`slice-gates.ts:91`) gets `unavailable?: true`, with a doc comment.
   `ciRuns`: among the completed, unsuccessful newest runs, a started one is red as today. When none
   of them started, the gate returns
   `{ ok: false, unavailable: true, why: "CI: \`Tests\` did not start on b8f0fea — GitHub: «…»", detail: [url, "gh run view <id> -R <repo>"] }`.
   The `hint` is not appended, because it speaks to a red CI ("the CI on the push SHA is not green").
-- [ ] 1c. `runGates` (`slice-gates.ts:737`): no retry after an `unavailable` result. `GateFailure`
+- [x] 1c. `runGates` (`slice-gates.ts:737`): no retry after an `unavailable` result. `GateFailure`
   carries the field. `GatesResult` gets `unavailable: true` when every failure has it.
-- [ ] 1d. `gatesPass` (`slice-run.ts:3518`) keeps the answer in a set `gatesUnavailable`, next to
-  `gateFailures`. `tryLand` (`:5640`): when the set has the slice, `park(t, "ci", <why>)`, before
+- [x] 1d. `gatesPass` (`slice-run.ts:3518`) keeps the answer, with the gate's line, in a map
+  `gatesUnavailable`, next to `gateFailures`. `tryLand` (`:5640`): when the set has the slice, `park(t, "ci", <why>)`, before
   `repairResolution`.
-- [ ] 1e. `ParkKind` (`:4847`) gets `"ci"`. `retryDue` (`:4935`) has no base trigger for it, because
+- [x] 1e. `ParkKind` (`:4847`) gets `"ci"`. `retryDue` (`:4935`) has no base trigger for it, because
   the existing conditions name `gates` and `land` explicitly. `waysOut` (`:5225`): "retried when its
   branch moves, or now with: azelf retry <id>, once CI runs again".
-- [ ] 1f. The summary after the parked list (`:7983`): when any park is `ci`, one block. It says how
-  many slices wait for CI and not for a fix. It gives GitHub's message once, from the first of them.
-  Then: "When CI runs again: <resumeCommand>".
-- [ ] 1g. Tests:
+- [x] 1f. The summary after the parked list (`:7983`): when any park is `ci`, one line. It names the
+  slices that wait for CI and not for a fix, and points to the resume command below it. GitHub's
+  message is already in each parked line, because the park reason is the gate's line.
+- [x] 1g. Tests:
   - `sliceGates.test.ts`, next to the ciRuns tests (`:691`), with the fake `exec`. The billing case:
     a failed run, a job without steps, the annotation. It is unavailable and its `why` has the message.
     Also `startup_failure` is unavailable, and so is a job without steps and without an annotation.
@@ -162,7 +165,7 @@ What a land costs in CI, per configuration:
     during the classification, the run is red. `runGates` does not retry an unavailable gate that
     has `retries: 2`.
   - `sliceRun.test.ts`: a gate that returns `unavailable` parks the slice as `ci`. A base move does not
-    retry it, and `.slice-retry` does. The summary names the message once for two such slices.
+    retry it, and `azelf retry` does. The summary of a run that ends on it has the line.
 
 ## Phase 2 — `azelf run --no-ci`, a record of lands without CI, a config that says it is frozen
 
