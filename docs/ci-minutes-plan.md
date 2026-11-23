@@ -1,6 +1,6 @@
 # CI that never started is not red, a run without CI, and CI read after the land
 
-**Status:** Phase 1 (f748a86) and Phase 2 (5bfa8bc) landed 2026-11-22
+**Status:** Phases 1 (f748a86), 2 (5bfa8bc) and 3 (1a5ef10) landed 2026-11-22; Phase 4 open
 **Written:** 2026-11-22
 **Companion:** consumer-b's friction entries of 2026-11-22: "Backend #246, #247 · dispatcher" (Actions
 out of minutes, two green slices parked as red) and the maintainer's own entry beneath it (two CI runs per land).
@@ -220,12 +220,12 @@ As built, where it differs from the above:
   not a fix and that turning CI off is the user's call. Phase 1's behaviour was not in the README
   either, and is now.
 
-## Phase 3 — `afterLandCi`: read the CI on the landed SHA and stop on red
+## Phase 3 — `afterLandCi`: read the CI on the landed SHA and stop on red (1a5ef10)
 
-- [ ] 3a. `slice-config.ts`: `afterLandCi?: { workflows: string[]; deadlineMinutes?: number }`
+- [x] 3a. `slice-config.ts`: `afterLandCi?: { workflows: string[]; deadlineMinutes?: number }`
   next to `afterLand` (`:129`). The doc comment carries the Decisions in short. Validation like
   `ciRuns`': at least one workflow, no empty name, a positive deadline. The default deadline is 30.
-- [ ] 3b. `slice-run.ts`: after a successful land (`tryLand`, where `landedHeads` is set, `:5740`),
+- [x] 3b. `slice-run.ts`: after a successful land (`tryLand`, where `landedHeads` is set, `:5740`),
   add a watch `{ id, sha: landedAt, since }` unless `--no-ci` is set. Once per round,
   `watchLandedCi()` runs after `stopForAfterLand()` and before the land (`:7499`). For each open
   watch it calls `listRuns` and `newestPerWorkflow` from `slice-ci.ts`, then decides:
@@ -241,18 +241,18 @@ As built, where it differs from the above:
     the last error.
 
   Only changes are printed, not every look, as in `ciRuns`' `tell`.
-- [ ] 3c. Generalise `afterLandFailed` (`:5336`) to `baseFailed: { id, why } | null`, and make
+- [x] 3c. Generalise `afterLandFailed` (`:5336`) to `baseFailed: { id, why } | null`, and make
   `stopForAfterLand` into `stopForBase`. The reasons:
   - "afterLand failed after it", as today.
   - "CI `Tests` is red on main at 3e812a7, after #246 landed: <url>". If later lands are on top of
     it, the reason names them: "#247 landed on top of it before the result came in".
-- [ ] 3d. Before the summary (after the loop, before `:7983`), open watches are waited for. A look
+- [x] 3d. Before the summary (after the loop, before `:7983`), open watches are waited for. A look
   every 20 s, at most until each watch's deadline, with the line "waiting for CI on main for #246,
   #247 (at most N min) …". A red result here sets the exit code and prints the stop's lines without
   the resume block. SIGINT ends the wait (`watchSignals`).
-- [ ] 3e. Preamble: "CI after each land: `Tests`, `Docker-Gate` on the landed SHA, read each round —
+- [x] 3e. Preamble: "CI after each land: `Tests`, `Docker-Gate` on the landed SHA, read each round —
   a red one stops the landing." With `--no-ci`: "CI after each land: off (--no-ci)."
-- [ ] 3f. Tests (`sliceRun.test.ts`, with a stub `gh` on `PATH`, as the overlap report's test stubs
+- [x] 3f. Tests (`sliceRun.test.ts`, with a stub `gh` on `PATH`, as the overlap report's test stubs
   `git`):
   - Green prints the line and the run goes on.
   - Red stops before the next land, with the URL and the resume command.
@@ -261,6 +261,33 @@ As built, where it differs from the above:
   - Missing after the deadline writes the line.
   - `--no-ci` makes no `gh run list` call.
   - The end of the run waits for a watch that is still open and prints its verdict.
+
+As built, where it differs from the above:
+
+- 3b: `gh run list` is asked with `--branch <base>` too (`listRuns` took an optional branch). The
+  same SHA has runs from `ciRuns`' own branch, and with Phase 4's shape those would be read as the
+  base's verdict. The repo is read from `remote.origin.url` as configured. The lines: "`Tests` ended
+  in failure — <url>" on red, "`Tests` did not start — GitHub: "…"", "was cancelled by a newer push —
+  judged with #247's land at …", "was cancelled, and main has moved past it (now …) — the next run on
+  main decides" (read with `git ls-remote`), and, at the deadline, "no `Tests` run after 30 minutes —
+  not checked (does it run on a push to main?)" or "still running after 30 minutes — not waited for".
+  Each answer without a verdict is noted once per land and reason, as "CI on main: Tests (did not
+  start)".
+- 3c: `stopForBase` keeps the afterLand wording. The CI reason reads "#246 landed, and CI `Tests` is
+  red on main at 3e812a7 after it; #247 landed on top of it before the result came in". The URL is on
+  the ✗ line just above the stop, so the stop line stays one sentence.
+- 3d: no wait after a stop that a person reads now: a signal, an error, `[q]`, or a base that already
+  failed. The pause is the run's `--interval`, at most 20 s. A wait ended by Ctrl-C prints, per land
+  not read, the `gh run list` command that shows its run.
+- 3e: under `--no-ci` the line also says that each land is noted. A run whose origin is not on GitHub
+  says so and reads nothing.
+- With `afterLandCi`, `--no-ci` notes every land ("not run: CI after the land: Tests (--no-ci)"),
+  and the preamble no longer says the flag changes nothing.
+- 3f, also: someone else's push past a cancelled run, Ctrl-C during the wait, and the config check.
+  The stub `gh` answers by the subject of the commit it is asked about, and origin is
+  `github.com/acme/app` rewritten to the local bare repo with `insteadOf`.
+- README ("CI on the base after a land", the configuration table, a link from "CI as a gate") and
+  `agent/commands/azelf.md` (a red base stops the run: tell the user, do not restart).
 
 ## Phase 4 — `ciRuns({ trigger: "dispatch" })` for workflows that run only on main
 
