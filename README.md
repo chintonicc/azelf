@@ -930,6 +930,30 @@ a hierarchy — ticket bodies cross-reference each other constantly ("reads best
 after #19"), and treating those as structure would exclude tickets that were only
 giving context. Only ids under the heading count.
 
+**A wave under one parent is `azelf run --parent <id>`.** The run's set is the ready
+tickets under that ticket: its sub-issues, and the tickets whose `## Parent` section
+names it. The parent itself is never one of them, and a child that is a parent itself
+is left out as it is in a bare run. Unlike a bare run, the set is read again at the
+top of every round:
+
+```
+[round 7] #250 joined — ready under #206 since the run started (wave 2)
+  concurrency cap: 1 → 2, the widest wave now
+```
+
+A child labelled ready after the run started joins it, claimed and given its wave,
+and without `--max` the cap grows with the tree. One that another dispatcher holds,
+that is a parent itself, or that has a blocker only its body names is said once and
+left out. One that loses the ready label before anything started on it leaves the
+run. A resume command names `--parent` and no ids. A ticket that only says "Part of
+#206" in its text is not under #206: azelf reads structure, not prose, so give it a
+`## Parent` section or make it a sub-issue. `--parent` with ticket ids is refused
+(exit 64): they are two answers to which tickets run.
+
+A bare run does not read its set again. Picking up every ticket labelled after it
+started would run tickets nobody planned for it; under `--parent` the parent is the
+plan.
+
 Explicit ids override all of it: `azelf run 17` runs #17. The plan then says what
 you overrode, below the waves:
 

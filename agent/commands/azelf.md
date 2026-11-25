@@ -32,6 +32,13 @@ Run `--sync-edges -y` right after filing tickets and the question never comes up
 **Naming ids overrides both the label and the hierarchy**, and the plan says so with
 a `⚠` line for each. Read those before you answer `proceed?`.
 
+**A wave under one tracking issue is `--parent <id>`, not a list of ids.** The run
+takes the ready tickets under that issue — its sub-issues, or tickets whose body has
+`## Parent` naming it — and reads them again every round, so a child labelled ready
+later joins the run instead of needing a new one. A line such as "Part of #9" in the
+first paragraph is not a parent: give the tickets a `## Parent` section or make them
+sub-issues. A bare run would take every ready ticket, the wave's and everyone else's.
+
 **A person's ticket is never a slice**, named or not. With `humanLabel` set (`init`
 writes `ready-for-human`), such a ticket stays in the plan as `[waiting on a human]`
 and holds its dependents. A run where only those are left stops and prints the
@@ -47,6 +54,7 @@ file rather than making a network call.
 
 ```sh
 ./scripts/azelf run 12 14      # prep and open exactly these
+./scripts/azelf run --parent 9 # the ready tickets under #9; ones labelled later join
 ./scripts/azelf run            # the whole first wave
 ./scripts/azelf run --auto     # dispatch, then land each slice as it finishes
 ./scripts/azelf run --help     # every flag

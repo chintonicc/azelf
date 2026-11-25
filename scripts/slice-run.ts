@@ -457,7 +457,10 @@ type MissingEdge = {
  * are derived from them by assignWaves and printTree — that is the one
  * direction every tracker can answer; see slice-tracker.ts.
  */
-function loadTickets(explicit: TicketId[]): {
+function loadTickets(
+  explicit: TicketId[],
+  parent?: TicketId,
+): {
   tickets: Ticket[];
   /** Parents left out of a bare run. Empty when ids were named. */
   epics: Epic[];
@@ -467,7 +470,16 @@ function loadTickets(explicit: TicketId[]): {
   unlabelled: TicketId[];
   missingEdges: MissingEdge[];
 } {
-  const ids = explicit.length ? explicit : tracker.listReady(config.readyLabel);
+  // One fetch per ticket, however many readers want the text: findEpics reads
+  // every body for `## Parent` and the edge check below reads the same bodies
+  // for `## Blocked by`. Uncached that is two round trips per ticket to ask two
+  // questions about one string, and plan time is already two calls a ticket.
+  const { body, get } = trackerReads();
+
+  const ready = explicit.length
+    ? explicit
+    : tracker.listReady(config.readyLabel);
+  const ids = parent === undefined ? ready : readyUnder(parent, ready, body);
 
   if (ids.length === 0) {
     return {
@@ -478,30 +490,6 @@ function loadTickets(explicit: TicketId[]): {
       missingEdges: [],
     };
   }
-
-  // One fetch per ticket, however many readers want the text: findEpics reads
-  // every body for `## Parent` and the edge check below reads the same bodies
-  // for `## Blocked by`. Uncached that is two round trips per ticket to ask two
-  // questions about one string, and plan time is already two calls a ticket.
-  const bodies = new Map<TicketId, string>();
-  const body = (id: TicketId): string => {
-    const hit = bodies.get(id);
-    if (hit !== undefined) return hit;
-    const text = tracker.body(id);
-    bodies.set(id, text);
-    return text;
-  };
-
-  // Cached for the same reason: a child's state is asked for by findEpics and
-  // the ticket itself is read again in the loop below.
-  const metas = new Map<TicketId, TicketInfo>();
-  const get = (id: TicketId): TicketInfo => {
-    const hit = metas.get(id);
-    if (hit) return hit;
-    const meta = tracker.get(id);
-    metas.set(id, meta);
-    return meta;
-  };
 
   // The hierarchy is read for explicit ids too, but only a bare run excludes
   // on it. Explicit ids are the user's own answer and override the plan, here
@@ -524,72 +512,17 @@ function loadTickets(explicit: TicketId[]): {
   const tickets: Ticket[] = [];
   const missingEdges: MissingEdge[] = [];
   const unlabelled: TicketId[] = [];
-  const lockLabel = config.exclusiveLockLabel;
-  const humanLabel = config.humanLabel;
-  const isHuman = (meta: TicketInfo) =>
-    humanLabel !== undefined && meta.labels.includes(humanLabel);
   for (const id of runnable) {
-    const meta = get(id);
-    const human = isHuman(meta);
-    if (explicit.length && !human && !meta.labels.includes(config.readyLabel)) {
+    const { ticket, missing, labels } = planTicket(id, inSet, body, get);
+    if (
+      explicit.length &&
+      !ticket.human &&
+      !labels.includes(config.readyLabel)
+    ) {
       unlabelled.push(id);
     }
-    const declared = tracker.blockers(id);
-    const stillBlocking = openBlockers(declared);
-    // Against the FULL blocker list, closed ones included — an edge the plan
-    // has already worked through is recorded, not missing. Unlike the epic
-    // check this runs for explicit ids too: naming ids says which tickets to
-    // run, not which edges exist, and the waves below are built from edges
-    // either way.
-    //
-    // A claimed blocker that is closed blocks nothing and is dropped. One the
-    // tracker cannot read is kept, and marked: a typo in a body should be
-    // seen, not swallowed.
-    const unreadable: TicketId[] = [];
-    const claimed = bodyOnlyBlockers(
-      body(id),
-      declared,
-      tracker.idPattern,
-      id,
-      (blocker) => {
-        try {
-          return get(blocker).state;
-        } catch {
-          unreadable.push(blocker);
-          return undefined;
-        }
-      },
-    );
-    if (claimed.length > 0) {
-      const readFrom = new Map<TicketId, string>();
-      for (const b of claimed) {
-        const line = blockerLine(body(id), b, tracker.idPattern);
-        if (line !== null) readFrom.set(b, line);
-      }
-      missingEdges.push({ id, blockers: claimed, unreadable, readFrom });
-    }
-    const foreignBlockers = stillBlocking
-      .filter((b) => !inSet.has(b.id))
-      .map((b) => b.id);
-    tickets.push({
-      id,
-      title: meta.title,
-      open: meta.state === "open",
-      blockedBy: stillBlocking.filter((b) => inSet.has(b.id)).map((b) => b.id),
-      foreignBlockers,
-      wave: 0,
-      exclusive: lockLabel !== undefined && meta.labels.includes(lockLabel),
-      human,
-      // Read only to say what the wait is for. One that cannot be read holds
-      // all the same: it is still an open blocker.
-      foreignHuman: foreignBlockers.filter((b) => {
-        try {
-          return isHuman(get(b));
-        } catch {
-          return false;
-        }
-      }),
-    });
+    if (missing) missingEdges.push(missing);
+    tickets.push(ticket);
   }
   return {
     tickets,
@@ -598,6 +531,130 @@ function loadTickets(explicit: TicketId[]): {
     unlabelled,
     missingEdges,
   };
+}
+
+/** Cached `tracker.body` and `tracker.get`, for one read of the plan. */
+function trackerReads(): {
+  body: (id: TicketId) => string;
+  get: (id: TicketId) => TicketInfo;
+} {
+  const bodies = new Map<TicketId, string>();
+  const metas = new Map<TicketId, TicketInfo>();
+  return {
+    body: (id) => {
+      const hit = bodies.get(id);
+      if (hit !== undefined) return hit;
+      const text = tracker.body(id);
+      bodies.set(id, text);
+      return text;
+    },
+    // Cached for the same reason: a child's state is asked for by findEpics
+    // and the ticket itself is read again by planTicket.
+    get: (id) => {
+      const hit = metas.get(id);
+      if (hit) return hit;
+      const meta = tracker.get(id);
+      metas.set(id, meta);
+      return meta;
+    },
+  };
+}
+
+/**
+ * The ids of `ready` under `parent`, for `--parent`: the tracker's own children
+ * of it, and the tickets whose `## Parent` section names it — what "parent"
+ * means everywhere else here (findEpics). Never the parent itself. A body is
+ * read only for a ticket the tracker does not already list as a child.
+ */
+function readyUnder(
+  parent: TicketId,
+  ready: TicketId[],
+  body: (id: TicketId) => string,
+): TicketId[] {
+  const native = new Set(tracker.children?.(parent) ?? []);
+  return ready.filter(
+    (id) =>
+      id !== parent &&
+      (native.has(id) ||
+        parentFromBody(body(id), tracker.idPattern) === parent),
+  );
+}
+
+const isHumanTicket = (meta: TicketInfo): boolean =>
+  config.humanLabel !== undefined && meta.labels.includes(config.humanLabel);
+
+/**
+ * One ticket of the plan: its blockers inside `inSet` and outside it, and the
+ * ones only its body names. The plan builds every ticket with it, and so does
+ * a child that joins a `--parent` run (joinChildren).
+ */
+function planTicket(
+  id: TicketId,
+  inSet: Set<TicketId>,
+  body: (id: TicketId) => string,
+  get: (id: TicketId) => TicketInfo,
+): { ticket: Ticket; missing: MissingEdge | null; labels: string[] } {
+  const lockLabel = config.exclusiveLockLabel;
+  const meta = get(id);
+  const human = isHumanTicket(meta);
+  const declared = tracker.blockers(id);
+  const stillBlocking = openBlockers(declared);
+  // Against the FULL blocker list, closed ones included — an edge the plan
+  // has already worked through is recorded, not missing. Unlike the epic
+  // check this runs for explicit ids too: naming ids says which tickets to
+  // run, not which edges exist, and the waves below are built from edges
+  // either way.
+  //
+  // A claimed blocker that is closed blocks nothing and is dropped. One the
+  // tracker cannot read is kept, and marked: a typo in a body should be
+  // seen, not swallowed.
+  const unreadable: TicketId[] = [];
+  const claimed = bodyOnlyBlockers(
+    body(id),
+    declared,
+    tracker.idPattern,
+    id,
+    (blocker) => {
+      try {
+        return get(blocker).state;
+      } catch {
+        unreadable.push(blocker);
+        return undefined;
+      }
+    },
+  );
+  let missing: MissingEdge | null = null;
+  if (claimed.length > 0) {
+    const readFrom = new Map<TicketId, string>();
+    for (const b of claimed) {
+      const line = blockerLine(body(id), b, tracker.idPattern);
+      if (line !== null) readFrom.set(b, line);
+    }
+    missing = { id, blockers: claimed, unreadable, readFrom };
+  }
+  const foreignBlockers = stillBlocking
+    .filter((b) => !inSet.has(b.id))
+    .map((b) => b.id);
+  const ticket: Ticket = {
+    id,
+    title: meta.title,
+    open: meta.state === "open",
+    blockedBy: stillBlocking.filter((b) => inSet.has(b.id)).map((b) => b.id),
+    foreignBlockers,
+    wave: 0,
+    exclusive: lockLabel !== undefined && meta.labels.includes(lockLabel),
+    human,
+    // Read only to say what the wait is for. One that cannot be read holds
+    // all the same: it is still an open blocker.
+    foreignHuman: foreignBlockers.filter((b) => {
+      try {
+        return isHumanTicket(get(b));
+      } catch {
+        return false;
+      }
+    }),
+  };
+  return { ticket, missing, labels: meta.labels };
 }
 
 /** "#47 #48 #49, 1 open" or "#47 #48 #49, all closed". */
@@ -1148,23 +1205,34 @@ function printTree(tickets: Ticket[]): number {
     );
   }
 
-  // The widest wave is the most sessions that can ever be useful at once.
-  // Running more than this cannot go faster; it only burns tokens on tickets
-  // whose blockers haven't landed. A wave's labelled tickets count as one,
-  // and a person's tickets as none: no session is ever opened for them.
-  const width = Math.max(
-    ...ordered.map((w) => {
-      const inWave = (waves.get(w) as Ticket[]).filter((t) => !t.human);
-      const labelled = inWave.filter((t) => t.exclusive).length;
-      return inWave.length - labelled + Math.min(labelled, 1);
-    }),
-  );
+  const width = widestWave(tickets);
   console.log("");
   console.log(`  ${tickets.length} tickets, ${ordered.length} waves deep`);
   console.log(
     `  widest wave: ${width} — more than ${width} sessions can never help`,
   );
   return width;
+}
+
+/**
+ * The widest wave is the most sessions that can ever be useful at once.
+ * Running more than this cannot go faster; it only burns tokens on tickets
+ * whose blockers haven't landed. A wave's labelled tickets count as one, and
+ * a person's tickets as none: no session is ever opened for them.
+ */
+function widestWave(tickets: Ticket[]): number {
+  const waves = new Map<number, Ticket[]>();
+  for (const t of tickets) {
+    if (t.human) continue;
+    waves.set(t.wave, [...(waves.get(t.wave) ?? []), t]);
+  }
+  return Math.max(
+    0,
+    ...[...waves.values()].map((inWave) => {
+      const labelled = inWave.filter((t) => t.exclusive).length;
+      return inWave.length - labelled + Math.min(labelled, 1);
+    }),
+  );
 }
 
 // ─── scheduling state ─────────────────────────────────────────────────────
@@ -1918,6 +1986,208 @@ function refreshOpenState(tickets: Ticket[]): {
     t.foreignHuman = t.foreignHuman.filter((b) => !closed.has(b));
   }
   return { failed, allFailed: read > 0 && failed.length === read };
+}
+
+// ─── --parent: the children that join, and the ones that leave ────────────
+
+/** Ready tickets read and found not to be under the parent: not read again. */
+const notUnder = new Set<TicketId>();
+/** Children said once and left out of this run. */
+const leftOut = new Set<TicketId>();
+
+/**
+ * Under `--parent`, at the top of each round after the first: the run's set is
+ * read again. A ready ticket under the parent that the run does not have joins
+ * it, the way the plan took its tickets — claimed, given its wave, one line. One
+ * the run has that lost the ready label before anything started on it leaves.
+ *
+ * A bare run does not do this, on purpose: it would pull in every ticket
+ * labelled after it started, which nobody planned for it. Here the parent is
+ * the plan, so a child labelled later belongs to it.
+ *
+ * In the steady state this is one call, `listReady`. A new ready ticket costs
+ * the parent's `children` and, for one the tracker does not list as a child, its
+ * body. One that is not under the parent is remembered and not read again, so
+ * a body that gains `## Parent` mid-run is missed until the next run. A child
+ * held by another run, a parent itself, or with a blocker only its body names,
+ * is said once and left out. A failed read is a look that found nothing.
+ */
+function joinChildren(parent: TicketId): void {
+  let ready: TicketId[];
+  try {
+    ready = tracker.listReady(config.readyLabel);
+  } catch {
+    return;
+  }
+  leaveUnlabelled(new Set(ready));
+
+  const known = new Set(tickets.map((t) => t.id));
+  const fresh = ready.filter(
+    (id) =>
+      id !== parent && !known.has(id) && !notUnder.has(id) && !leftOut.has(id),
+  );
+  if (fresh.length === 0) return;
+  const { body, get } = trackerReads();
+  let under: TicketId[];
+  try {
+    const native = new Set(tracker.children?.(parent) ?? []);
+    under = fresh.filter((id) => {
+      if (native.has(id)) return true;
+      if (parentFromBody(body(id), tracker.idPattern) === parent) return true;
+      notUnder.add(id);
+      return false;
+    });
+  } catch {
+    return;
+  }
+  if (under.length === 0) return;
+
+  const leave = (id: TicketId, why: string) => {
+    leftOut.add(id);
+    console.log(
+      `\n[round ${round}] ${ref(id)} is ready under ${ref(parent)}, but ${why}`,
+    );
+  };
+  const inSet = new Set([...known, ...under]);
+  const joined: Ticket[] = [];
+  for (const id of under) {
+    let built: ReturnType<typeof planTicket>;
+    let kids: TicketId[];
+    try {
+      // A heading over work, like the epics a plan leaves out: a session on
+      // it would be a session on everything under it.
+      kids = [
+        ...(tracker.children?.(id) ?? []),
+        ...under.filter(
+          (o) => o !== id && parentFromBody(body(o), tracker.idPattern) === id,
+        ),
+      ].filter((k) => k !== id);
+      built = planTicket(id, inSet, body, get);
+    } catch {
+      continue;
+    }
+    const { ticket, missing } = built;
+    if (!ticket.open) continue;
+    if (kids.length) {
+      leave(
+        id,
+        `it is a parent itself (of ${[...new Set(kids)]
+          .map(ref)
+          .join(", ")}) — left out of this run; its children are the work`,
+      );
+      continue;
+    }
+    if (missing && !ignoreBodyBlockers) {
+      leave(
+        id,
+        `its body names ${missing.blockers
+          .map(ref)
+          .join(", ")} as blocking it and ${
+          tracker.name
+        } has no such edge — left out of this run. ${launcherCommand()} run --sync-edges writes the edge; --ignore-body-blockers runs it anyway`,
+      );
+      continue;
+    }
+    const a = tryTake(runLock(id), claimOwner());
+    if (!a.taken) {
+      leave(id, `${heldLine(a.holder, [id])} — left out of this run`);
+      continue;
+    }
+    claimed.push(id);
+    joined.push(ticket);
+  }
+  if (joined.length === 0) return;
+
+  // A blocker that was outside the set is in it now, and its wave says so. A
+  // cycle through a joiner is the tracker's to fix: the joiners leave again and
+  // the run goes on with what it had.
+  const ids = new Set(joined.map((t) => t.id));
+  const before = tickets.map((t) => ({
+    t,
+    blockedBy: t.blockedBy,
+    foreignBlockers: t.foreignBlockers,
+    foreignHuman: t.foreignHuman,
+  }));
+  for (const t of tickets) {
+    const moving = t.foreignBlockers.filter((b) => ids.has(b));
+    if (moving.length === 0) continue;
+    t.blockedBy = [...t.blockedBy, ...moving];
+    t.foreignBlockers = t.foreignBlockers.filter((b) => !ids.has(b));
+    t.foreignHuman = t.foreignHuman.filter((b) => !ids.has(b));
+  }
+  try {
+    assignWaves([...tickets, ...joined]);
+  } catch (e) {
+    for (const { t, ...was } of before) Object.assign(t, was);
+    assignWaves(tickets);
+    for (const t of joined) {
+      release(runLock(t.id), process.pid);
+      claimed.splice(claimed.indexOf(t.id), 1);
+      leave(t.id, `${(e as Error).message} — left out of this run`);
+    }
+    return;
+  }
+  tickets.push(...joined);
+  const cap = maxParallel;
+  if (value("--max") === undefined) {
+    maxParallel = Math.max(maxParallel, widestWave(tickets));
+  }
+  for (const t of joined) {
+    console.log(
+      `\n[round ${round}] ${ref(t.id)} joined — ready under ${ref(
+        parent,
+      )} since the run started (wave ${t.wave + 1})`,
+    );
+  }
+  if (maxParallel > cap) {
+    console.log(
+      `  concurrency cap: ${cap} → ${maxParallel}, the widest wave now`,
+    );
+  }
+}
+
+/**
+ * A ticket of a `--parent` run that lost the ready label before anything
+ * started on it leaves the run, and its claim is given back. One that has
+ * started stays: its worktree is work. `listReady` can lag a label, so the
+ * ticket itself is read before it goes. Tickets it blocked wait on it as one
+ * outside the set, as they would on any other.
+ */
+function leaveUnlabelled(ready: Set<TicketId>): void {
+  let left = false;
+  for (const t of [...tickets]) {
+    if (!t.open || ready.has(t.id) || hasWorktree(t.id)) continue;
+    let labels: string[];
+    try {
+      const meta = tracker.get(t.id);
+      if (meta.state !== "open") continue;
+      labels = meta.labels;
+    } catch {
+      continue;
+    }
+    if (labels.includes(config.readyLabel)) continue;
+    tickets.splice(tickets.indexOf(t), 1);
+    for (const o of tickets) {
+      if (!o.blockedBy.includes(t.id)) continue;
+      o.blockedBy = o.blockedBy.filter((b) => b !== t.id);
+      o.foreignBlockers = [...o.foreignBlockers, t.id];
+      if (t.human) o.foreignHuman = [...o.foreignHuman, t.id];
+    }
+    const i = claimed.indexOf(t.id);
+    if (i >= 0) {
+      claimed.splice(i, 1);
+      release(runLock(t.id), process.pid);
+    }
+    console.log(
+      `\n[round ${round}] ${ref(
+        t.id,
+      )} left the run — it is no longer labelled ${
+        config.readyLabel
+      }, and nothing had started on it`,
+    );
+    left = true;
+  }
+  if (left) assignWaves(tickets);
 }
 
 // How long every read may fail before the run gives up: long enough to ride
@@ -6308,14 +6578,21 @@ function releaseClaims(): void {
  * `exit` handler (see `stoppedBy`). Only SIGKILL leaves them to the next
  * run's takeover.
  */
-function claimTickets(plan: Ticket[]): void {
-  process.on("exit", releaseClaims);
-  const me: Owner = {
+let owner: Owner | undefined;
+/** This run, as its claims name it: one owner for the plan and every join. */
+function claimOwner(): Owner {
+  owner ??= {
     pid: process.pid,
     started: processStart(process.pid) ?? "",
     label: ["azelf run", ...argv].join(" "),
     since: new Date().toISOString(),
   };
+  return owner;
+}
+
+function claimTickets(plan: Ticket[]): void {
+  process.on("exit", releaseClaims);
+  const me = claimOwner();
   const held: { id: TicketId; holder: Owner | null }[] = [];
   const tookOver: { id: TicketId; holder: Owner | null }[] = [];
   for (const t of plan) {
@@ -6726,6 +7003,26 @@ function reportNumberClashes(all: Ticket[], open: Set<TicketId>): void {
 const explicit: TicketId[] = argv.filter(
   (a, i) => isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? ""),
 );
+// `--parent <id>`: the run's set is the ready tickets under one parent, read
+// again every round (joinChildren). With ids it would be two answers to one
+// question, so it is refused rather than one of them quietly winning.
+const parentId: TicketId | undefined = value("--parent");
+if (parentId !== undefined) {
+  if (!isTicketId(parentId)) {
+    console.error(
+      `--parent takes a ticket id${
+        parentId.startsWith("-") ? "" : ` — "${parentId}" is not one`
+      }`,
+    );
+    process.exit(64);
+  }
+  if (explicit.length) {
+    console.error(
+      "--parent and ticket ids are two answers to which tickets — pass one.",
+    );
+    process.exit(64);
+  }
+}
 const planOnly = flag("--plan");
 const once = flag("--once");
 const assumeYes = flag("-y") || flag("--yes");
@@ -7229,14 +7526,17 @@ console.log(`── reading the plan from ${tracker.name} ───────�
  * both cases the exit is 75, EX_TEMPFAIL as slice-land.sh uses it, and no stack:
  * this is not a bug. Everything else that throws is one, and keeps its stack.
  */
-function loadPlan(ids: TicketId[]): ReturnType<typeof loadTickets> {
+function loadPlan(
+  ids: TicketId[],
+  parent?: TicketId,
+): ReturnType<typeof loadTickets> {
   // A quarter of the ceiling when that is shorter, so a test's two seconds work.
   const waitMs = Math.min(60_000, trackerOutageMs / 4);
   const since = Date.now();
   let told = false;
   for (;;) {
     try {
-      return loadTickets(ids);
+      return loadTickets(ids, parent);
     } catch (e) {
       if (!isTrackerUnavailable(e)) throw e;
       const said = (e as Error).message
@@ -7257,12 +7557,22 @@ function loadPlan(ids: TicketId[]): ReturnType<typeof loadTickets> {
     }
   }
 }
-const { tickets, epics, namedEpics, unlabelled, missingEdges } =
-  loadPlan(explicit);
+const { tickets, epics, namedEpics, unlabelled, missingEdges } = loadPlan(
+  explicit,
+  parentId,
+);
 // Before the empty check, not after: if every ready ticket turned out to be a
 // heading over the others, "nothing to run" is true and useless. The reason has
 // to come first or the run looks broken.
 printEpics(epics);
+if (tickets.length === 0 && parentId !== undefined) {
+  console.log(
+    `no ready tickets under ${ref(parentId)} — label one ${
+      config.readyLabel
+    }, or give it a ## Parent section naming ${ref(parentId)}`,
+  );
+  process.exit(0);
+}
 if (tickets.length === 0) {
   console.log(
     epics.length
@@ -7291,7 +7601,8 @@ if (!planOnly) syncBaseWithOrigin({ fetch: false });
 if (missingEdges.length > 0 && !ignoreBodyBlockers) {
   refuseOverBodyBlockers(!planOnly);
 }
-const maxParallel = Number(value("--max") ?? width);
+// A let: under --parent a child that joins can widen the tree (joinChildren).
+let maxParallel = Number(value("--max") ?? width);
 
 if (planOnly) {
   noteClaims(tickets);
@@ -8003,11 +8314,18 @@ try {
       }
       retryCloses();
       unparkClosed(tickets);
+      if (parentId !== undefined) joinChildren(parentId);
     }
 
     const remaining = tickets.filter((t) => t.open);
     if (remaining.length === 0) {
-      console.log("\n✓ every ticket closed — plan complete.");
+      console.log(
+        parentId === undefined
+          ? "\n✓ every ticket closed — plan complete."
+          : `\n✓ every ticket under ${ref(
+              parentId,
+            )} closed — plan complete (a child labelled after this needs a new run).`,
+      );
       planReview = reviewPlan(tickets, planBase);
       break;
     }
@@ -8481,17 +8799,23 @@ if (landedOnRetry.size > 0) {
  * `--once`, and the tickets it left open, which are the parked ones when
  * parking is what stopped it. Ids rather than none: a run of every ready
  * ticket would plan again from the tracker, and that can be a different set.
+ * Under --parent, none: the parent IS the set, read again on resume, and ids
+ * beside it would only be refused.
  */
 function resumeCommand(): string {
-  return runCommand(tickets.filter((t) => t.open).map((t) => t.id));
+  return runCommand(openIds());
 }
 
 /** `resumeCommand` with --no-ci: for slices parked because CI did not start. */
 function noCiCommand(): string {
-  return runCommand(
-    tickets.filter((t) => t.open).map((t) => t.id),
-    noCi ? [] : ["--no-ci"],
-  );
+  return runCommand(openIds(), noCi ? [] : ["--no-ci"]);
+}
+
+/** The run's open tickets, as a resume names them: none under --parent. */
+function openIds(): TicketId[] {
+  return parentId === undefined
+    ? tickets.filter((t) => t.open).map((t) => t.id)
+    : [];
 }
 
 /**
@@ -8499,9 +8823,14 @@ function noCiCommand(): string {
  * `more` flags after its own.
  */
 function runCommand(ids: TicketId[], more: string[] = []): string {
+  // Named ids replace --parent: the two together are refused.
+  const dropParent = (a: string, i: number) =>
+    ids.length > 0 && (a === "--parent" || argv[i - 1] === "--parent");
   const flags = argv.filter(
     (a, i) =>
-      a !== "--once" && !(isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? "")),
+      a !== "--once" &&
+      !dropParent(a, i) &&
+      !(isTicketId(a) && !VALUE_FLAGS.has(argv[i - 1] ?? "")),
   );
   return [launcherCommand(), "run", ...flags, ...more, ...ids].join(" ");
 }

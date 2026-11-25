@@ -12,6 +12,9 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
   azelf run                  plan, confirm, then run to completion
   azelf run --plan           print the dependency tree and stop
   azelf run 9 10 11 12       an explicit ticket set
+  azelf run --parent 206     the ready tickets under one parent (its
+                             sub-issues, or a ## Parent section naming it);
+                             children labelled later join the run
   azelf run -y               start without asking to proceed (also --yes)
   azelf run --max 2          cap concurrent sessions
   azelf run --interval 10    seconds between rounds (default 30)
@@ -55,6 +58,7 @@ that unblocked. ./scripts/slice-run.ts takes the same flags.`;
 /** The flags that take the argument after them. */
 export const VALUE_FLAGS = new Set([
   "--max",
+  "--parent",
   "--interval",
   "--retry",
   "--relaunch",

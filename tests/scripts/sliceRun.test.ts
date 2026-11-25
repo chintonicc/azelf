@@ -7077,3 +7077,137 @@ describe("azelf on-base — a command on the slice's base", () => {
     expect(baseline(fx)).toContain("exit: 143\n");
   }, 30_000);
 });
+
+/**
+ * `--parent <id>`: a wave picked by the issue it hangs under, not by listing
+ * its tickets. On consumer-b a wave's tickets were passed by hand, so a child
+ * labelled later needed a new run, and a bare run would have taken older ready
+ * tickets that were not part of the wave.
+ */
+describe("azelf run --parent", () => {
+  const PARENT = "## Parent\n\n#206\n";
+  const inTree = (out: string, id: string) =>
+    new RegExp(`^ {6}#${id}  `, "m").test(out);
+
+  it("plans the ready tickets under the parent: its ## Parent children and its own", () => {
+    c = makeConsumer({ agent: ["true"] });
+    c.setTicket("206", { title: "the wave", children: ["211"] });
+    c.setTicket("210", { title: "prose child", body: PARENT });
+    c.setTicket("211", { title: "native child" });
+    c.setTicket("212", { body: "## Parent\n\n#300\n" });
+    c.setTicket("213", {});
+
+    const r = runDispatcher(c, ["--plan", "--parent", "206"]);
+
+    expect(r.code).toBe(0);
+    expect(inTree(r.out, "210")).toBe(true);
+    expect(inTree(r.out, "211")).toBe(true);
+    for (const id of ["206", "212", "213"]) {
+      expect(inTree(r.out, id), id).toBe(false);
+    }
+  });
+
+  it("refuses ids beside it, and a value that is not a ticket, with 64", () => {
+    c = makeConsumer({ agent: ["true"] });
+    const both = runDispatcher(c, ["--plan", "--parent", "206", "40"]);
+    expect(both.code).toBe(64);
+    expect(both.out).toContain(
+      "--parent and ticket ids are two answers to which tickets — pass one.",
+    );
+    const bad = runDispatcher(c, ["--plan", "--parent", "x7"]);
+    expect(bad.code).toBe(64);
+    expect(bad.out).toContain('--parent takes a ticket id — "x7" is not one');
+  });
+
+  it("says how to put a ticket under a parent that has none ready", () => {
+    c = makeConsumer({ agent: ["true"] });
+    c.setTicket("206", {});
+    c.setTicket("213", {});
+    const r = runDispatcher(c, ["--plan", "--parent", "206"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "no ready tickets under #206 — label one ready, or give it a ## Parent section naming #206",
+    );
+  });
+
+  it("takes a child labelled ready mid-run, raises the cap for it, and lands it", async () => {
+    c = makeConsumer({ worktrees: [40, 41], remote: true, agent: ["true"] });
+    c.setTicket("206", { title: "the wave" });
+    c.setTicket("40", { body: PARENT });
+    c.setTicket("41", { body: PARENT, ready: false });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    commitIn(c.wt(41), "b.txt", "b\n", "feat: b");
+    sh(c.wt(41), "./scripts/slice-done.sh");
+    sessions.push(fakeSession(c, 40));
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "--parent", "206"]);
+    await d.until("[round 1]");
+    expect(d.output()).toContain("concurrency cap: 1");
+    c.setTicket("41", { ready: true });
+    await d.until(
+      "#41 joined — ready under #206 since the run started (wave 1)",
+    );
+    await d.until("concurrency cap: 1 → 2, the widest wave now");
+    await d.until("landing #41");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    await d.until(
+      "✓ every ticket under #206 closed — plan complete (a child labelled after this needs a new run).",
+    );
+
+    expect(await d.exited).toBe(0);
+    expect(readFileSync(c.closeFile, "utf8")).toContain("41\nLanded on main");
+  }, 60_000);
+
+  it("names a child another run holds, and one that is a parent itself, once, and goes on", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    c.setTicket("206", { title: "the wave" });
+    c.setTicket("40", { body: PARENT });
+    c.setTicket("43", { body: PARENT, ready: false });
+    c.setTicket("44", { body: PARENT, ready: false, children: ["45"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sessions.push(fakeSession(c, 40));
+    holdClaim(c, "43", process.pid, "azelf run -y 43");
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "--parent", "206"]);
+    await d.until("[round 1]");
+    c.setTicket("43", { ready: true });
+    c.setTicket("44", { ready: true });
+    await d.until(
+      `#43 is ready under #206, but #43 is already being dispatched by another run (pid ${process.pid}`,
+    );
+    await d.until(
+      "#44 is ready under #206, but it is a parent itself (of #45) — left out of this run; its children are the work",
+    );
+    await d.until("[round 4]");
+    sh(c.wt(40), "./scripts/slice-done.sh");
+    await d.until("plan complete");
+
+    expect(await d.exited).toBe(0);
+    expect(d.output()).not.toContain("joined");
+    expect(d.output().match(/#43 is ready under #206/g)).toHaveLength(1);
+    expect(d.output().match(/#44 is ready under #206/g)).toHaveLength(1);
+  }, 60_000);
+
+  it("lets a child that lost its label before it started leave, and resumes by the parent alone", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    c.setTicket("206", { title: "the wave" });
+    c.setTicket("40", { body: PARENT });
+    c.setTicket("42", { body: PARENT, blockedBy: ["40"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    sessions.push(fakeSession(c, 40));
+
+    d = startDispatcher(c, ["-y", "--interval", "1", "--parent", "206"]);
+    await d.until("[round 1]");
+    expect(existsSync(claimOf(c, "42"))).toBe(true);
+    c.setTicket("42", { ready: false });
+    await d.until(
+      "#42 left the run — it is no longer labelled ready, and nothing had started on it",
+    );
+    expect(existsSync(claimOf(c, "42"))).toBe(false);
+
+    expect(await d.stop()).toBe(143);
+    expect(d.output()).toContain(
+      "To pick the run up again:\n\n    ./scripts/azelf run -y --interval 1 --parent 206\n",
+    );
+  }, 60_000);
+});

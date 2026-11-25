@@ -247,17 +247,17 @@ heading. Line numbers are as of `8d1cb09`.
 
 ## Phase 4 — `azelf run --parent <id>`: one wave, re-read every round
 
-- [ ] 4a. `slice-run-usage.ts`: `--parent` in `VALUE_FLAGS` and `USAGE`: "run the ready tickets
+- [x] 4a. `slice-run-usage.ts`: `--parent` in `VALUE_FLAGS` and `USAGE`: "run the ready tickets
   under one parent (its sub-issues, or a ## Parent section naming it); children labelled later
   join the run". With ticket ids too, exit 64 with "--parent and ticket ids are two answers to
   which tickets — pass one".
-- [ ] 4b. `loadTickets` (`slice-run.ts:460`) takes the parent. Ids = `listReady(readyLabel)`,
+- [x] 4b. `loadTickets` (`slice-run.ts:460`) takes the parent. Ids = `listReady(readyLabel)`,
   filtered to native children of the parent plus the tickets whose `## Parent` names it. The bodies
   come from the existing `body` cache, which is already filled for `findEpics`, so this adds no
   read. The parent is excluded. The epic exclusion applies as in a bare run. When nothing
   qualifies: "no ready tickets under #206 — label one ready-for-agent, or give it a ## Parent
   section naming #206", exit 0.
-- [ ] 4c. A `joinChildren()` in the round loop, after `refreshOpenState` (`:7976`):
+- [x] 4c. A `joinChildren()` in the round loop, after `refreshOpenState` (`:7976`):
   - Read the set again, and drop ids already in `tickets` and those remembered as not belonging.
   - Run the rest through the same path as at plan time (the body, blockers, `foreignBlockers`, and
     `humanLabel`), claim them, add them to `tickets`, and call `assignWaves(tickets)`.
@@ -266,14 +266,14 @@ heading. Line numbers are as of `8d1cb09`.
   - A joiner held by another dispatcher, or one with a body-only blocker that has no edge, is named
     once and left out. Under `--ignore-body-blockers` the second kind joins anyway.
   - A failed read counts as a look that found nothing, as it does in `refreshOpenState`.
-- [ ] 4d. A ticket in the set that has not started and has lost the ready label leaves the run,
+- [x] 4d. A ticket in the set that has not started and has lost the ready label leaves the run,
   with one line. It is unclaimed.
-- [ ] 4e. `maxParallel` (`:7292`) becomes a `let`. Under `--parent` without `--max` it is
+- [x] 4e. `maxParallel` (`:7292`) becomes a `let`. Under `--parent` without `--max` it is
   recomputed after a join from the new tree's widest wave.
-- [ ] 4f. `resumeCommand` / `runCommand` (`:8463`): under `--parent`, no ids. The end line under
+- [x] 4f. `resumeCommand` / `runCommand` (`:8463`): under `--parent`, no ids. The end line under
   `--parent` reads "every ticket under #206 closed — plan complete (a child labelled after this
   needs a new run)".
-- [ ] 4g. Tests (`sliceRun.test.ts`, with the fake tracker):
+- [x] 4g. Tests (`sliceRun.test.ts`, with the fake tracker):
   - `--parent` selects the `## Parent` children and the native children, and leaves out a ready
     ticket under another parent and the parent itself.
   - Ids together with `--parent` exit 64.
@@ -282,7 +282,18 @@ heading. Line numbers are as of `8d1cb09`.
   - A child that loses its label before it starts leaves the run.
   - The resume command has `--parent 206` and no ids.
   - Without `--max`, a join that widens the tree raises the cap.
-- [ ] 4h. README ("Choosing what runs" or wherever the bare-run vs ids text is) and
+
+  **As built:** the plan builds each ticket with `planTicket`, which was split out of
+  `loadTickets`, and so does a child that joins. A joiner that is a parent itself (it has
+  native children, or another joiner names it in `## Parent`) is said once and left out, as a
+  bare run leaves out an epic. A blocker that was outside the set moves into it when that
+  blocker joins. A cycle through a joiner sends the joiner back out and the run goes on. The
+  steady-state cost is one `listReady` per round. Only when a new ready ticket appears does the
+  run read the parent's `children`, plus a body for any ticket the tracker does not list as a
+  child. A ticket missing from `listReady` is read itself before it leaves the run, because the
+  list can lag a label. The cap only grows: `maxParallel = max(cap, widest wave)`. Any other
+  command line that names ids, such as "run the rest on their own", drops `--parent`.
+- [x] 4h. README ("Choosing what runs" or wherever the bare-run vs ids text is) and
   `agent/commands/azelf.md`: for a wave under one tracking issue, `azelf run --parent <id>`, and
   the children need a `## Parent` section or to be sub-issues.
 
