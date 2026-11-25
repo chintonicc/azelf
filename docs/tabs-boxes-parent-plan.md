@@ -201,19 +201,22 @@ heading. Line numbers are as of `8d1cb09`.
 
 ## Phase 2 — a moved box is not one this slice added
 
-- [ ] 2a. `slice-land.sh:153-160`: read the `-` unticked boxes of the same `base...branch` diff as
+- [x] 2a. `slice-land.sh:153-160`: read the `-` unticked boxes of the same `base...branch` diff as
   well. Each `+` box is checked against the `-` boxes, with whitespace trimmed on both sides, and
   each `-` cancels at most one `+`. Do it in awk, in one pass over the diff, keeping the order of
   the `+` lines. The `LAND_NOTES_MAX` cut and the count line apply to what is left.
-- [ ] 2b. The comment above it (`:129-150`) says that a moved box is not new, and that a box the
+- [x] 2b. The comment above it (`:129-150`) says that a moved box is not new, and that a box the
   slice rewrote still counts.
-- [ ] 2c. Tests (`sliceLand.test.ts`), each with a temp consumer whose base has a doc with boxes:
+- [x] 2c. Tests (`sliceLand.test.ts`), each with a temp consumer whose base has a doc with boxes:
   - A slice that adds two boxes gets both in the close comment.
   - A slice that moves an existing block of boxes to another section gets none, and the comment
     has no "Still to check" part.
   - Moving and adding in one branch gets only the added boxes.
   - A box that is duplicated gets one.
   - A box the slice ticks is not listed (it never was).
+
+  **As built:** the two tests with a move fail on the old script and pass on the new one. The
+  README section "A landed ticket carries its leftover checks" now explains moved boxes.
 
 ## Phase 3 — `{parent}` in the consumer's words, and a warning when it is missing
 

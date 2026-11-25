@@ -145,18 +145,33 @@ fi
 # puts them where the ticket is. `- [x]` is left alone; a box the slice ticked
 # on its way past is not outstanding.
 #
-# Grep can find nothing without that being an error, hence `|| true`: a slice
-# whose diff has no checkboxes is the ordinary case, not a failure.
+# A MOVED BOX IS NOT A NEW ONE. A diff shows a moved line as `+` in one place
+# and `-` in another, so a slice that moved a block of someone else's boxes —
+# consumer-a's #231 moved two journeys into their sections of the testing
+# doc — carried a landed ticket's checks into its own close comment. So an
+# unticked `-` box cancels one unticked `+` box with the same text (whitespace
+# trimmed), anywhere in the diff, and what is left is what this slice added.
+# One `-` cancels one `+`: a slice that adds a second copy of an existing box
+# still lists it once. A box whose text the slice rewrote counts as added — its
+# text is new. Done in one awk pass, the `+` lines kept in their order and
+# printed at the end, because a move to an earlier spot puts its `+` first.
+# `|| true` because a diff that cannot be read is no reason to refuse a land.
 #
 # A land being finished has its comment in the record already.
 LAND_NOTES_MAX=20
 land_notes=""
 if ! $finishing; then
   land_notes="$(
-    git diff "$SLICE_BASE_BRANCH...$branch" 2>/dev/null \
-      | grep -E '^\+[[:space:]]*[-*] \[ \] ' \
-      | sed 's/^+//' \
-      || true
+    git diff "$SLICE_BASE_BRANCH...$branch" 2>/dev/null | awk '
+      function trimmed(s) { gsub(/^[[:space:]]+|[[:space:]]+$/, "", s); return s }
+      /^-[[:space:]]*[-*] \[ \] / { gone[trimmed(substr($0, 2))]++; next }
+      /^\+[[:space:]]*[-*] \[ \] / { n++; line[n] = substr($0, 2); key[n] = trimmed(line[n]) }
+      END {
+        for (i = 1; i <= n; i++) {
+          if (gone[key[i]] > 0) { gone[key[i]]--; continue }
+          print line[i]
+        }
+      }' || true
   )"
   close_comment="Landed on $SLICE_BASE_BRANCH via slice-land.sh."
 fi

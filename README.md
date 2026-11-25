@@ -1068,6 +1068,12 @@ Three things make it cheap rather than clever:
   inventing a channel. No new convention, no model call, nothing to configure.
 - **`- [x]` is left alone.** A box the slice ticked on its way past is not
   outstanding. Both `-` and `*` bullets count.
+- **A moved box is not a new one.** A diff shows a moved line as added in one
+  place and removed in another, so a slice that moved another ticket's journey into
+  its section used to carry that ticket's checks into its own close comment. An
+  unticked box the diff removes cancels one it adds with the same text (whitespace
+  trimmed), so only what the slice added is left. A second copy of an existing box
+  is still listed once, and a box whose text the slice rewrote counts as added.
 - **It is read before the fast-forward**, because afterwards there is nothing to
   read: `base...branch` is empty by definition once the branch has landed, and the
   cleanup deletes the branch outright.

@@ -103,6 +103,116 @@ describe("slice-done.sh → slice-land.sh", () => {
  * one on a sign-in that needed a browser. Both sat idle in their tabs, and the
  * run waited on them and said nothing.
  */
+/**
+ * The land's close comment lists the unticked boxes the slice added, as checks
+ * still to do by hand. A box the slice only moved was there before it: on
+ * consumer-a, #231 moved a landed ticket's journey into its section and its
+ * close comment carried that ticket's checks.
+ */
+describe("the boxes a land carries into the close comment", () => {
+  let c: Consumer;
+  const BASE = [
+    "# Testing",
+    "",
+    "## Inbox",
+    "",
+    "### J175",
+    "- [ ] J175 opens the inbox",
+    "- [ ] J175 marks one read",
+    "",
+    "## Settings",
+    "",
+    "- [x] J100 an old, ticked one",
+    "",
+  ].join("\n");
+  beforeEach(() => {
+    c = makeConsumer({ remote: true });
+    writeFileSync(join(c.main, "TESTING.md"), BASE);
+    git(c.main, "add", "TESTING.md");
+    git(c.main, "commit", "-qm", "docs: testing");
+    git(c.main, "push", "-q", "origin", "main");
+    git(c.main, "worktree", "add", "-q", c.wt(40), "-b", "ticket/40");
+  });
+  afterEach(() => rmSync(c.root, { recursive: true, force: true }));
+
+  /** Commits the doc as the slice leaves it, lands, and returns the comment. */
+  const landWith = (doc: string): string => {
+    const wt = c.wt(40);
+    writeFileSync(join(wt, "TESTING.md"), doc);
+    git(wt, "add", "TESTING.md");
+    git(wt, "commit", "-qm", "docs: testing for #40");
+    sh(wt, "./scripts/slice-done.sh");
+    const land = shResult(c.main, "./scripts/slice-land.sh 40");
+    expect(land.ok, land.out).toBe(true);
+    return readFileSync(c.closeFile, "utf8");
+  };
+  const STILL = "Still to check by hand";
+  /** The J175 block moved under Settings, unchanged. */
+  const moved = (extra: string[] = []) =>
+    [
+      "# Testing",
+      "",
+      "## Inbox",
+      "",
+      ...extra,
+      "## Settings",
+      "",
+      "- [x] J100 an old, ticked one",
+      "",
+      "### J175",
+      "- [ ] J175 opens the inbox",
+      "- [ ] J175 marks one read",
+      "",
+    ].join("\n");
+
+  it("lists the boxes the slice added", () => {
+    const comment = landWith(
+      BASE.replace(
+        "## Settings",
+        "- [ ] J180 shares a list\n- [ ] J180 revokes it\n\n## Settings",
+      ),
+    );
+    expect(comment).toContain(STILL);
+    expect(comment).toContain(
+      "\n- [ ] J180 shares a list\n- [ ] J180 revokes it\n",
+    );
+    expect(comment).not.toContain("J175");
+  });
+
+  it("lists none for boxes the slice only moved", () => {
+    const comment = landWith(moved());
+    expect(comment).toContain("Landed on main via slice-land.sh.");
+    expect(comment).not.toContain(STILL);
+    expect(comment).not.toContain("J175");
+  });
+
+  it("lists only the added ones when the slice moved boxes and added some", () => {
+    const comment = landWith(moved(["- [ ] J181 archives one", ""]));
+    expect(comment).toContain(STILL);
+    expect(comment).toContain("- [ ] J181 archives one");
+    expect(comment).not.toContain("J175");
+  });
+
+  it("lists a second copy of a box that is already there, once", () => {
+    const comment = landWith(
+      BASE.replace(
+        "## Settings\n",
+        "## Settings\n\n- [ ] J175 opens the inbox\n",
+      ),
+    );
+    expect(comment).toContain(STILL);
+    expect(comment.match(/J175 opens the inbox/g)).toHaveLength(1);
+    expect(comment).not.toContain("J175 marks one read");
+  });
+
+  it("does not list a box the slice ticked", () => {
+    const comment = landWith(
+      BASE.replace("- [ ] J175 marks one read", "- [x] J175 marks one read"),
+    );
+    expect(comment).not.toContain(STILL);
+  });
+});
+
 describe("slice-done.sh --hand-over", () => {
   let c: Consumer;
   beforeEach(() => {
