@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   mkdirSync,
   mkdtempSync,
@@ -16,6 +16,7 @@ import {
   SHIMS,
   agentFiles,
   hookBlock,
+  hookStep,
   hookVersion,
   init,
   shimText,
@@ -230,6 +231,214 @@ describe("the hook block", () => {
     expect(sourceHookWithSession(0)).toContain("STILL_AT_PROMPT");
     expect(sourceHookWithSession(1)).toContain("STILL_AT_PROMPT");
     expect(sourceHookWithSession(130)).toContain("STILL_AT_PROMPT");
+  });
+
+  /** bash's TMOUT logs the shell out whatever it is doing: no watch there. */
+  it("sets no idle watch under bash", () => {
+    expect(sourceHookWithSession(0)).not.toContain("closes by itself");
+  });
+});
+
+/**
+ * v5's idle watch, in a real interactive zsh on a pty: zle runs the TMOUT alarm
+ * only with a terminal, so piped input would test nothing. The block is the
+ * installed one with TMOUT=15 cut to 1, to keep this short. The shell's pid is
+ * the contract — the terminal closes the tab when it exits.
+ */
+describe("a landed slice's idle tab (hook v5, zsh)", () => {
+  type Tab = {
+    dir: string;
+    wt: string;
+    pid: number;
+    output: () => string;
+    type: (line: string) => void;
+    close: () => void;
+  };
+  let tab: Tab | undefined;
+  afterEach(() => {
+    tab?.close();
+    tab = undefined;
+  });
+
+  const alive = (pid: number) =>
+    spawnSync("kill", ["-0", String(pid)]).status === 0;
+  async function until(
+    what: string | (() => string),
+    ok: () => boolean,
+    ms = 10_000,
+  ) {
+    const end = Date.now() + ms;
+    while (!ok()) {
+      if (Date.now() > end)
+        throw new Error(
+          `timed out waiting for ${typeof what === "string" ? what : what()}`,
+        );
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  async function openTab(opts: { warp?: boolean; rcBefore?: string } = {}) {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), "azelf-hook-pty-")));
+    const wt = join(dir, "wt");
+    mkdirSync(join(wt, "scripts"), { recursive: true });
+    mkdirSync(join(dir, "zdot"));
+    // The assignment, not the comment that names it.
+    const setting = /^(\s+)TMOUT=15$/m;
+    const block = hookBlock();
+    expect(block).toMatch(setting);
+    writeFileSync(
+      join(dir, "zdot", ".zshrc"),
+      `${opts.rcBefore ?? ""}\n${block.replace(
+        setting,
+        "$1TMOUT=1",
+      )}\nprint -r -- $$ > ${dir}/pid\n`,
+    );
+    writeFileSync(
+      join(wt, "scripts", "slice-session.sh"),
+      "#!/bin/sh\necho SESSION RAN\nexit 0\n",
+      { mode: 0o755 },
+    );
+    writeFileSync(join(wt, ".slice-autostart"), "21\n");
+    // `cat |` because macOS `script` refuses a socket for stdin, and node's
+    // pipes are sockets. Its own group, so closing the tab takes all of it.
+    const script =
+      process.platform === "darwin"
+        ? "script -q /dev/null zsh -i"
+        : "script -qc 'zsh -i' /dev/null";
+    const child = spawn("sh", ["-c", `cat | ${script}`], {
+      cwd: wt,
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: {
+        ...process.env,
+        ZDOTDIR: join(dir, "zdot"),
+        TERM_PROGRAM: opts.warp ? "WarpTerminal" : "",
+        WARP_BOOTSTRAPPED: opts.warp ? "1" : "",
+        TMOUT: "",
+      },
+    });
+    let out = "";
+    child.stdout?.on("data", (d) => {
+      out += d;
+    });
+    const pidFile = join(dir, "pid");
+    await until(
+      () => `the shell — output so far:\n${out}`,
+      () => {
+        try {
+          return /^\d+$/.test(readFileSync(pidFile, "utf8").trim());
+        } catch {
+          return false;
+        }
+      },
+    );
+    const pid = Number(readFileSync(pidFile, "utf8").trim());
+    tab = {
+      dir,
+      wt,
+      pid,
+      output: () => out,
+      type: (line) => child.stdin?.write(`${line}\n`),
+      close: () => {
+        if (alive(pid)) spawnSync("kill", ["-9", String(pid)]);
+        try {
+          process.kill(-(child.pid as number), "SIGKILL");
+        } catch {}
+        rmSync(dir, { recursive: true, force: true });
+      },
+    };
+    // Under Warp the session starts at the first prompt, not in the rc file.
+    if (opts.warp) tab.type("true");
+    await until(
+      () => `the session — output so far:\n${out}`,
+      () => out.includes("SESSION RAN"),
+    );
+    return tab;
+  }
+
+  it("exits once the slice's directory is gone, and says so first", async () => {
+    const t = await openTab();
+    await until("the line", () => t.output().includes("closes by itself"));
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(alive(t.pid)).toBe(true);
+
+    rmSync(t.wt, { recursive: true, force: true });
+    await until("the shell to exit", () => !alive(t.pid));
+  }, 30_000);
+
+  it("under Warp, where the session ran from precmd, exits too", async () => {
+    const t = await openTab({ warp: true });
+    rmSync(t.wt, { recursive: true, force: true });
+    await until("the shell to exit", () => !alive(t.pid));
+  }, 30_000);
+
+  it("keeps a shell that cd'ed out of the slice", async () => {
+    const t = await openTab();
+    t.type(`cd ${t.dir}`);
+    await until("the cd", () => {
+      const r = spawnSync(
+        "lsof",
+        ["-a", "-p", String(t.pid), "-d", "cwd", "-Fn"],
+        {
+          encoding: "utf8",
+        },
+      );
+      return r.stdout.includes(`n${t.dir}\n`);
+    });
+    rmSync(t.wt, { recursive: true, force: true });
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(alive(t.pid)).toBe(true);
+  }, 30_000);
+
+  it("keeps a shell with a job running in it", async () => {
+    const t = await openTab();
+    t.type("sleep 60 &");
+    await until(
+      "the job",
+      () => spawnSync("pgrep", ["-P", String(t.pid), "sleep"]).status === 0,
+    );
+    rmSync(t.wt, { recursive: true, force: true });
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(alive(t.pid)).toBe(true);
+    spawnSync("pkill", ["-P", String(t.pid), "sleep"]);
+  }, 30_000);
+
+  it("is not set over a TMOUT the shell already has", async () => {
+    const t = await openTab({ rcBefore: "TMOUT=300" });
+    rmSync(t.wt, { recursive: true, force: true });
+    await new Promise((r) => setTimeout(r, 3000));
+    expect(alive(t.pid)).toBe(true);
+    expect(t.output()).not.toContain("closes by itself");
+  }, 30_000);
+});
+
+describe("init --hook against an installed block", () => {
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "azelf-hook-home-"));
+  });
+  afterEach(() => rmSync(home, { recursive: true, force: true }));
+
+  const v4 =
+    "# ─── slice autostart v4 ───\necho old\n# ─── end slice autostart ───\n";
+
+  it("names a v4 block as older, and --hook replaces it", () => {
+    writeFileSync(join(home, ".zshrc"), `x=1\n${v4}`);
+    const env = { SHELL: "/bin/zsh" };
+    const version = hookVersion(hookBlock());
+    expect(version).toBe("v5");
+
+    const told = hookStep({ installHook: false, home, env });
+    expect(told.line).toContain(
+      `carries an OLDER block — rerun with --hook to replace it with ${version}`,
+    );
+
+    const wrote = hookStep({ installHook: true, home, env });
+    expect(wrote.changed).toBe(true);
+    const rc = readFileSync(join(home, ".zshrc"), "utf8");
+    expect(rc).toContain("# ─── slice autostart v5");
+    expect(rc).not.toContain("echo old");
+    expect(rc.startsWith("x=1\n")).toBe(true);
   });
 });
 

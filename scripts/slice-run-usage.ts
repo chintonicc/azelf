@@ -49,7 +49,8 @@ export const USAGE = `usage: azelf run [flags] [ticket…]
 
 Without --auto a session stops when it is finished. Run ./scripts/slice-done.sh
 inside it to release it: the dispatcher then re-runs the gates, lands it, pushes
-the base branch, closes the ticket, and starts whatever that unblocked. ./scripts/slice-run.ts takes the same flags.`;
+the base branch, closes the ticket and the slice's tab, and starts whatever
+that unblocked. ./scripts/slice-run.ts takes the same flags.`;
 
 /** The flags that take the argument after them. */
 export const VALUE_FLAGS = new Set([

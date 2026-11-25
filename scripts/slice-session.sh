@@ -864,32 +864,39 @@ launch ${SLICE_WRAP_COMMAND[@]+"${SLICE_WRAP_COMMAND[@]}"} \
 
 # ─── Closing the tab ────────────────────────────────────────────────────
 #
-# Exit 86 means "this session is over and nobody was watching — close the tab".
-# The autostart hook (scripts/slice-autostart.sh, v3 and later) exits the shell
-# on it, which is what makes Warp close the tab; under tmux the pane's command
-# has ended anyway; under `manual` you get 86 at your own prompt and the line
-# above says why.
+# Exit 86 means "this session is over and nothing in this tab is left to read —
+# close it". The autostart hook (scripts/slice-autostart.sh, v3 and later) exits
+# the shell on it, which is what makes Warp close the tab; under tmux the pane's
+# command has ended anyway; under `manual` you get 86 at your own prompt and the
+# line above says why.
 #
-# TWO CONDITIONS, AND BOTH MATTER.
+# WHICH ENDINGS CLOSE THE TAB, AND IN WHICH MODE.
 #
-#  - `--self-land` only. That flag is set only under `--auto`, which is exactly
-#    where this script already tells the agent "nobody is watching this tab".
-#    WITHOUT it a human is the one reading the session: they read the agent's
-#    report in this tab and run ./scripts/slice-done.sh in this tab. Closing it
-#    would throw away the report before it had been read, which is the whole
-#    reason a non-auto run has a tab at all.
-#  - The agent exited CLEANLY, or its worktree was landed and removed out from
-#    under it. A crashed agent — no API key, a wrapper that blocked the
-#    network, an interrupted run — is the one case where the tab holds the only
-#    copy of what went wrong, and a tab that vanishes on failure turns a
-#    legible error into a slice that silently never started.
-#
-#    The second half exists because a finished Claude session commonly sits at
-#    its REPL and never exits at all, so under --auto the dispatcher runs
-#    `slice-land.sh --end-session`, which removes this worktree and THEN ends
-#    the agent. That agent exits on a signal, not 0 — but the directory is gone,
-#    and only a land that has already pushed removes it. A crash leaves the
+#  - The worktree was LANDED AND REMOVED, in every mode. A finished Claude
+#    session commonly sits at its REPL and never exits at all, so the
+#    dispatcher lands with `slice-land.sh --end-session`, which removes this
+#    worktree and THEN ends the agent — only an agent that declared done. That
+#    agent exits on a signal, not 0, but the directory is gone, and only a land
+#    that has already pushed (or a person) removes it. Without --auto the
+#    declaration was the person running slice-done.sh in this tab, so the
+#    report has been read; after the land the tab sits in a directory that no
+#    longer exists, with nothing in it to come back to. A crash leaves the
 #    directory in place, so a crash still keeps its tab.
+#  - The agent exited CLEANLY, under `--self-land` only. That flag is set only
+#    under `--auto`, where this script tells the agent "nobody is watching this
+#    tab". WITHOUT it a person who quits the agent wants the shell: the report
+#    is on screen and slice-done.sh may not have run yet.
+#  - The lock wait and the relaunch below, `--self-land` only: both end an agent
+#    so that a NEW session can take the slice, which happens only under --auto.
+#
+# A crashed agent — no API key, a wrapper that blocked the network, an
+# interrupted run — is the one case where the tab holds the only copy of what
+# went wrong, and a tab that vanishes on failure turns a legible error into a
+# slice that silently never started. No condition here closes it.
+#
+# The shell a session returned to before its land is past reaching from here:
+# this script has exited. Hook v5 watches for that under zsh (see
+# slice-autostart.sh).
 #
 # Why a status and not a marker file: the dispatcher deletes this worktree
 # seconds after it lands the branch, so anything written here is racing that
@@ -902,7 +909,7 @@ if $self_land && [[ $agent_status -eq 0 ]]; then
   echo "── session over — closing this tab ────────────────────"
   exit 86
 fi
-if $self_land && [[ ! -d "$worktree_path" ]]; then
+if [[ ! -d "$worktree_path" ]]; then
   echo "── worktree was landed and removed — closing this tab ─"
   exit 86
 fi

@@ -12,8 +12,8 @@ import {
 } from "./fixture";
 
 /**
- * The tab of a landed --auto slice closes because `slice-session.sh` exits 86,
- * and it only can once its agent has ended. A finished Claude session commonly
+ * The tab of a landed slice closes because `slice-session.sh` exits 86, and it
+ * only can once its agent has ended. A finished Claude session commonly
  * sits at its REPL, so `slice-land.sh --end-session` ends it — after removing
  * the worktree, which is what the session reads as "landed" (see "Closing the
  * tab" in slice-session.sh).
@@ -81,8 +81,11 @@ const agentRunning = () =>
   spawnSync("pgrep", ["-f", `sleep ${sleepArg}`]).status === 0;
 
 /** Up to the point a real slice reaches: live, committed, declared done. */
-async function sessionDeclaredDone(c: Consumer): Promise<Session> {
-  const s = startSession(c);
+async function sessionDeclaredDone(
+  c: Consumer,
+  flags = ["--self-land"],
+): Promise<Session> {
+  const s = startSession(c, flags);
   await until(
     `.slice-live — session output so far:\n${s.output()}`,
     () => existsSync(join(c.wt(40), ".slice-live")) && agentRunning(),
@@ -94,7 +97,7 @@ async function sessionDeclaredDone(c: Consumer): Promise<Session> {
   return s;
 }
 
-describe("a landed --auto slice's session ends, so its tab closes", () => {
+describe("a landed slice's session ends, so its tab closes", () => {
   it("--end-session removes the worktree, then ends the agent; the session exits 86", async () => {
     const c = setup();
     const s = await sessionDeclaredDone(c);
@@ -110,7 +113,36 @@ describe("a landed --auto slice's session ends, so its tab closes", () => {
     expect(s.output()).toContain("worktree was landed and removed");
   }, 60_000);
 
-  it("without --end-session the agent is left alone — a manual land never ends a session", async () => {
+  /**
+   * Without --auto the person ran slice-done.sh in that tab, so the report was
+   * read; the dispatcher lands with --end-session in every mode.
+   */
+  it("without --self-land too: --end-session ends the agent of a session that declared done; the session exits 86", async () => {
+    const c = setup();
+    const s = await sessionDeclaredDone(c, []);
+
+    const land = shResult(c.main, "./scripts/slice-land.sh 40 --end-session");
+    expect(land.ok, land.out).toBe(true);
+    expect(land.out).toContain("ended the agent in that tab");
+    expect(existsSync(c.wt(40))).toBe(false);
+
+    expect(await s.exited).toBe(86);
+    expect(s.output()).toContain("worktree was landed and removed");
+  }, 60_000);
+
+  /** A person who quits the agent in a manual run wants the shell. */
+  it("without --self-land a clean exit, worktree still there, keeps the tab", () => {
+    fx = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    const r = spawnSync("./scripts/slice-session.sh", ["40"], {
+      cwd: fx.main,
+      encoding: "utf8",
+    });
+    expect(r.status, `${r.stdout}${r.stderr}`).toBe(0);
+    expect(r.stdout).not.toContain("closing this tab");
+    expect(existsSync(fx.wt(40))).toBe(true);
+  }, 60_000);
+
+  it("without --end-session the agent is left alone — a land by hand never ends a session", async () => {
     const c = setup();
     const s = await sessionDeclaredDone(c);
 

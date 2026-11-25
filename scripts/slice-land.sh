@@ -132,8 +132,8 @@ fi
 # fast-forward makes `$base...$branch` empty by definition, and the cleanup
 # deletes the branch outright.
 #
-# WHY THIS EXISTS. Under --auto a finished session closes its own tab, and
-# everything the agent said in it goes with the tab. Most of that is
+# WHY THIS EXISTS. A landed session closes its own tab, and everything the
+# agent said in it goes with the tab. Most of that is
 # reconstructible from the diff; one part is not — the checks a human still has
 # to run, on a device, with two accounts, in a language nobody here reads. That
 # is real work handed back to you, and it was arriving as scrollback in a
@@ -540,10 +540,13 @@ fi
 #
 # ─── Ending it, under --end-session ────────────────────────────────────────
 #
-# The dispatcher passes --end-session under --auto only, where nobody is
-# reading that tab. Ending the agent lets slice-session.sh resume, see its
-# worktree gone, and exit 86 — which is what closes the tab (see "Closing the
-# tab" there). Without the flag, or by hand, the line above stays advice.
+# The dispatcher passes --end-session on every land it makes, with or without
+# --auto. Ending the agent lets slice-session.sh resume, see its worktree gone,
+# and exit 86 — which is what closes the tab (see "Closing the tab" there).
+# Without --auto the session declared done because the PERSON ran
+# slice-done.sh in it: they have read the report by then, and the agent keeps
+# its own history. A land by hand, without the flag, still ends nothing — the
+# line above stays advice to whoever is reading that tab.
 #
 # THREE CONDITIONS, CHECKED WHERE THIS IS CALLED, AND EACH ONE MATTERS:
 #  - After the removal SUCCEEDED, never before. The moment the agent dies the

@@ -5879,11 +5879,13 @@ function tryLand(t: Ticket, opts: { force?: boolean } = {}): boolean {
     const landingAdded = addedFiles(t.id);
     // The slice is rebased, so this is where its commits start.
     const landedFrom = baseHead();
-    // `--end-session` under --auto only: the session in that tab was launched
-    // with --self-land, nobody is reading it, and ending its agent after the
-    // removal is what lets the tab close. A manual land never ends a session.
+    // `--end-session` in every mode: ending its agent after the removal is
+    // what lets the tab close. slice-land.sh ends only a session that DECLARED
+    // done, and without --auto that declaration is the person running
+    // slice-done.sh — the report has been read by then, and the agent keeps
+    // its own history. A hand land (no flag) still ends nothing.
     const { ok, status } = run(
-      ["./scripts/slice-land.sh", t.id, ...(autoLand ? ["--end-session"] : [])],
+      ["./scripts/slice-land.sh", t.id, "--end-session"],
       {
         inherit: true,
         allowFail: true,
@@ -7525,10 +7527,10 @@ for (const file of readdirSync(commonDir())) {
   console.log(
     `\n  ${ref(id)}: its land was interrupted after the push — finishing it …`,
   );
-  const { ok, status } = run(
-    ["./scripts/slice-land.sh", id, ...(autoLand ? ["--end-session"] : [])],
-    { inherit: true, allowFail: true },
-  );
+  const { ok, status } = run(["./scripts/slice-land.sh", id, "--end-session"], {
+    inherit: true,
+    allowFail: true,
+  });
   // Exit 3 finished the land and then failed its afterLand: landed, and the
   // first round stops before landing anything else.
   const finished = ok || status === LAND_AFTER_FAILED;

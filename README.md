@@ -1055,8 +1055,8 @@ Still to check by hand — boxes this slice added and left unticked:
 - [ ] Settings → language → deutsch, repeat: the chip reads "für <group>"
 ```
 
-This exists because of what `--auto` costs you. A finished session closes its own
-tab, and everything the agent said in that tab goes with it. Most of that is
+This exists because a landed session closes its own tab, and everything the agent
+said in that tab goes with it. Most of that is
 recoverable from the diff — but not the checks a human still has to run, on a
 device, with two accounts, in a language nobody on the team reads. That is real
 work handed back to you, and it was arriving as scrollback in a window that closes.
@@ -1107,33 +1107,32 @@ start. That is what `azelf init --hook` installs, and why the launcher contract
 carries a `starts: "command" | "marker"` field — `slice-session.sh` parks its flags
 for the hook only when the launcher starts sessions that way.
 
-#### A finished `--auto` slice closes its own tab
+#### A landed slice closes its own tab
 
-Under `--auto` the tab is the one thing nobody is reading. azelf already tells that
-agent *"run ./scripts/slice-done.sh and then exit — nobody is watching this tab"*,
-and moments later the dispatcher lands the branch and deletes the worktree the tab
-is sitting in. So `slice-session.sh` exits **86** when the session ran under
-`--self-land` *and* the agent exited cleanly, and the autostart hook (v4 and later)
-ends the shell on that status, which is what the terminal closes the tab on. Under
-`tmux()` the pane's command has ended anyway; under `manual()` you get 86 at your
-own prompt with a line saying why.
+Once a slice has landed, its tab sits in a directory that no longer exists, and there
+is nothing left in it to read: under `--auto` nobody was reading it, and without
+`--auto` you read the report and ran `slice-done.sh` there before the land. So
+`slice-session.sh` exits **86** when its worktree was landed and removed, in either
+mode, and the autostart hook ends the shell on that status, which is what the terminal
+closes the tab on. Under `--auto` it also exits 86 when the agent exits cleanly, since
+the land follows on its own. Under `tmux()` the pane's command has ended anyway; under
+`manual()` you get 86 at your own prompt with a line saying why.
 
-**It is deliberately narrow, in both conditions.** Without `--auto` a human is the
-one reading that tab — you read the agent's report there and run `slice-done.sh`
-there — so the tab stays. And an agent that exited non-zero (no API key, a wrapper
-that blocked the network, an interrupted run) leaves the tab open too: that is the
-one case where the tab holds the only copy of what went wrong, and a tab that
-vanished on failure would turn a legible error into a slice that silently never
-started.
+**What keeps a tab open.** An agent that exited non-zero (no API key, a wrapper that
+blocked the network, an interrupted run) leaves its worktree in place, and its tab
+stays: that is the one case where the tab holds the only copy of what went wrong, and a
+tab that vanished on failure would turn a legible error into a slice that silently
+never started. Without `--auto`, quitting the agent yourself keeps the tab too, because
+the report is on screen and the slice may not be released yet. A parked land keeps its
+worktree, so it keeps its tab.
 
 **When the agent does not exit, and it often does not.** Exit 86 needs the agent
 process to end, and a Claude session that has finished its work commonly sits at
 its REPL instead. On one three-slice `--auto` wave, none of the three exited: all
 three ran `slice-done.sh`, all three landed, and all three tabs were still open an
-hour later, rooted in worktrees that had been deleted underneath them. So the tab
-closing is best-effort, and nothing depends on it: `slice-done.sh` clears the
-`.slice-live` marker itself, which is what frees the slot, and `slice-land.sh`
-names the still-running session by pid when it removes its directory —
+hour later, rooted in worktrees that had been deleted underneath them. So
+`slice-land.sh` names the still-running session by pid when it removes its
+directory —
 
 ```
 ✓ removed worktree /…/consumer-a-ticket-18
@@ -1143,19 +1142,38 @@ names the still-running session by pid when it removes its directory —
     Nothing is lost — close that tab.
 ```
 
-— and under `--auto` the dispatcher does not leave it there. It lands with
-`slice-land.sh --end-session`, which, once the worktree is removed, ends the agent
-of a session that declared itself done; `slice-session.sh` sees its worktree gone
-and exits 86, and the tab closes. Both guards hold: a land by hand never ends a
-session, and an agent that dies with its worktree still in place — a crash, not a
-land — keeps its tab.
+— and the dispatcher does not leave it there. It lands with `slice-land.sh
+--end-session`, in every mode, which, once the worktree is removed, ends the agent of
+a session that declared itself done; `slice-session.sh` sees its worktree gone and
+exits 86, and the tab closes. Without `--auto` the declaration is you running
+`slice-done.sh`, so the report has been read, and the agent keeps its own history.
+A land by hand never ends a session, and a session that never declared done is never
+ended: its tab may hold the only explanation.
+
+**When the session had already returned to the shell.** Quit the agent, run
+`slice-done.sh` at the prompt, and the session is over before the land: nothing is
+left running that the land could end. Under zsh the hook (`v5`) watches for this. After
+any status but 86 it says
+
+```
+── this tab closes by itself once the slice lands — cd out of it to keep it ─
+```
+
+and sets `TMOUT=15` with a `TRAPALRM` that exits the shell once it is idle at its
+prompt, still in the slice's directory, and that directory is gone. zsh runs the trap
+only while the shell waits for input, never during a command, and Warp lets it fire
+and closes the tab on the exit. A shell that `cd`ed elsewhere, or has a job running,
+is left alone, and the watch is not set at all if your shell already has a `TMOUT` or
+a `TRAPALRM` (some prompt themes keep a clock with them). bash gets none of this: its
+`TMOUT` logs the shell out whatever it is doing, and it has no idle trap.
 
 Under Warp the hook starts the session only once Warp has bootstrapped the shell,
 at the first prompt, instead of inside your rc file. An exit before the bootstrap
 is, to Warp, a shell that crashed while starting: it keeps the tab and says "Shell
 process exited prematurely". That was `v3`'s behaviour and the reason its tabs
-never closed; `v4` fixes it. If your rc file carries an older block, `azelf init`
-says so and `azelf init --hook` replaces it.
+never closed; `v4` fixes it, and `v5` adds the idle watch. If your rc file carries an
+older block, `azelf init` says so and `azelf init --hook` replaces it. A tab opened
+under an older block keeps its behaviour.
 
 #### A slice's tab is named after its ticket
 

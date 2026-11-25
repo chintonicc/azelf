@@ -1,4 +1,4 @@
-# ─── slice autostart v4 ───────────────────────────────────────────────────
+# ─── slice autostart v5 ───────────────────────────────────────────────────
 # Paste this block into the rc file of the shell your terminal starts —
 # ~/.zshrc, or ~/.bashrc / ~/.bash_profile. It is sh syntax on purpose and
 # runs unchanged under bash 3.2 and zsh; there is no fish version yet.
@@ -20,14 +20,27 @@
 # file before choosing the tab path and falls back to a Warp launch
 # configuration, which opens a new window instead.
 #
-# EXIT 86 CLOSES THIS TAB. slice-session.sh returns it only when the session ran
-# under --self-land (so --auto, where nobody is watching the tab) AND the agent
-# exited cleanly — or was ended by the land after its worktree was removed,
-# which is how a session that sat at its REPL closes. Every other status leaves
-# you at a prompt with the output still on screen — a session a human is
-# reading, and a session that crashed, are the two cases where the tab is the
-# point. `exit` here ends the shell the terminal started, which is what the
-# terminal closes the tab on.
+# EXIT 86 CLOSES THIS TAB. slice-session.sh returns it when the land removed
+# its worktree and then ended the agent (any mode — the agent had declared
+# done), or under --self-land (so --auto) when the agent exited cleanly. Every
+# other status leaves you at a prompt with the output still on screen — a
+# session a human is reading, and a session that crashed, are the two cases
+# where the tab is the point. `exit` here ends the shell the terminal started,
+# which is what the terminal closes the tab on.
+#
+# A LANDED SLICE CLOSES AN IDLE TAB TOO (v5, zsh only). A session that returned
+# before its land — the agent quit, the person ran slice-done.sh at this prompt
+# — leaves a shell nothing can reach. So after any status but 86 this sets an
+# idle watch: TMOUT=15 and a TRAPALRM that exits once this shell is still in
+# the slice's directory and that directory is gone, which only a land (or a
+# person) does. zsh runs the trap only while the shell is idle at its prompt,
+# never during a command; Warp lets it fire and closes the tab on the exit
+# (checked on a real tab, 2026-11-25). It does nothing in a shell that `cd`ed
+# out, or has a background job (zsh would refuse the exit, and the job is
+# someone's), and it is not set at all if the shell already has a TMOUT or a
+# TRAPALRM — prompt themes use them for a clock. It removes itself once the
+# directory is gone and the shell is elsewhere. bash gets none of this: its
+# TMOUT logs the shell out whatever it is doing, and it has no idle trap.
 #
 # UNDER WARP, NOT BEFORE ITS BOOTSTRAP (v4). Warp sets a shell up in two
 # steps: the rc file runs, then Warp feeds the shell its bootstrap script as
@@ -59,6 +72,18 @@ case "$-" in *i*)
     fi
   fi
   if [ -n "${_slice_n:-}" ]; then
+    _slice_gone_watch() {
+      [ -n "${_slice_watch_dir:-}" ] || return 0
+      [ -d "$_slice_watch_dir" ] && return 0
+      case "$PWD" in
+        "$_slice_watch_dir" | "$_slice_watch_dir"/*)
+          [ -z "$(jobs)" ] && exit 0
+          return 0
+          ;;
+      esac
+      TMOUT=0
+      unset _slice_watch_dir
+    }
     _slice_autostart_run() {
       [ -n "${_slice_n:-}" ] || return 0
       if [ -n "${ZSH_VERSION:-}" ] && [ "${TERM_PROGRAM:-}" = "WarpTerminal" ] &&
@@ -69,12 +94,21 @@ case "$-" in *i*)
       unset _slice_n
       "$_slice_dir/scripts/slice-session.sh" "$_slice_run_n"
       _slice_rc=$?
+      _slice_watch_dir=$_slice_dir
       unset _slice_run_n _slice_dir
       if [ "$_slice_rc" -eq 86 ]; then
         unset _slice_rc
         exit 0
       fi
       unset _slice_rc
+      if [ -n "${ZSH_VERSION:-}" ] && [ "${TMOUT:-0}" = 0 ] &&
+        ! typeset -f TRAPALRM >/dev/null 2>&1; then
+        eval 'TRAPALRM() { _slice_gone_watch; }'
+        TMOUT=15
+        echo "── this tab closes by itself once the slice lands — cd out of it to keep it ─"
+      else
+        unset _slice_watch_dir
+      fi
     }
     if [ -n "${ZSH_VERSION:-}" ] && [ "${TERM_PROGRAM:-}" = "WarpTerminal" ]; then
       eval 'precmd_functions+=(_slice_autostart_run)'

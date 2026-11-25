@@ -99,6 +99,36 @@ describe("the dispatcher", () => {
     expect(await d.exited).toBe(0);
     expect(git(c.main, "log", "-1", "--format=%s")).toBe("feat: a");
   });
+
+  /**
+   * Without --auto too: the person ran slice-done.sh, so the land ends the agent
+   * still sitting at its REPL and the tab can close. The agent here is one
+   * `sleep` of a duration unique to the test, the session's only child.
+   */
+  it("ends the agent of a session that declared done, without --auto too", async () => {
+    c = makeConsumer({ worktrees: [40], remote: true, agent: ["true"] });
+    commitIn(c.wt(40), "a.txt", "a\n", "feat: a");
+    const nap = String(4000 + Math.floor(Math.random() * 5000));
+    const script = join(c.root, "slice-session.sh");
+    writeFileSync(script, `sleep ${nap}\n`);
+    const session = spawn("bash", [script, "40"], {
+      cwd: c.root,
+      stdio: "ignore",
+    });
+    const gone = new Promise((r) => session.on("close", r));
+    writeFileSync(join(c.wt(40), ".slice-live"), `${session.pid}\n`);
+    sh(c.wt(40), "./scripts/slice-done.sh");
+
+    const r = runDispatcher(c, ["--once", "-y", "--no-review", "40"]);
+
+    expect(r.out).toContain("landing #40");
+    expect(r.out).toContain(
+      "ended the agent in that tab — the session exits and the tab closes.",
+    );
+    expect(r.out).not.toContain("Nothing is lost — close that tab.");
+    await gone;
+    expect(spawnSync("pgrep", ["-f", `sleep ${nap}`]).status).not.toBe(0);
+  });
 });
 
 /**
