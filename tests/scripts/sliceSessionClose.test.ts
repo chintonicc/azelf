@@ -602,6 +602,7 @@ describe("the start prompt and the parent spec", () => {
   function promptOf(opts: {
     parent: boolean;
     startPrompt?: string;
+    configExtra?: string;
     relaunch?: boolean;
   }): string {
     fx = makeConsumer({
@@ -609,6 +610,7 @@ describe("the start prompt and the parent spec", () => {
       remote: true,
       agent: ["bash", "-c", 'printf "%s" "$0" > ../prompt.txt'],
       startPrompt: opts.startPrompt,
+      configExtra: opts.configExtra,
     });
     fx.setTicket("40", {
       body: opts.parent ? "Build.\n\n## Parent\n\n#17\n" : "Build.",
@@ -659,6 +661,34 @@ describe("the start prompt and the parent spec", () => {
     expect(prompt.startsWith("Ticket #40. Go. When it is finished")).toBe(true);
     expect(prompt).not.toContain("hangs under no spec");
     expect(prompt).not.toContain("{parent}");
+  }, 60_000);
+
+  /** consumer-b's German parent sentence, moved out of startPrompt. */
+  const OWN = 'startPromptParent: "Lies .slice-parent.md für #{n} zuerst.",';
+
+  it("expands {parent} to startPromptParent, with {n}, when there is a parent", () => {
+    const prompt = promptOf({
+      parent: true,
+      startPrompt: "Ticket #{n}. {parent} Go.",
+      configExtra: OWN,
+    });
+    expect(
+      prompt.startsWith(
+        "Ticket #40. Lies .slice-parent.md für #40 zuerst. Go. When it is finished",
+      ),
+    ).toBe(true);
+    expect(prompt).not.toContain(SPEC);
+  }, 60_000);
+
+  it("says nothing of startPromptParent without a parent, and appends nothing", () => {
+    const prompt = promptOf({
+      parent: false,
+      startPrompt: "Ticket #{n}. {parent} Go.",
+      configExtra: OWN,
+    });
+    expect(prompt.startsWith("Ticket #40. Go. When it is finished")).toBe(true);
+    expect(prompt).not.toContain("Lies");
+    expect(prompt).not.toContain("hangs under no spec");
   }, 60_000);
 
   it("keeps the relaunch sentence after it", () => {

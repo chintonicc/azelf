@@ -733,8 +733,15 @@ start_prompt="${SLICE_START_PROMPT//\{n\}/$ticket}"
 # nothing more, because it already says what it wants to. Before the relaunch
 # and self-land sentences: those are about this session, this is about the
 # ticket.
+#
+# The sentence is the config's startPromptParent when it has one, so a
+# consumer can say it in its own words and language; consumer-b wrote its
+# German one into startPrompt itself, and a ticket without a parent was told
+# both to read the file and that there was none. Empty from a bridge that
+# predates the key, or when it is left out: then it is azelf's sentence.
 if [[ -f "$worktree_path/.slice-parent.md" ]]; then
-  parent_sentence="The spec this ticket hangs under is in .slice-parent.md in this worktree — read the ticket first; where the two disagree, the parent decides."
+  parent_sentence="${SLICE_START_PROMPT_PARENT:-The spec this ticket hangs under is in .slice-parent.md in this worktree — read the ticket first; where the two disagree, the parent decides.}"
+  parent_sentence="${parent_sentence//\{n\}/$ticket}"
 else
   parent_sentence=""
 fi

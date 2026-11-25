@@ -7425,6 +7425,26 @@ if (noCi && ciGates.length) {
 console.log(
   `  config: ${shownConfigPath}, read once at start — an edit reaches this run's gates when the run is started again.`,
 );
+// A prompt that names the parent file itself, instead of through {parent}, is
+// sent as it is to a ticket with no parent, and slice-session.sh appends that
+// there is none: consumer-b's German prompt told a session both. A warning and
+// not a refusal, because it is wording, and a refusal would stop a running
+// consumer at its next restart.
+if (
+  config.startPrompt.includes(".slice-parent.md") &&
+  !config.startPrompt.includes("{parent}")
+) {
+  console.log(
+    "  ⚠ startPrompt names .slice-parent.md but has no {parent}: a ticket without a parent spec is told both to read it and that it is not there. Move that sentence into startPromptParent and put {parent} where it was.",
+  );
+} else if (
+  config.startPromptParent !== undefined &&
+  !config.startPrompt.includes("{parent}")
+) {
+  console.log(
+    "  ⚠ startPromptParent is set but startPrompt has no {parent}, so it is never used — put {parent} where the parent spec should be mentioned.",
+  );
+}
 // origin's repository on GitHub, for afterLandCi. The URL as configured, as
 // `gh -R` takes it; null when origin is not on GitHub, and nothing is read.
 const ciRepo = config.afterLandCi

@@ -621,6 +621,7 @@ export default {
 | `agent` | `Agent?` | which agent runs sessions and reviews diffs (default `claude()`) |
 | `wrapCommand` | `string[]?` | command the agent runs inside; `[]` by default |
 | `startPrompt` | `string` | opening instruction for a session; `{n}` is the ticket, `{parent}` the sentence naming `.slice-parent.md` when the worktree has one and nothing otherwise. A prompt without `{parent}` is told the no-spec case: see [Where tickets come from](#where-tickets-come-from) |
+| `startPromptParent` | `string?` | what `{parent}` becomes when the worktree has a `.slice-parent.md`, in your own words or language; `{n}` is the ticket. Left out, azelf's English sentence; empty is refused |
 | `tabTitle` | `function \| false?` | a slice tab's title; `#17 › #42 <title>` by default |
 
 **`testOnBase`** is for tickets that ask for a failing test first. The reviewer has
@@ -1333,6 +1334,22 @@ left as written when there is a parent, and gets one sentence appended when ther
 is none: "This ticket hangs under no spec: there is no .slice-parent.md in this
 worktree, and nothing takes precedence over .slice-ticket.md." The relaunch and
 self-land sentences come after it either way.
+
+**The parent sentence in your own words.** `{parent}`'s sentence is English and fixed
+unless you set `startPromptParent`. Set it when you want to say more than azelf does
+("read it, then the sources it names") or say it in your prompt's language:
+
+```ts
+startPrompt: "Lies .slice-ticket.md — dein Ticket #{n}. {parent} Dann CLAUDE.md.",
+startPromptParent:
+  "Das Rahmen-Ticket steht in .slice-parent.md: lies es danach; es geht diesem Prompt vor.",
+```
+
+Do not name `.slice-parent.md` in `startPrompt` itself. A ticket without a parent
+gets that prompt as written and is then told there is no such file, so it receives
+both. consumer-b's prompt did that. The run's preamble warns when `startPrompt`
+names the file without `{parent}`, and when `startPromptParent` is set but
+`startPrompt` has no `{parent}` to put it in.
 
 **A ticket's comments are part of it.** A session cannot fetch issues, so `.slice-ticket.md`
 ends with the ticket's comments, oldest first, and the spec review reads the same text. A new

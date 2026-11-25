@@ -119,3 +119,30 @@ void slug;`);
     expect(r.out).toContain("@chintonicc/azelf/scripts/slice-gates");
   });
 });
+
+/** What `{parent}` becomes, in the consumer's words. */
+describe("startPromptParent", () => {
+  it("crosses the bridge, and is empty when left out", () => {
+    writeConfig(NAMED);
+    expect(bridge().out).toContain("SLICE_START_PROMPT_PARENT=''");
+
+    writeConfig(
+      NAMED,
+      '"#{n} {parent}", startPromptParent: "Lies .slice-parent.md zuerst."',
+    );
+    const r = bridge();
+    expect(r.code).toBe(0);
+    expect(r.out).toContain(
+      "SLICE_START_PROMPT_PARENT='Lies .slice-parent.md zuerst.'",
+    );
+  });
+
+  it("is refused when empty: {parent} would drop a parent that is there", () => {
+    writeConfig(NAMED, '"#{n} {parent}", startPromptParent: " "');
+    const r = bridge();
+    expect(r.code).not.toBe(0);
+    expect(r.out).toContain(
+      "slice.config.ts: startPromptParent must be a sentence, or left out",
+    );
+  });
+});

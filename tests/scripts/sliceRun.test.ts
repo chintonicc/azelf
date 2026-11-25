@@ -4322,6 +4322,45 @@ describe("azelf run --no-ci", () => {
 });
 
 /**
+ * consumer-b's startPrompt named .slice-parent.md itself, so a ticket with no
+ * parent was told to read it and, appended, that it was not there.
+ */
+describe("a startPrompt that names the parent file", () => {
+  const preamble = (startPrompt: string, configExtra = "") => {
+    c = makeConsumer({
+      worktrees: [40],
+      gate: ["true"],
+      startPrompt,
+      configExtra,
+    });
+    return runDispatcher(c, ["-y", "--once", "40"]).out;
+  };
+  const NAMES = "⚠ startPrompt names .slice-parent.md but has no {parent}";
+  const UNUSED = "⚠ startPromptParent is set but startPrompt has no {parent}";
+
+  it("is warned about when it has no {parent}", () => {
+    const out = preamble("Lies .slice-parent.md, dann #{n}.");
+    expect(out).toContain(
+      `  ${NAMES}: a ticket without a parent spec is told both to read it and that it is not there. Move that sentence into startPromptParent and put {parent} where it was.`,
+    );
+  });
+
+  it("is not warned about when it uses {parent}", () => {
+    const out = preamble(
+      "#{n}. {parent}",
+      'startPromptParent: "Lies .slice-parent.md.",',
+    );
+    expect(out).not.toContain(NAMES);
+    expect(out).not.toContain(UNUSED);
+  });
+
+  it("warns that startPromptParent goes unused without {parent}", () => {
+    const out = preamble("#{n}.", 'startPromptParent: "Lies es.",');
+    expect(out).toContain(UNUSED);
+  });
+});
+
+/**
  * The config is read once, at start. On consumer-b `ciRuns` was commented out
  * of a running dispatcher's config to turn CI off, and the edit did nothing
  * until a restart, with nothing to say so.

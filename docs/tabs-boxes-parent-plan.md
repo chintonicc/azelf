@@ -220,23 +220,29 @@ heading. Line numbers are as of `8d1cb09`.
 
 ## Phase 3 — `{parent}` in the consumer's words, and a warning when it is missing
 
-- [ ] 3a. `slice-config.ts`: `startPromptParent?: string` next to `startPrompt` (`:373`). Its doc
+- [x] 3a. `slice-config.ts`: `startPromptParent?: string` next to `startPrompt` (`:373`). Its doc
   comment says when it is used and that the default is the English sentence. An empty string is
   refused, because `{parent}` would then disappear for tickets that do have a parent. The bridge
   (`:1032`) writes `SLICE_START_PROMPT_PARENT`, using the default when the key is not set.
-- [ ] 3b. `slice-session.sh:736-740`: `parent_sentence` comes from `SLICE_START_PROMPT_PARENT`, and
+  **As built:** when the key is left out, the bridge writes an empty value and `slice-session.sh`
+  supplies the default (`${SLICE_START_PROMPT_PARENT:-…}`). The sentence lives in one place, and a
+  bridge that predates the key gets the same result. `{n}` is substituted in the consumer's
+  sentence too.
+- [x] 3b. `slice-session.sh:736-740`: `parent_sentence` comes from `SLICE_START_PROMPT_PARENT`, and
   falls back to the current sentence if an older bridge lacks it (as `SLICE_AGENT_SESSION_CMD` is
   guarded at `:817`).
-- [ ] 3c. Preamble warning (`slice-run.ts`, beside `:7424`): `startPrompt` contains
-  `.slice-parent.md` but not `{parent}`.
-- [ ] 3d. Tests:
+- [x] 3c. Preamble warning (`slice-run.ts`, beside `:7424`): `startPrompt` contains
+  `.slice-parent.md` but not `{parent}`. **Also built:** a second warning when
+  `startPromptParent` is set but `startPrompt` has no `{parent}`, because the key would then never
+  be used.
+- [x] 3d. Tests:
   - `sliceSessionClose.test.ts`, next to the `{parent}` tests (`:599`): a config with
     `startPromptParent` puts its text at `{parent}` when the file exists. Without the file, nothing
     is added and no English sentence is appended.
   - `sliceConfigLoad.test.ts`: an empty `startPromptParent` is refused.
   - `sliceRun.test.ts`: the preamble warns about a prompt that names the file without `{parent}`,
     and says nothing when the prompt uses the placeholder.
-- [ ] 3e. README configuration table and the `startPrompt` section: the new key, with a
+- [x] 3e. README configuration table and the `startPrompt` section: the new key, with a
   non-English example.
 
 ## Phase 4 — `azelf run --parent <id>`: one wave, re-read every round

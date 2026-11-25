@@ -369,8 +369,24 @@ export type SliceConfig = {
    * anyway: slice-session.sh appends a sentence saying there is no
    * `.slice-parent.md`, because a prompt written for the usual case ("read
    * the parent spec") sent sessions looking for a file that was not there.
+   * A prompt that names `.slice-parent.md` itself instead of using `{parent}`
+   * says both things to a ticket without a parent; the run warns about it.
    */
   startPrompt: string;
+  /**
+   * What `{parent}` becomes when the worktree has a `.slice-parent.md`: your
+   * own words, in your own language ("Das Rahmen-Ticket steht in
+   * .slice-parent.md — lies es danach …"). `{n}` is the ticket here too.
+   * Without a parent spec `{parent}` still becomes nothing, so the prompt
+   * never says to read a file that is not there.
+   *
+   * Left out, it is azelf's sentence: "The spec this ticket hangs under is in
+   * .slice-parent.md in this worktree — read the ticket first; where the two
+   * disagree, the parent decides." An empty string is refused, because it
+   * would drop the parent from the prompt of every ticket that has one. Used
+   * only where `startPrompt` has `{parent}`.
+   */
+  startPromptParent?: string;
   /**
    * What a slice's terminal tab is called, or `false` to leave it alone.
    *
@@ -512,6 +528,14 @@ function validate(c: SliceConfig): SliceConfig {
     bad("branchPattern must contain {n} exactly once, or it cannot round-trip");
   }
   if (!c.readyLabel) bad("readyLabel must be a non-empty label name");
+  if (
+    c.startPromptParent !== undefined &&
+    (typeof c.startPromptParent !== "string" || !c.startPromptParent.trim())
+  ) {
+    bad(
+      "startPromptParent must be a sentence, or left out — empty, {parent} would say nothing for a ticket that has a parent spec",
+    );
+  }
   if (c.exclusiveLockLabel !== undefined) {
     if (typeof c.exclusiveLockLabel !== "string" || !c.exclusiveLockLabel) {
       bad("exclusiveLockLabel must be a non-empty label name, or left out");
@@ -1030,6 +1054,8 @@ export function shellAssignments(): string {
     `SLICE_WORKTREE_DIR=${shq(config.worktreeDir)}`,
     `SLICE_READY_LABEL=${shq(config.readyLabel)}`,
     `SLICE_START_PROMPT=${shq(config.startPrompt)}`,
+    // Empty when left out: slice-session.sh holds the default sentence.
+    `SLICE_START_PROMPT_PARENT=${shq(config.startPromptParent ?? "")}`,
     // The tracker's data, not its methods — those are behind --tracker.
     `SLICE_TRACKER_NAME=${shq(tracker.name)}`,
     `SLICE_TICKET_ID_PATTERN=${shq(tracker.idPattern)}`,
