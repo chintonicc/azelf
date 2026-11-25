@@ -1,6 +1,6 @@
 # A landed slice closes its tab in every mode, a moved box is not a new one, the parent in the consumer's words, and a run over one parent
 
-**Status:** proposed, nothing landed
+**Status:** all four phases landed 2026-11-25: Phase 1 a2f64d7, Phase 2 32dde2d, Phase 3 6048cd7, Phase 4 e6af33f. Neither consumer is updated yet; see "What the consumer does itself".
 **Written:** 2026-11-25
 **Companion:** the open entries of both friction logs:
 - consumer-a, 2026-11-24: "a slice landed through slice-done.sh leaves its tab (and sometimes its
@@ -144,7 +144,7 @@ heading. Line numbers are as of `8d1cb09`.
 - **`--label` is not built.** `--parent` covers the case, and the tracker already models parents.
   A wave label would be a second way to say the same thing.
 
-## Phase 1 — a landed slice closes its tab in every mode
+## Phase 1 — a landed slice closes its tab in every mode (a2f64d7)
 
 - [x] 1a. `slice-run.ts`: pass `--end-session` at both land calls (`:5886` in `tryLand`, `:7529`
   when finishing an interrupted land), whatever the mode. Rewrite the comment above `:5882`:
@@ -199,7 +199,7 @@ heading. Line numbers are as of `8d1cb09`.
   **As built:** the command doc had no such line. The `azelf run --help` text for manual mode
   now says that the land closes the slice's tab.
 
-## Phase 2 — a moved box is not one this slice added
+## Phase 2 — a moved box is not one this slice added (32dde2d)
 
 - [x] 2a. `slice-land.sh:153-160`: read the `-` unticked boxes of the same `base...branch` diff as
   well. Each `+` box is checked against the `-` boxes, with whitespace trimmed on both sides, and
@@ -218,7 +218,7 @@ heading. Line numbers are as of `8d1cb09`.
   **As built:** the two tests with a move fail on the old script and pass on the new one. The
   README section "A landed ticket carries its leftover checks" now explains moved boxes.
 
-## Phase 3 — `{parent}` in the consumer's words, and a warning when it is missing
+## Phase 3 — `{parent}` in the consumer's words, and a warning when it is missing (6048cd7)
 
 - [x] 3a. `slice-config.ts`: `startPromptParent?: string` next to `startPrompt` (`:373`). Its doc
   comment says when it is used and that the default is the English sentence. An empty string is
@@ -245,7 +245,7 @@ heading. Line numbers are as of `8d1cb09`.
 - [x] 3e. README configuration table and the `startPrompt` section: the new key, with a
   non-English example.
 
-## Phase 4 — `azelf run --parent <id>`: one wave, re-read every round
+## Phase 4 — `azelf run --parent <id>`: one wave, re-read every round (e6af33f)
 
 - [x] 4a. `slice-run-usage.ts`: `--parent` in `VALUE_FLAGS` and `USAGE`: "run the ready tickets
   under one parent (its sub-issues, or a ## Parent section naming it); children labelled later
